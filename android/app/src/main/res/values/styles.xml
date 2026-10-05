@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launch theme: neon blue-purple branded splash as windowBackground.
+         MainActivity switches back to the plain NoActionBar theme in onCreate,
+         so this is only visible during cold start while the WebView boots. -->
+    <style name="RuhMix.Splash" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_bg</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Branded splash: neon blue-purple gradient + launcher artwork centered.
+     Shown via the activity theme's windowBackground during launch, while the
+     WebView initializes. No extra activity, no delay. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="135"
+                android:startColor="#2A1659"
+                android:centerColor="#1A1240"
+                android:endColor="#0F0B24" />
+        </shape>
+    </item>
+    <item android:gravity="center">
+        <bitmap
+            android:src="@mipmap/ic_launcher"
+            android:gravity="center" />
+    </item>
+</layer-list>

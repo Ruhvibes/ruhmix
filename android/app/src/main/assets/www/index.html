@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>RuhMix — Professional Music & Remix Studio</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- ======================= header ======================= -->
+<header id="topbar">
+  <img src="logo.png" alt="RuhMix" id="app-logo">
+  <div class="tb-titles">
+    <div class="tb-name">RuhMix</div>
+    <div class="tb-sub" data-i18n="tagline">प्रोफेशनल म्यूज़िक एवं रीमिक्स स्टूडियो</div>
+  </div>
+  <div class="tb-by" data-i18n="by">By Hasnain Khan</div>
+</header>
+
+<!-- recovery banner -->
+<div id="recovery-banner" style="display:none">
+  <span id="recovery-text"></span>
+  <div>
+    <button class="btn small primary" id="recovery-yes">रिकवर करें</button>
+    <button class="btn small ghost" id="recovery-no">छोड़ें</button>
+  </div>
+</div>
+
+<main id="screens">
+
+<!-- ======================= 1. HOME ======================= -->
+<section class="screen active" id="screen-home">
+  <div class="hero">
+    <img src="logo.png" alt="RuhMix" class="hero-logo">
+    <h1>RuhMix</h1>
+    <p class="muted" data-i18n="tagline">प्रोफेशनल म्यूज़िक एवं रीमिक्स स्टूडियो</p>
+    <p class="byline" data-i18n="by">By Hasnain Khan</p>
+    <button class="btn primary big" id="home-new">＋ <span data-i18n="new_project">नया प्रोजेक्ट</span></button>
+    <input id="home-search" class="textin" data-i18n-ph="search" placeholder="खोजें…">
+  </div>
+  <div class="card-grid" id="home-grid"></div>
+  <h3 data-i18n="recent">हाल के प्रोजेक्ट</h3>
+  <div id="home-recent"></div>
+  <div class="foot-note">RuhMix 1.0 • <span data-i18n="by">By Hasnain Khan</span></div>
+</section>
+
+<!-- ======================= 2. IMPORT ======================= -->
+<section class="screen" id="screen-import">
+  <h2 data-i18n="import_title">ऑडियो इम्पोर्ट</h2>
+  <div id="import-hint" class="hint" style="display:none"></div>
+  <p class="muted">MP3 • WAV • M4A • FLAC — Web Audio से डिकोड होता है</p>
+  <button class="btn primary big block" id="btn-pick">📁 <span data-i18n="pick_audio">ऑडियो चुनें</span></button>
+  <input type="file" id="file-input" accept="audio/*" multiple hidden>
+  <h3>फ़ाइलें</h3>
+  <div id="import-list"></div>
+</section>
+
+<!-- ======================= 3. EDITOR ======================= -->
+<section class="screen" id="screen-editor">
+  <h2 data-i18n="editor_title">ऑडियो एडिटर</h2>
+  <div id="ed-meta" class="muted"></div>
+  <canvas id="ed-wave"></canvas>
+  <div class="row">
+    <label>Zoom <input type="range" id="ed-zoom" min="1" max="32" step="1" value="1"></label>
+    <label>Scroll <input type="range" id="ed-scroll" min="0" max="100" value="0"></label>
+  </div>
+  <div class="row transport">
+    <button class="btn primary" id="ed-play">▶ <span data-i18n="play">चलाएं</span></button>
+    <button class="btn" id="ed-stop">■ <span data-i18n="stop">बंद करें</span></button>
+    <span id="ed-time" class="mono">0:00 / 0:00</span>
+  </div>
+  <div class="panel">
+    <h4>चयन (सेकंड में)</h4>
+    <div class="row">
+      <label>शुरू <input type="number" id="ed-sel-a" class="numin" value="0" step="0.1" min="0"></label>
+      <label>अंत <input type="number" id="ed-sel-b" class="numin" value="0" step="0.1" min="0"></label>
+    </div>
+    <div class="btn-row">
+      <button class="btn small" id="ed-trim">Trim</button>
+      <button class="btn small" id="ed-cut">Cut</button>
+      <button class="btn small" id="ed-split">Split</button>
+      <button class="btn small" id="ed-copy">Copy</button>
+      <button class="btn small" id="ed-paste">Paste</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn small" id="ed-fadein">Fade In</button>
+      <button class="btn small" id="ed-fadeout">Fade Out</button>
+      <button class="btn small" id="ed-gain-up">Gain +</button>
+      <button class="btn small" id="ed-gain-dn">Gain −</button>
+      <button class="btn small" id="ed-reverse">Reverse</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn small" id="ed-undo">↩ Undo</button>
+      <button class="btn small" id="ed-redo">↪ Redo</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h4>प्लेबैक</h4>
+    <div class="row"><label>Volume <input type="range" id="ed-vol" min="0" max="120" value="90"></label><span id="ed-vol-v">90%</span></div>
+    <div class="row"><label>Pan <input type="range" id="ed-pan" min="-100" max="100" value="0"></label></div>
+    <div class="row"><label>Speed <input type="range" id="ed-speed" min="50" max="200" value="100"></label><span id="ed-speed-v">1.00×</span></div>
+    <div class="honest">Speed बदलने से pitch भी बदलती है — tempo और pitch linked हैं (v1)।</div>
+    <button class="btn small tog" id="ed-loop">🔁 Loop</button>
+  </div>
+  <div class="panel">
+    <h4>Markers</h4>
+    <button class="btn small" id="ed-marker-add">＋ Marker जोड़ें (वर्तमान स्थिति)</button>
+    <div id="ed-markers"></div>
+  </div>
+</section>
+
+<!-- ======================= 4. AUTO REMIX ======================= -->
+<section class="screen" id="screen-remix">
+  <h2 data-i18n="auto_remix">ऑटो रीमिक्स</h2>
+  <p class="muted">BPM अपने आप पहचाना जाता है • 11 स्टाइल प्रीसेट (DSP चेन)</p>
+  <div class="card-grid" id="remix-grid"></div>
+  <div id="remix-custom" class="panel" style="display:none">
+    <h4>Custom</h4>
+    <div class="row"><label>Tempo <input type="range" id="c-tempo" min="70" max="130" value="100"></label></div>
+    <div class="row"><label>Reverb <input type="range" id="c-reverb" min="0" max="100" value="30"></label></div>
+    <div class="row"><label>Echo <input type="range" id="c-echo" min="0" max="100" value="25"></label></div>
+    <div class="row"><label>Bass <input type="range" id="c-bass" min="0" max="100" value="40"></label></div>
+  </div>
+  <div id="remix-desc" class="panel"></div>
+  <div class="btn-row">
+    <button class="btn primary" id="remix-generate">⚡ Generate</button>
+    <button class="btn" id="remix-preview">▶ Preview</button>
+  </div>
+  <div id="remix-status" class="status"></div>
+</section>
+
+<!-- ======================= 5. SLOWED+REVERB ======================= -->
+<section class="screen" id="screen-slowed">
+  <h2 data-i18n="slowed">स्लोड+रिवर्ब</h2>
+  <p class="muted">Slowed + Reverb Studio</p>
+  <div class="honest">Speed कम करने से pitch भी नीचे जाती है — tempo और pitch linked हैं (Web Audio v1)।</div>
+  <div class="card-grid" id="slowed-presets"></div>
+  <div class="panel">
+    <div class="row"><label>Speed <input type="range" id="sl-speed" min="0.5" max="1" step="0.01" value="0.8"></label><span id="sl-speed-v">0.80×</span></div>
+    <div class="row"><label>Room <select id="sl-room"><option value="studio">Studio</option><option value="room">Room</option><option value="hall">Hall</option><option value="church" selected>Church</option></select></label></div>
+    <div class="row"><label>Reverb <input type="range" id="sl-wet" min="0" max="1" step="0.01" value="0.55"></label><span id="sl-wet-v">55%</span></div>
+    <div class="row"><label>Echo <input type="range" id="sl-echo" min="0" max="1" step="0.01" value="0.25"></label><span id="sl-echo-v">25%</span></div>
+    <div class="row"><label>Bass Boost <input type="range" id="sl-bass" min="-6" max="10" step="1" value="4"></label><span id="sl-bass-v">+4 dB</span></div>
+    <div class="row"><label>Stereo Width <input type="range" id="sl-width" min="0" max="2" step="0.1" value="1.2"></label><span id="sl-width-v">1.2</span></div>
+  </div>
+  <button class="btn primary big block" id="sl-play">▶ Preview</button>
+</section>
+
+<!-- ======================= 6. STEMS ======================= -->
+<section class="screen" id="screen-stems">
+  <h2 data-i18n="stems">स्टेम सेपरेटर</h2>
+  <p class="muted">DSP-आधारित सेपरेशन • <span class="beta">BETA — experimental</span></p>
+  <div class="honest">यहां कोई neural network मॉडल नहीं है — सिर्फ क्लासिकल DSP तकनीकें हैं। नतीजों में bleed हो सकता है।</div>
+  <div id="stems-grid"></div>
+  <div id="stems-status" class="status"></div>
+  <div id="stems-results"></div>
+</section>
+
+<!-- ======================= 7. MIXER ======================= -->
+<section class="screen" id="screen-mixer">
+  <h2 data-i18n="nav_mixer">मिक्सर</h2>
+  <p class="muted">5 ट्रैक • Volume / Pan / Mute / Solo</p>
+  <div class="btn-row">
+    <button class="btn primary" id="mx-play-all">▶ सभी चलाएं</button>
+    <button class="btn" id="mx-stop-all">■ रोकें</button>
+  </div>
+  <div id="mixer-tracks"></div>
+</section>
+
+<!-- ======================= 8. FX RACK ======================= -->
+<section class="screen" id="screen-fx">
+  <h2 data-i18n="equalizer">इक्वलाइज़र</h2>
+  <p class="muted">FX Rack — सभी बदलाव live preview के साथ</p>
+  <div class="panel">
+    <h4>3-Band EQ <select id="fx-eqpreset"><option value="">Preset…</option></select></h4>
+    <div class="row"><label>Bass <input type="range" id="fx-bass" min="-15" max="15" value="0"></label><span id="fx-bass-v">0 dB</span></div>
+    <div class="row"><label>Mid <input type="range" id="fx-mid" min="-15" max="15" value="0"></label><span id="fx-mid-v">0 dB</span></div>
+    <div class="row"><label>Treble <input type="range" id="fx-treble" min="-15" max="15" value="0"></label><span id="fx-treble-v">0 dB</span></div>
+  </div>
+  <div class="panel">
+    <h4>10-Band EQ</h4>
+    <div id="fx-eq10" class="eq10"></div>
+  </div>
+  <div class="panel">
+    <h4>Filter & Drive</h4>
+    <div class="row"><label>Lowpass <input type="range" id="fx-filter" min="100" max="19000" value="19000"></label><span id="fx-filter-v">19.0 kHz</span></div>
+    <div class="row"><label>Drive <input type="range" id="fx-drive" min="0" max="100" value="0"></label><span id="fx-drive-v">0%</span></div>
+  </div>
+  <div class="panel">
+    <h4>Chorus <label class="sw"><input type="checkbox" id="fx-chorus-on"><span>चालू</span></label></h4>
+    <div class="row"><label>Rate <input type="range" id="fx-chorus-rate" min="1" max="80" value="12"></label></div>
+    <div class="row"><label>Depth <input type="range" id="fx-chorus-depth" min="0" max="1200" value="400"></label></div>
+  </div>
+  <div class="panel">
+    <h4>Echo / Delay <label class="sw"><input type="checkbox" id="fx-echo-on"><span>चालू</span></label></h4>
+    <div class="row"><label>Time <input type="range" id="fx-echo-time" min="20" max="1800" value="375"></label><span id="fx-echo-time-v">375 ms</span></div>
+    <div class="row"><label>Feedback <input type="range" id="fx-echo-fb" min="0" max="85" value="35"></label><span id="fx-echo-fb-v">35%</span></div>
+    <div class="row"><label>Wet <input type="range" id="fx-echo-wet" min="0" max="80" value="35"></label><span id="fx-echo-wet-v">35%</span></div>
+  </div>
+  <div class="panel">
+    <h4>Reverb <label class="sw"><input type="checkbox" id="fx-reverb-on"><span>चालू</span></label></h4>
+    <div class="row"><label>Room <select id="fx-reverb-room"><option value="studio">Studio</option><option value="room">Room</option><option value="hall" selected>Hall</option><option value="church">Church</option></select></label></div>
+    <div class="row"><label>Wet <input type="range" id="fx-reverb-wet" min="0" max="100" value="40"></label><span id="fx-reverb-wet-v">40%</span></div>
+  </div>
+  <div class="panel">
+    <h4>Compressor <label class="sw"><input type="checkbox" id="fx-comp-on" checked><span>चालू</span></label></h4>
+    <div class="row"><label>Threshold <input type="range" id="fx-comp-thr" min="-40" max="0" value="-18"></label><span id="fx-comp-thr-v">-18 dB</span></div>
+    <div class="row"><label>Ratio <input type="range" id="fx-comp-ratio" min="10" max="200" value="40"></label><span id="fx-comp-ratio-v">4:1</span></div>
+  </div>
+  <div class="panel">
+    <h4>Output</h4>
+    <div class="row"><label>Gain <input type="range" id="fx-out" min="0" max="150" value="100"></label><span id="fx-out-v">100%</span></div>
+  </div>
+  <div class="btn-row">
+    <button class="btn primary" id="fx-preview">▶ Preview</button>
+    <button class="btn" id="fx-save">💾 Preset सहेजें</button>
+    <button class="btn ghost" id="fx-reset">Reset</button>
+  </div>
+  <div id="fx-saved" class="chip-row"></div>
+</section>
+
+<!-- ======================= 9. MASTERING ======================= -->
+<section class="screen" id="screen-master">
+  <h2 data-i18n="mastering">मास्टरिंग</h2>
+  <p class="muted">EQ → Compressor → Limiter → Normalizer</p>
+  <div class="panel">
+    <div class="row"><label>Preset <select id="mst-preset"></select></label></div>
+    <div class="row"><label>Bass <input type="range" id="mst-eqb" min="-12" max="12" value="0"></label><span id="mst-eqb-v">0 dB</span></div>
+    <div class="row"><label>Mid <input type="range" id="mst-eqm" min="-12" max="12" value="0"></label><span id="mst-eqm-v">0 dB</span></div>
+    <div class="row"><label>Treble <input type="range" id="mst-eqt" min="-12" max="12" value="1"></label><span id="mst-eqt-v">0 dB</span></div>
+    <div class="row"><label>Threshold <input type="range" id="mst-thr" min="-30" max="0" value="-14"></label><span id="mst-thr-v">-14 dB</span></div>
+    <div class="row"><label>Ratio <input type="range" id="mst-ratio" min="10" max="100" value="25"></label><span id="mst-ratio-v">2.5:1</span></div>
+  </div>
+  <div class="btn-row">
+    <button class="btn" id="mst-ab">सुन रहे हैं: AFTER (मास्टर्ड)</button>
+  </div>
+  <div class="btn-row">
+    <button class="btn primary" id="mst-play">▶ Preview</button>
+    <button class="btn" id="mst-normalize">📊 Loudness Normalize</button>
+  </div>
+  <div id="mst-status" class="status"></div>
+</section>
+
+<!-- ======================= 10. RECORDER ======================= -->
+<section class="screen" id="screen-record">
+  <h2 data-i18n="recorder">वॉइस रिकॉर्डर</h2>
+  <p class="muted">रिकॉर्डिंग डिवाइस के नेटिव फॉर्मेट में सहेजी जाती है</p>
+  <div class="panel center">
+    <div id="rec-status" class="status">तैयार है</div>
+    <button class="btn primary big" id="rec-btn">● रिकॉर्डिंग शुरू करें</button>
+    <p class="muted small">रिकॉर्डिंग रोकने के बाद वह इस प्रोजेक्ट में जुड़ जाएगी।</p>
+  </div>
+</section>
+
+<!-- ======================= 11. BEAT TOOLS ======================= -->
+<section class="screen" id="screen-beat">
+  <h2>बीट टूल्स</h2>
+  <div class="panel center">
+    <h4>BPM Tapper</h4>
+    <div id="tap-bpm" class="big-num">— BPM</div>
+    <div class="btn-row center">
+      <button class="btn primary big" id="tap-btn">👆 TAP</button>
+      <button class="btn ghost" id="tap-reset">Reset</button>
+    </div>
+  </div>
+  <div class="panel">
+    <h4>Metronome</h4>
+    <div class="row"><label>BPM <input type="range" id="metro-bpm" min="40" max="220" value="120"></label><span id="metro-bpm-v">120</span></div>
+    <button class="btn primary" id="metro-start">शुरू करें</button>
+  </div>
+  <div class="panel">
+    <h4>Markers</h4>
+    <p class="muted">Markers एडिटर स्क्रीन में जोड़े और देखे जाते हैं।</p>
+  </div>
+</section>
+
+<!-- ======================= 12. EXPORT ======================= -->
+<section class="screen" id="screen-export">
+  <h2 data-i18n="export_title">एक्सपोर्ट</h2>
+  <div class="panel">
+    <h4>स्रोत</h4>
+    <div id="exp-sources"></div>
+  </div>
+  <div class="panel">
+    <h4>फॉर्मेट</h4>
+    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-mp3" checked><span>MP3</span></label>
+    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-wav"><span>WAV</span></label>
+    <div class="row" id="exp-bitrate-row"><label>Bitrate <select id="exp-bitrate"><option>128</option><option selected>192</option><option>256</option><option>320</option></select> kbps</label></div>
+    <div class="row"><label>Sample Rate <select id="exp-sr"><option selected>44100</option><option>48000</option></select> Hz</label></div>
+    <label class="radio-row"><input type="checkbox" id="exp-normalize" checked><span>Loudness normalize (peak −0.5 dB)</span></label>
+    <div id="exp-note" class="muted small"></div>
+    <div class="honest">v1 में सिर्फ MP3 और WAV एक्सपोर्ट है — M4A/FLAC नहीं।</div>
+  </div>
+  <div class="progress"><div class="pbar" id="exp-pbar"></div></div>
+  <div id="exp-status" class="status"></div>
+  <div class="btn-row">
+    <button class="btn primary big" id="exp-start">📤 एक्सपोर्ट करें</button>
+    <button class="btn ghost" id="exp-cancel">रद्द करें</button>
+  </div>
+  <button class="btn block" id="exp-share" style="display:none">🔗 शेयर करें</button>
+</section>
+
+<!-- ======================= 13. PROJECTS ======================= -->
+<section class="screen" id="screen-projects">
+  <h2>प्रोजेक्ट्स</h2>
+  <button class="btn primary block" id="proj-new">＋ नया प्रोजेक्ट</button>
+  <div id="projects-list"></div>
+</section>
+
+<!-- ======================= 14. SETTINGS ======================= -->
+<section class="screen" id="screen-settings">
+  <h2 data-i18n="settings_title">सेटिंग्स</h2>
+  <div class="panel">
+    <h4>दिखावट</h4>
+    <div class="row"><label>Theme <select id="set-theme"><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
+    <div class="row"><label>भाषा / Language <select id="set-lang"><option value="hi">हिन्दी</option><option value="en">English</option></select></label></div>
+  </div>
+  <div class="panel">
+    <h4>एक्सपोर्ट डिफ़ॉल्ट</h4>
+    <div class="row"><label>Format <select id="set-def-format"><option value="mp3">MP3</option><option value="wav">WAV</option></select></label></div>
+    <div class="row"><label>Bitrate <select id="set-def-bitrate"><option>128</option><option>192</option><option>256</option><option>320</option></select> kbps</label></div>
+    <div class="row"><label>Sample Rate <select id="set-def-sr"><option>44100</option><option>48000</option></select> Hz</label></div>
+  </div>
+  <div class="panel">
+    <h4>स्टोरेज</h4>
+    <div id="storage-info" class="muted small"></div>
+    <button class="btn ghost" id="set-clear-cache">🧹 कैश साफ़ करें</button>
+  </div>
+  <div class="panel">
+    <h4>अपडेट</h4>
+    <button class="btn primary" id="set-check-update">🔄 अपडेट जांचें</button>
+    <div id="update-status" class="status"></div>
+  </div>
+  <div class="panel center">
+    <img src="logo.png" alt="RuhMix" class="about-logo">
+    <p><b>RuhMix 1.0</b><br><span class="muted">Professional Music & Remix Studio</span><br><span data-i18n="by">By Hasnain Khan</span></p>
+  </div>
+</section>
+
+<!-- ======================= 15. PRO ======================= -->
+<section class="screen" id="screen-pro">
+  <h2 data-i18n="pro_title">RuhMix Pro</h2>
+  <p class="muted" data-i18n="coming_soon">जल्द आ रहा है</p>
+  <div class="card-grid" id="pro-grid"></div>
+  <div class="panel center">
+    <p class="muted">Pro फ़ीचर्स पर काम चल रहा है। उपलब्ध होते ही आपको बता दिया जाएगा।</p>
+    <button class="btn primary" id="pro-notify">🔔 मुझे बताएं</button>
+  </div>
+</section>
+
+<!-- ======================= 16. MORE ======================= -->
+<section class="screen" id="screen-more">
+  <h2 data-i18n="nav_more">अधिक</h2>
+  <div class="card-grid" id="more-grid"></div>
+  <button class="btn block" id="more-update">🔄 अपडेट जांचें</button>
+  <div class="foot-note">RuhMix 1.0 • <span data-i18n="by">By Hasnain Khan</span></div>
+</section>
+
+</main>
+
+<!-- ======================= bottom nav ======================= -->
+<nav id="bottomnav">
+  <button class="navbtn active" data-screen="home">🏠<span data-i18n="nav_home">होम</span></button>
+  <button class="navbtn" data-screen="editor">🎚️<span data-i18n="nav_editor">एडिटर</span></button>
+  <button class="navbtn" data-screen="remix">✨<span data-i18n="nav_remix">रीमिक्स</span></button>
+  <button class="navbtn" data-screen="mixer">🎛️<span data-i18n="nav_mixer">मिक्सर</span></button>
+  <button class="navbtn" data-screen="more">⋯<span data-i18n="nav_more">अधिक</span></button>
+</nav>
+
+<!-- dialog + toast -->
+<div id="dlg"><div class="dlg-card">
+  <h3 id="dlg-title"></h3>
+  <div id="dlg-body"></div>
+  <div class="btn-row"><button class="btn primary" id="dlg-ok">OK</button><button class="btn ghost" id="dlg-cancel">रद्द करें</button></div>
+</div></div>
+<div id="toast"></div>
+
+<script src="js/vendor/lame.min.js"></script>
+<script src="js/audio-engine.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/waveform.js"></script>
+<script src="js/stems.js"></script>
+<script src="js/remix.js"></script>
+<script src="js/export.js"></script>
+<script src="js/projects.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

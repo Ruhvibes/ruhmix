@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths: shares and picked-audio copies live in the private
+     cache dir, served to other apps only via content:// URIs. -->
+<paths>
+    <cache-path name="shared_files" path="share/" />
+    <cache-path name="picked_audio" path="imports/" />
+    <cache-path name="recordings" path="rec/" />
+</paths>

@@ -1,0 +1,1767 @@
+'use strict';
+/* =====================================================================
+   RuhMix — app.js (part 1)
+   Screens/navigation, studio audio path, import, native bridge callbacks.
+   ===================================================================== */
+window.RM = window.RM || {};
+
+RM.app = (function () {
+  const $ = (id) => document.getElementById(id);
+  const clamp = RM.audio.clamp;
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 1 };
+  const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
+
+  /* ================= i18n ================= */
+  const I18N = {
+    hi: {
+      tagline: 'प्रोफेशनल म्यूज़िक एवं रीमिक्स स्टूडियो',
+      nav_home: 'होम', nav_editor: 'एडिटर', nav_remix: 'रीमिक्स', nav_mixer: 'मिक्सर', nav_more: 'अधिक',
+      new_project: 'नया प्रोजेक्ट', auto_remix: 'ऑटो रीमिक्स', slowed: 'स्लोड+रिवर्ब',
+      audio_editor: 'ऑडियो एडिटर', stems: 'स्टेम सेपरेटर', recorder: 'वॉइस रिकॉर्डर',
+      equalizer: 'इक्वलाइज़र', mastering: 'मास्टरिंग', recent: 'हाल के प्रोजेक्ट',
+      search: 'खोजें…', import_title: 'ऑडियो इम्पोर्ट', pick_audio: 'ऑडियो चुनें',
+      editor_title: 'ऑडियो एडिटर', play: 'चलाएं', pause: 'रोकें', stop: 'बंद करें',
+      pro_title: 'RuhMix Pro', coming_soon: 'जल्द आ रहा है',
+      settings_title: 'सेटिंग्स', export_title: 'एक्सपोर्ट',
+      by: 'By Hasnain Khan',
+    },
+    en: {
+      tagline: 'Professional Music & Remix Studio',
+      nav_home: 'Home', nav_editor: 'Editor', nav_remix: 'Remix', nav_mixer: 'Mixer', nav_more: 'More',
+      new_project: 'New Project', auto_remix: 'Auto Remix', slowed: 'Slowed+Reverb',
+      audio_editor: 'Audio Editor', stems: 'Stem Separator', recorder: 'Voice Recorder',
+      equalizer: 'Equalizer', mastering: 'Mastering', recent: 'Recent Projects',
+      search: 'Search…', import_title: 'Import Audio', pick_audio: 'Pick Audio',
+      editor_title: 'Audio Editor', play: 'Play', pause: 'Pause', stop: 'Stop',
+      pro_title: 'RuhMix Pro', coming_soon: 'Coming soon',
+      settings_title: 'Settings', export_title: 'Export',
+      by: 'By Hasnain Khan',
+    },
+  };
+  let lang = 'hi';
+  try { lang = localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) {}
+  function t(k) { return (I18N[lang] && I18N[lang][k]) || I18N.hi[k] || k; }
+  function setLang(l) {
+    lang = (l === 'en') ? 'en' : 'hi';
+    try { localStorage.setItem('ruhmix.lang', lang); } catch (e) {}
+    document.querySelectorAll('[data-i18n]').forEach((el) => {
+      el.textContent = t(el.getAttribute('data-i18n'));
+    });
+    document.querySelectorAll('[data-i18n-ph]').forEach((el) => {
+      el.setAttribute('placeholder', t(el.getAttribute('data-i18n-ph')));
+    });
+    const sel = $('set-lang'); if (sel) sel.value = lang;
+  }
+
+  /* ================= theme ================= */
+  function setTheme(mode) {
+    document.body.classList.toggle('light', mode === 'light');
+    try { localStorage.setItem('ruhmix.theme', mode); } catch (e) {}
+    const sel = $('set-theme'); if (sel) sel.value = mode;
+  }
+  function loadTheme() {
+    let m = 'dark';
+    try { m = localStorage.getItem('ruhmix.theme') || 'dark'; } catch (e) {}
+    setTheme(m);
+  }
+
+  /* ================= toast + dialog ================= */
+  let toastTimer = 0;
+  function toast(msg, ms) {
+    const el = $('toast');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), ms || 2200);
+  }
+  function dialog(title, bodyHTML, okLabel, cancelLabel) {
+    return new Promise((resolve) => {
+      $('dlg-title').textContent = title;
+      $('dlg-body').innerHTML = bodyHTML;
+      $('dlg-ok').textContent = okLabel || 'OK';
+      const c = $('dlg-cancel');
+      c.textContent = cancelLabel || 'रद्द करें';
+      c.style.display = cancelLabel === null ? 'none' : '';
+      $('dlg').classList.add('show');
+      $('dlg-ok').onclick = () => { $('dlg').classList.remove('show'); resolve(true); };
+      c.onclick = () => { $('dlg').classList.remove('show'); resolve(false); };
+    });
+  }
+
+  /* ================= state ================= */
+  const state = {
+    screen: 'home',
+    project: null,
+    buffer: null,       // original decoded AudioBuffer (untouched)
+    viewBuffer: null,   // op-list rendered buffer (what plays)
+    fileName: '',
+    imports: [],        // [{name, buffer, size, type}]
+    player: null,       // studio player
+    chain: null,        // studio FX chain
+    width: null,        // stereo width node set
+    fx: null,           // current FX preset object
+    redoStack: [],
+    waveView: null,
+    remix: { style: null, bpm: null },
+    slowed: { speed: 0.8, room: 'church', wet: 0.55, decay: 1.8, echo: 0.25, bass: 4, width: 1.2 },
+    mastering: { preset: 'clean', ab: 'after', settings: null },
+    exportDefaults: { format: 'mp3', bitrate: 192, sampleRate: 44100 },
+    lastDelivery: null,
+    pro: { isPro: false },
+  };
+  try {
+    const d = JSON.parse(localStorage.getItem('ruhmix.exportDefaults') || 'null');
+    if (d) state.exportDefaults = Object.assign(state.exportDefaults, d);
+  } catch (e) {}
+
+  function defaultFx() {
+    return {
+      eq3: [0, 0, 0], eq10: [0,0,0,0,0,0,0,0,0,0], filter: 19000, drive: 0,
+      chorus: { on: false, rate: 1.2, depth: 0.004 },
+      echo: { on: false, time: 0.375, fb: 0.35, wet: 0.35 },
+      reverb: { on: false, room: 'hall', wet: 0.4 },
+      comp: { on: true, thr: -18, ratio: 4, atk: 0.01, rel: 0.25 },
+      out: 1.0,
+    };
+  }
+  state.fx = defaultFx();
+
+  /* ================= navigation ================= */
+  const SCREENS = ['home','import','editor','remix','slowed','stems','mixer','fx','master','record','beat','export','projects','settings','pro','more'];
+  function show(name) {
+    if (!SCREENS.includes(name)) name = 'home';
+    state.screen = name;
+    SCREENS.forEach((s) => {
+      const el = $('screen-' + s);
+      if (el) el.classList.toggle('active', s === name);
+    });
+    document.querySelectorAll('.navbtn').forEach((b) => {
+      b.classList.toggle('active', b.getAttribute('data-screen') === name);
+    });
+    const sc = $('screen-' + name);
+    if (sc) sc.scrollTop = 0;
+    window.scrollTo(0, 0);
+    if (name === 'editor' && state.waveView) state.waveView.invalidate();
+    try { if (RM.app.onShow) RM.app.onShow(name); } catch (e) {}
+  }
+
+  function needAudio() {
+    if (!state.buffer) {
+      toast(lang === 'hi' ? 'पहले ऑडियो इम्पोर्ट करें' : 'Please import audio first');
+      show('import');
+      return false;
+    }
+    return true;
+  }
+
+  /* ================= studio audio path ================= */
+  // player.insert -> fxChain.input ... fxChain.output -> width -> master
+  function ensureStudio() {
+    RM.audio.ensureCtx();
+    const ctx = RM.audio.ensureCtx();
+    if (!state.player) {
+      state.player = RM.audio.makePlayer();
+      state.player.onended = () => {
+        const b = document.getElementById('ed-play');
+        if (b) b.textContent = '▶ ' + t('play');
+      };
+      state.chain = RM.fx.makeChain(ctx);
+      state.chain.applyPreset(state.fx);
+      // stereo width: M/S matrix (neutral at width=1)
+      const W = {};
+      W.in = ctx.createGain();
+      W.split = ctx.createChannelSplitter(2);
+      W.midG = ctx.createGain(); W.midG.gain.value = 0.5;
+      W.midG2 = ctx.createGain(); W.midG2.gain.value = 0.5;
+      W.sideG = ctx.createGain(); W.sideG.gain.value = 0.5;
+      W.sideG2 = ctx.createGain(); W.sideG2.gain.value = -0.5;
+      W.merge = ctx.createChannelMerger(2);
+      W.split2 = ctx.createChannelSplitter(2);
+      W.wGain = ctx.createGain(); W.wGain.gain.value = 1; // width on side
+      W.oL1 = ctx.createGain(); W.oL2 = ctx.createGain();
+      W.oR1 = ctx.createGain(); W.oR2 = ctx.createGain(); W.oR2.gain.value = -1;
+      W.merge2 = ctx.createChannelMerger(2);
+      W.out = ctx.createGain();
+      W.in.connect(W.split);
+      W.split.connect(W.midG, 0); W.split.connect(W.midG2, 1);
+      W.midG.connect(W.merge, 0, 0); W.midG2.connect(W.merge, 0, 0);
+      W.split.connect(W.sideG, 0); W.split.connect(W.sideG2, 1);
+      W.sideG.connect(W.wGain); W.sideG2.connect(W.wGain);
+      W.wGain.connect(W.merge, 0, 1);
+      W.merge.connect(W.split2);
+      W.split2.connect(W.oL1, 0); W.split2.connect(W.oL2, 1);
+      W.oL1.connect(W.merge2, 0, 0); W.oL2.connect(W.merge2, 0, 0);
+      W.split2.connect(W.oR1, 0); W.split2.connect(W.oR2, 1);
+      W.oR1.connect(W.merge2, 0, 1); W.oR2.connect(W.merge2, 0, 1);
+      W.merge2.connect(W.out);
+      state.width = W;
+      state.player.insert.connect(state.chain.input);
+      state.chain.output.connect(W.in);
+      W.out.connect(RM.audio.masterIn());
+    }
+    return state;
+  }
+  function setWidth(w) {
+    ensureStudio();
+    const ctx = RM.audio.ensureCtx();
+    state.width.wGain.gain.setTargetAtTime(clamp(w, 0, 2), ctx.currentTime, 0.02);
+  }
+  function applyFxToChain() {
+    ensureStudio();
+    state.chain.applyPreset(state.fx);
+  }
+
+  /* ================= project + audio loading ================= */
+  function newProject(name) {
+    stopAll();
+    state.project = RM.proj.create(name);
+    state.buffer = null;
+    state.viewBuffer = null;
+    state.fileName = '';
+    state.redoStack = [];
+    RM.proj.markDirty();
+    show('import');
+  }
+
+  function loadAudioBuffer(buffer, name, audioRef) {
+    stopAll();
+    if (!state.project) state.project = RM.proj.create(name);
+    state.buffer = buffer;
+    state.viewBuffer = null;
+    state.fileName = name || 'audio';
+    state.project.audioRef = audioRef || { name: state.fileName, size: 0, type: '', lastModified: 0 };
+    state.project.ops = [];
+    state.redoStack = [];
+    RM.proj.invalidateView(buffer);
+    refreshView().then(() => {
+      RM.proj.autosave(state.project);
+      toast((lang === 'hi' ? 'लोड हो गया: ' : 'Loaded: ') + state.fileName);
+      if (state.screen === 'import') show('editor');
+      if (RM.app.updateEditorMeta) RM.app.updateEditorMeta();
+    });
+  }
+
+  // Re-render view buffer from op-list (cached when ops unchanged)
+  function refreshView(onProgress) {
+    if (!state.buffer) return Promise.resolve(null);
+    return RM.proj.applyOps(state.buffer, state.project.ops, onProgress).then((view) => {
+      state.viewBuffer = view;
+      ensureStudio();
+      const wasPlaying = state.player.playing;
+      const pos = state.player.position();
+      state.player.load(view);
+      state.player.setRate(state.project.settings.speed || 1);
+      state.player.setVolume(state.project.settings.volume != null ? state.project.settings.volume : 0.9);
+      state.player.setPan(state.project.settings.pan || 0);
+      if (wasPlaying) state.player.play(Math.min(pos, view.duration - 0.1));
+      if (state.waveView) {
+        RM.wave.getPeaks(view, 1200).then((peaks) => {
+          state.waveView.setBuffer(view, peaks);
+          if (RM.app.updateTrimShade) RM.app.updateTrimShade();
+        });
+      }
+      return view;
+    });
+  }
+
+  function pushOp(op) {
+    state.project.ops.push(op);
+    state.redoStack = [];
+    RM.proj.autosave(state.project);
+    return refreshView();
+  }
+  function undoOp() {
+    const op = state.project.ops.pop();
+    if (!op) { toast(lang === 'hi' ? 'कुछ नहीं है' : 'Nothing to undo'); return; }
+    state.redoStack.push(op);
+    RM.proj.autosave(state.project);
+    refreshView();
+  }
+  function redoOp() {
+    const op = state.redoStack.pop();
+    if (!op) { toast(lang === 'hi' ? 'कुछ नहीं है' : 'Nothing to redo'); return; }
+    state.project.ops.push(op);
+    RM.proj.autosave(state.project);
+    refreshView();
+  }
+
+  function stopAll() {
+    try { if (state.player) state.player.stop(true); } catch (e) {}
+    try { if (RM.app.stopMixer) RM.app.stopMixer(); } catch (e) {}
+  }
+
+  /* ================= import ================= */
+  function pickAudio() {
+    const nat = RM.audio.native;
+    if (nat.method('pickAudio')) {
+      try { nat.call('pickAudio'); return; }
+      catch (e) { /* fall through to file input */ }
+    }
+    const inp = $('file-input');
+    if (inp) inp.click();
+    else toast(lang === 'hi' ? 'फाइल चुनना उपलब्ध नहीं है' : 'File picking unavailable');
+  }
+
+  function fetchFileUrl(url) {
+    // file:// URLs from the native cache: fetch() then XHR fallback
+    return fetch(url).then((r) => {
+      if (!r.ok) throw new Error('fetch failed: ' + r.status);
+      return r.arrayBuffer();
+    }).catch(() => new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.responseType = 'arrayBuffer';
+      xhr.onload = () => (xhr.status === 0 || xhr.status === 200) ? resolve(xhr.response) : reject(new Error('xhr ' + xhr.status));
+      xhr.onerror = () => reject(new Error('xhr error'));
+      xhr.send();
+    }));
+  }
+
+  function decodeAndAdd(ab, name, size) {
+    toast((lang === 'hi' ? 'डिकोड हो रहा है: ' : 'Decoding: ') + name);
+    return RM.audio.decodeArrayBuffer(ab).then((buf) => {
+      state.imports.unshift({ name, buffer: buf, size: size || ab.byteLength, type: '' });
+      renderImportList();
+      return buf;
+    }).catch(() => {
+      toast((lang === 'hi' ? 'डिकोड नहीं हो पाया: ' : 'Could not decode: ') + name, 3000);
+      return null;
+    });
+  }
+
+  // Called by the native shell: window.Android.pickAudio() result.
+  function handleAudioPicked(paths) {
+    if (!paths) return;
+    const arr = Array.isArray(paths) ? paths : [paths];
+    if (!arr.length) { toast(lang === 'hi' ? 'कुछ चुना नहीं गया' : 'Nothing selected'); return; }
+    toast((lang === 'hi' ? 'लोड हो रहा है… (' : 'Loading… (') + arr.length + ')');
+    let chain = Promise.resolve();
+    arr.forEach((p) => {
+      const name = String(p).split('/').pop() || 'audio';
+      chain = chain.then(() => fetchFileUrl(p)
+        .then((ab) => decodeAndAdd(ab, name, ab.byteLength))
+        .catch(() => toast((lang === 'hi' ? 'पढ़ा नहीं जा सका: ' : 'Could not read: ') + name, 3000)));
+    });
+    chain.then(() => { show('import'); });
+  }
+
+  function fmtTime(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+  }
+  function fmtSize(b) {
+    if (!b) return '—';
+    if (b > 1048576) return (b / 1048576).toFixed(1) + ' MB';
+    return Math.max(1, Math.round(b / 1024)) + ' KB';
+  }
+
+  function renderImportList() {
+    const box = $('import-list');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!state.imports.length) {
+      box.innerHTML = `<div class="empty">${lang === 'hi' ? 'अभी कोई ऑडियो नहीं — ऊपर से चुनें' : 'No audio yet — pick from above'}</div>`;
+      return;
+    }
+    state.imports.forEach((it, idx) => {
+      const d = document.createElement('div');
+      d.className = 'import-item';
+      d.innerHTML = `
+        <div class="ii-main">
+          <div class="ii-name">${escapeHtml(it.name)}</div>
+          <div class="ii-meta">${fmtTime(it.buffer.duration)} • ${it.buffer.sampleRate} Hz • ${it.buffer.numberOfChannels === 2 ? 'Stereo' : 'Mono'} • ${fmtSize(it.size)}</div>
+        </div>
+        <button class="btn small" data-act="use">${lang === 'hi' ? 'इस्तेमाल करें' : 'Use'}</button>
+        <button class="btn small ghost" data-act="del">✕</button>`;
+      d.querySelector('[data-act="use"]').addEventListener('click', () => {
+        loadAudioBuffer(it.buffer, it.name, { name: it.name, size: it.size, type: it.type, lastModified: Date.now() });
+      });
+      d.querySelector('[data-act="del"]').addEventListener('click', () => {
+        RM.wave.dropPeaks(it.buffer);
+        state.imports.splice(idx, 1);
+        renderImportList();
+      });
+      box.appendChild(d);
+    });
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  /* ================= voice recorder (bridge) ================= */
+  const rec = { recording: false, startT: 0, timer: 0, path: null, fallback: null };
+  function startRecording() {
+    const nat = RM.audio.native;
+    const name = 'ruhmix-rec-' + Date.now();
+    if (nat.method('startRecording')) {
+      nat.call('startRecording', name);
+      return;
+    }
+    // Browser fallback: MediaRecorder (honest label)
+    if (navigator.mediaDevices && window.MediaRecorder) {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+        const mr = new MediaRecorder(stream);
+        const chunks = [];
+        mr.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+        mr.onstop = () => {
+          stream.getTracks().forEach((tr) => tr.stop());
+          const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+          blob.arrayBuffer().then((ab) => decodeAndAdd(ab, 'Voice Recording (browser).webm', ab.byteLength)
+            .then((buf) => { if (buf) toast(lang === 'hi' ? 'रिकॉर्डिंग जुड़ गई' : 'Recording added'); }));
+          rec.recording = false;
+          updateRecUI();
+        };
+        mr.start();
+        rec.fallback = mr;
+        rec.recording = true;
+        rec.startT = Date.now();
+        updateRecUI();
+        toast(lang === 'hi' ? 'रिकॉर्डिंग शुरू (ब्राउज़र)' : 'Recording started (browser)');
+      }).catch(() => toast(lang === 'hi' ? 'माइक की अनुमति नहीं मिली' : 'Mic permission denied', 3000));
+      return;
+    }
+    toast(lang === 'hi' ? 'रिकॉर्डिंग इस डिवाइस पर उपलब्ध नहीं है' : 'Recording unavailable on this device', 3000);
+  }
+  function stopRecording() {
+    const nat = RM.audio.native;
+    if (rec.fallback) { try { rec.fallback.stop(); } catch (e) {} rec.fallback = null; return; }
+    if (nat.method('stopRecording')) { nat.call('stopRecording'); return; }
+  }
+  // Native callbacks (wired as globals below, per shell contract)
+  function handleRecordingStarted(path) {
+    rec.recording = true;
+    rec.startT = Date.now();
+    rec.path = path;
+    updateRecUI();
+    toast(lang === 'hi' ? 'रिकॉर्डिंग शुरू…' : 'Recording…');
+  }
+  function handleRecordingStopped(path) {
+    rec.recording = false;
+    updateRecUI();
+    const p = path || rec.path;
+    if (!p) { toast(lang === 'hi' ? 'रिकॉर्डिंग फ़ाइल नहीं मिली' : 'Recording file not found', 3000); return; }
+    toast(lang === 'hi' ? 'रिकॉर्डिंग डिकोड हो रही है…' : 'Decoding recording…');
+    // NOTE: the shell records in the device's native format (3GP). We decode
+    // whatever the device gives us — no false format claims in the UI.
+    fetchFileUrl(p).then((ab) => RM.audio.decodeArrayBuffer(ab)).then((buf) => {
+      const name = 'Voice Recording ' + new Date().toLocaleString();
+      state.imports.unshift({ name, buffer: buf, size: ab.byteLength, type: '' });
+      renderImportList();
+      if (!state.project) state.project = RM.proj.create(name);
+      loadAudioBuffer(buf, name, { name, size: ab.byteLength, type: '', lastModified: Date.now() });
+      show('editor');
+    }).catch(() => {
+      toast(lang === 'hi'
+        ? 'रिकॉर्डिंग डिकोड नहीं हो पाई — यह फॉर्मेट इस डिवाइस पर समर्थित नहीं है'
+        : 'Could not decode the recording — format not supported on this device', 4000);
+    });
+  }
+  function handleRecordingError(msg) {
+    rec.recording = false;
+    updateRecUI();
+    toast((lang === 'hi' ? 'रिकॉर्डिंग त्रुटि: ' : 'Recording error: ') + (msg || ''), 3500);
+  }
+  function updateRecUI() {
+    const btn = $('rec-btn');
+    const st = $('rec-status');
+    if (btn) {
+      btn.textContent = rec.recording ? (lang === 'hi' ? '■ रिकॉर्डिंग रोकें' : '■ Stop Recording') : (lang === 'hi' ? '● रिकॉर्डिंग शुरू करें' : '● Start Recording');
+      btn.classList.toggle('rec-on', rec.recording);
+    }
+    clearInterval(rec.timer);
+    if (rec.recording && st) {
+      const tickT = () => { st.textContent = fmtTime((Date.now() - rec.startT) / 1000) + (lang === 'hi' ? ' — रिकॉर्ड हो रहा है…' : ' — recording…'); };
+      tickT();
+      rec.timer = setInterval(tickT, 500);
+    } else if (st) {
+      st.textContent = lang === 'hi' ? 'तैयार है' : 'Ready';
+    }
+  }
+
+  /* ================= update check ================= */
+  function checkUpdate(manual) {
+    const box = $('update-status');
+    if (box) box.textContent = lang === 'hi' ? 'जांच हो रही है…' : 'Checking…';
+    fetch(VERSION_URL, { cache: 'no-store' }).then((r) => {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    }).then((v) => {
+      const remote = +v.versionCode || 0;
+      if (remote > APP.versionCode) {
+        if (box) box.textContent = '';
+        dialog(
+          lang === 'hi' ? 'नया अपडेट उपलब्ध है' : 'Update available',
+          `<p><b>RuhMix ${escapeHtml(v.versionName || '')}</b> ${lang === 'hi' ? 'उपलब्ध है।' : 'is available.'}</p>` +
+          (v.notes ? `<p class="muted">${escapeHtml(v.notes)}</p>` : '') +
+          `<p class="muted">${lang === 'hi' ? 'डाउनलोड करके इंस्टॉल करें।' : 'Download and install to update.'}</p>`,
+          lang === 'hi' ? 'डाउनलोड करें' : 'Download',
+          lang === 'hi' ? 'बाद में' : 'Later'
+        ).then((ok) => {
+          if (!ok || !v.apkUrl) return;
+          const nat = RM.audio.native;
+          if (nat.method('downloadApk')) nat.call('downloadApk', v.apkUrl);
+          else if (nat.method('openUrl')) nat.call('openUrl', v.apkUrl);
+          else window.open(v.apkUrl, '_blank');
+        });
+      } else {
+        if (box) box.textContent = lang === 'hi' ? 'आप नवीनतम संस्करण पर हैं (1.0)' : 'You are on the latest version (1.0)';
+        if (manual) toast(lang === 'hi' ? 'ऐप अपडेटेड है ✓' : 'App is up to date ✓');
+      }
+    }).catch(() => {
+      if (box) box.textContent = lang === 'hi' ? 'जांच नहीं हो पाई — इंटरनेट देखें' : 'Check failed — check internet';
+    });
+  }
+
+  // ---- placeholder: part 2/3 continue below ----
+  return {
+    APP, state, $, toast, dialog, t, setLang, setTheme, loadTheme,
+    show, needAudio, ensureStudio, setWidth, applyFxToChain, defaultFx,
+    newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
+    pickAudio, handleAudioPicked, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
+    startRecording, stopRecording, handleRecordingStarted, handleRecordingStopped,
+    handleRecordingError, updateRecUI,
+    checkUpdate,
+  };
+})();
+
+/* ---- Native shell contract: these globals MUST exist ----
+   window.Android.pickAudio()        -> onAudioPicked(pathsArray)
+   window.Android.startRecording(name)-> onRecordingStarted(path)
+   window.Android.stopRecording()    -> onRecordingStopped(path) / onRecordingError(msg) */
+window.onAudioPicked = function (paths) { RM.app.handleAudioPicked(paths); };
+window.onRecordingStarted = function (path) { RM.app.handleRecordingStarted(path); };
+window.onRecordingStopped = function (path) { RM.app.handleRecordingStopped(path); };
+window.onRecordingError = function (msg) { RM.app.handleRecordingError(msg); };
+'use strict';
+/* =====================================================================
+   RuhMix — app.js (part 2)
+   Editor (waveform + ops + transport), Auto Remix, Slowed+Reverb Studio,
+   Stem Separator UI.
+   ===================================================================== */
+Object.assign(RM.app, (function () {
+  const A = RM.app;
+  const $ = A.$, clamp = RM.audio.clamp;
+  const lang = () => { try { return localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) { return 'hi'; } };
+  const HI = () => lang() === 'hi';
+
+  /* ================= editor ================= */
+  function selRange() {
+    const a = Math.max(0, parseFloat($('ed-sel-a').value) || 0);
+    const b = Math.max(0, parseFloat($('ed-sel-b').value) || 0);
+    const dur = A.state.buffer ? A.state.buffer.duration : 0;
+    return { a: clamp(Math.min(a, b), 0, dur), b: clamp(Math.max(a, b), 0, dur) };
+  }
+  function updateTrimShade() {
+    const v = A.state.waveView;
+    if (!v) return;
+    const r = selRange();
+    v.setTrim(r.b > r.a ? r.a : null, r.b > r.a ? r.b : null);
+    v.invalidate();
+  }
+  // expose for part 1
+  A.updateTrimShade = updateTrimShade;
+
+  function updateEditorMeta() {
+    const el = $('ed-meta');
+    if (!el) return;
+    if (!A.state.buffer) { el.textContent = HI() ? 'कोई ऑडियो नहीं' : 'No audio'; return; }
+    const p = A.state.project;
+    el.textContent = `${A.state.fileName} • ${A.fmtTime(A.state.buffer.duration)} • ${A.state.buffer.sampleRate} Hz • ${p.ops.length} edits`;
+  }
+  A.updateEditorMeta = updateEditorMeta;
+
+  function initEditor() {
+    const cv = $('ed-wave');
+    A.state.waveView = RM.wave.createView(cv);
+    A.state.waveView.onSeek = (sec) => {
+      if (!A.state.viewBuffer) return;
+      A.ensureStudio();
+      if (A.state.player.playing) A.state.player.play(sec);
+      else { A.state.player.offset = sec; A.state.waveView.setPlayhead(sec); A.state.waveView.invalidate(); }
+    };
+    $('ed-zoom').addEventListener('input', (e) => A.state.waveView.setZoom(+e.target.value));
+    $('ed-scroll').addEventListener('input', (e) => A.state.waveView.setScroll(+e.target.value / 100));
+    ['ed-sel-a', 'ed-sel-b'].forEach((id) => $(id).addEventListener('input', updateTrimShade));
+
+    $('ed-play').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      A.ensureStudio();
+      A.applyFxToChain();
+      const p = A.state.player;
+      if (p.playing) { p.pause(); $('ed-play').textContent = '▶ ' + A.t('play'); }
+      else {
+        p.setRate(A.state.project.settings.speed || 1);
+        if (p.play()) $('ed-play').textContent = '⏸ ' + A.t('pause');
+      }
+    });
+    $('ed-stop').addEventListener('click', () => {
+      A.state.player.stop();
+      A.state.player.offset = 0;
+      A.state.waveView.setPlayhead(0);
+      $('ed-play').textContent = '▶ ' + A.t('play');
+    });
+    A.state.player && (A.state.player.onended = () => {
+      const b = $('ed-play'); if (b) b.textContent = '▶ ' + A.t('play');
+    });
+
+    $('ed-vol').addEventListener('input', (e) => {
+      A.state.project.settings.volume = +e.target.value / 100;
+      A.state.player.setVolume(A.state.project.settings.volume);
+      $('ed-vol-v').textContent = e.target.value + '%';
+      RM.proj.autosave(A.state.project);
+    });
+    $('ed-pan').addEventListener('input', (e) => {
+      A.state.project.settings.pan = +e.target.value / 100;
+      A.state.player.setPan(A.state.project.settings.pan);
+      RM.proj.autosave(A.state.project);
+    });
+    $('ed-speed').addEventListener('input', (e) => {
+      const r = +e.target.value / 100;
+      A.state.project.settings.speed = r;
+      A.state.player.setRate(r);
+      $('ed-speed-v').textContent = r.toFixed(2) + '×';
+      RM.proj.autosave(A.state.project);
+    });
+    $('ed-loop').addEventListener('click', (e) => {
+      const s = A.state.project.settings;
+      s.loop = !s.loop;
+      const p = A.state.player;
+      p.loop = s.loop;
+      if (s.loop && A.state.viewBuffer) { p.loopStart = 0; p.loopEnd = A.state.viewBuffer.duration; }
+      e.target.classList.toggle('on', s.loop);
+      RM.proj.autosave(A.state.project);
+    });
+
+    // ops
+    $('ed-trim').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      const r = selRange();
+      if (r.b - r.a < 0.05) { A.toast(HI() ? 'पहले चयन (selection) बनाएं' : 'Make a selection first'); return; }
+      A.pushOp({ t: 'trim', a: r.a, b: r.b }).then(updateEditorMeta);
+    });
+    $('ed-cut').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      const r = selRange();
+      if (r.b - r.a < 0.05) { A.toast(HI() ? 'पहले चयन बनाएं' : 'Make a selection first'); return; }
+      A.pushOp({ t: 'cut', a: r.a, b: r.b }).then(updateEditorMeta);
+    });
+    $('ed-copy').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      const r = selRange();
+      if (r.b - r.a < 0.05) { A.toast(HI() ? 'पहले चयन बनाएं' : 'Make a selection first'); return; }
+      copyRange(r.a, r.b);
+    });
+    $('ed-paste').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      if (!RM.proj.getClipboard()) { A.toast(HI() ? 'क्लिपबोर्ड खाली है' : 'Clipboard is empty'); return; }
+      const at = A.state.player.position();
+      A.pushOp({ t: 'paste', at }).then(updateEditorMeta);
+    });
+    $('ed-split').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      const p = A.state.player.position();
+      const dur = A.state.viewBuffer.duration;
+      if (dur - p < 0.1) { A.toast(HI() ? 'अंत के पास स्प्लिट नहीं हो सकता' : 'Cannot split near the end'); return; }
+      copyRange(p, dur, () => A.pushOp({ t: 'cut', a: p, b: dur }).then(() => {
+        A.toast(HI() ? 'स्प्लिट हो गया — पिछला भाग क्लिपबोर्ड में है' : 'Split done — tail is in clipboard');
+        updateEditorMeta();
+      }));
+    });
+    $('ed-fadein').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'fadein', dur: 2 }).then(updateEditorMeta); });
+    $('ed-fadeout').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'fadeout', dur: 3 }).then(updateEditorMeta); });
+    $('ed-gain-up').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'gain', db: 3 }).then(updateEditorMeta); });
+    $('ed-gain-dn').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'gain', db: -3 }).then(updateEditorMeta); });
+    $('ed-reverse').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'reverse' }).then(updateEditorMeta); });
+    $('ed-undo').addEventListener('click', () => { A.undoOp(); setTimeout(updateEditorMeta, 300); });
+    $('ed-redo').addEventListener('click', () => { A.redoOp(); setTimeout(updateEditorMeta, 300); });
+
+    // markers
+    $('ed-marker-add').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      const t = A.state.player.position();
+      const label = 'M' + (A.state.project.settings.markers.length + 1);
+      A.state.project.settings.markers.push({ t, label });
+      RM.proj.autosave(A.state.project);
+      renderMarkers();
+    });
+
+    // playhead ticker
+    setInterval(() => {
+      const v = A.state.waveView;
+      if (!v || A.state.screen !== 'editor') return;
+      if (A.state.player && A.state.player.playing) {
+        v.setPlayhead(A.state.player.position());
+        v.draw();
+        const tp = $('ed-time');
+        if (tp && A.state.viewBuffer) tp.textContent = A.fmtTime(A.state.player.position()) + ' / ' + A.fmtTime(A.state.viewBuffer.duration);
+      } else if (v._dirty) v.draw();
+    }, 120);
+  }
+
+  function copyRange(a, b, done) {
+    const src = A.state.viewBuffer;
+    const sr = src.sampleRate;
+    const aS = Math.round(a * sr), bS = Math.min(src.length, Math.round(b * sr));
+    const len = Math.max(1, bS - aS);
+    const ctx = RM.audio.ensureCtx();
+    const cb = ctx.createBuffer(src.numberOfChannels, len, sr);
+    RM.audio.runChunked(len, 1 << 18, (x, y) => {
+      for (let c = 0; c < cb.numberOfChannels; c++) {
+        const s = src.getChannelData(c), d = cb.getChannelData(c);
+        for (let i = x; i < y; i++) d[i] = s[aS + i] || 0;
+      }
+    }).then(() => {
+      RM.proj.setClipboard(cb);
+      A.toast(HI() ? 'कॉपी हो गया' : 'Copied');
+      if (done) done();
+    });
+  }
+
+  function renderMarkers() {
+    const box = $('ed-markers');
+    if (!box) return;
+    const ms = A.state.project ? A.state.project.settings.markers : [];
+    box.innerHTML = '';
+    ms.forEach((m, i) => {
+      const d = document.createElement('div');
+      d.className = 'marker-row';
+      d.innerHTML = `<span>${A.escapeHtml(m.label)} — ${A.fmtTime(m.t)}</span>
+        <button class="btn small" data-a="go">${HI() ? 'जाएं' : 'Go'}</button>
+        <button class="btn small ghost" data-a="del">✕</button>`;
+      d.querySelector('[data-a="go"]').addEventListener('click', () => {
+        A.ensureStudio();
+        if (A.state.player.playing) A.state.player.play(m.t);
+        else { A.state.player.offset = m.t; A.state.waveView.setPlayhead(m.t); }
+      });
+      d.querySelector('[data-a="del"]').addEventListener('click', () => {
+        ms.splice(i, 1); RM.proj.autosave(A.state.project); renderMarkers();
+      });
+      box.appendChild(d);
+    });
+    if (A.state.waveView) A.state.waveView.setMarkers(ms.map((m) => ({ t: m.t, label: m.label })));
+  }
+  A.renderMarkers = renderMarkers;
+
+  /* ================= auto remix ================= */
+  function initRemix() {
+    const grid = $('remix-grid');
+    RM.remix.STYLES.forEach((s) => {
+      const d = document.createElement('button');
+      d.className = 'style-card';
+      d.dataset.id = s.id;
+      d.innerHTML = `<div class="sc-name">${A.escapeHtml(s.name)}</div><div class="sc-tag">${A.escapeHtml(s.tag)}</div>`;
+      d.addEventListener('click', () => selectRemixStyle(s.id));
+      grid.appendChild(d);
+    });
+    $('remix-generate').addEventListener('click', generateRemix);
+    $('remix-preview').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      A.ensureStudio(); A.applyFxToChain();
+      const p = A.state.player;
+      if (p.playing) p.pause();
+      else { p.setRate(A.state.remix.style ? RM.remix.get(A.state.remix.style).rate : 1); p.play(0); }
+    });
+    // custom sliders
+    ['c-tempo','c-reverb','c-echo','c-bass'].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener('input', () => { if (A.state.remix.style === 'custom') applyCustomRemix(); });
+    });
+  }
+  function selectRemixStyle(id) {
+    A.state.remix.style = id;
+    document.querySelectorAll('.style-card').forEach((c) => c.classList.toggle('sel', c.dataset.id === id));
+    const s = RM.remix.get(id);
+    $('remix-desc').innerHTML = `<b>${A.escapeHtml(s.name)}</b> — ${A.escapeHtml(s.tag)}` +
+      (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '');
+    $('remix-custom').style.display = id === 'custom' ? '' : 'none';
+    if (id !== 'custom') {
+      RM.remix.applyStyle(id, null, null);
+      A.state.fx = JSON.parse(JSON.stringify(RM.remix.get(id).fx));
+      A.applyFxToChain();
+    } else applyCustomRemix();
+  }
+  function applyCustomRemix() {
+    const tempo = (+$('c-tempo').value) / 100;
+    const fx = A.defaultFx();
+    fx.echo.on = true; fx.echo.time = 0.375; fx.echo.wet = (+$('c-echo').value) / 100 * 0.6;
+    fx.reverb.on = true; fx.reverb.wet = (+$('c-reverb').value) / 100 * 0.7;
+    fx.eq3[0] = ((+$('c-bass').value) / 100) * 10 - 2;
+    A.state.fx = fx;
+    A.state.remix.custom = { tempo, fx };
+    A.applyFxToChain();
+    $('remix-desc').innerHTML = `<b>Custom</b> — tempo ${(tempo).toFixed(2)}×`;
+  }
+  function generateRemix() {
+    if (!A.needAudio()) return;
+    const id = A.state.remix.style || 'commercial';
+    const status = $('remix-status');
+    status.textContent = HI() ? 'BPM पहचाना जा रहा है…' : 'Detecting BPM…';
+    RM.audio.detectBPM(A.state.buffer, (p) => {
+      status.textContent = (HI() ? 'BPM पहचाना जा रहा है… ' : 'Detecting BPM… ') + Math.round(p * 100) + '%';
+    }).then((bpm) => {
+      A.state.remix.bpm = bpm;
+      const s = RM.remix.get(id);
+      if (id === 'custom' && A.state.remix.custom) {
+        A.state.fx = A.state.remix.custom.fx;
+      } else {
+        A.state.fx = JSON.parse(JSON.stringify(s.fx));
+      }
+      // sync echo to detected BPM (quarter note)
+      const beat = 60 / bpm;
+      if (A.state.fx.echo.on) A.state.fx.echo.time = +(beat * 0.75).toFixed(3);
+      A.applyFxToChain();
+      A.ensureStudio();
+      const rate = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : s.rate;
+      A.state.player.setRate(rate);
+      A.state.player.play(0);
+      status.innerHTML = `✓ <b>${A.escapeHtml(s.name)}</b> — BPM ${bpm}, tempo ${rate.toFixed(2)}×` +
+        (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '');
+      A.toast(HI() ? 'रीमिक्स तैयार है' : 'Remix ready');
+    }).catch(() => { status.textContent = HI() ? 'BPM पहचान नहीं हो पाई' : 'BPM detection failed'; });
+  }
+
+  /* ================= slowed + reverb studio ================= */
+  const SLOWED_PRESETS = [
+    { id: 'deep', name: 'Deep Slow', speed: 0.75, room: 'church', wet: 0.6, echo: 0.2, bass: 5, width: 1.2 },
+    { id: 'dreamy', name: 'Dreamy', speed: 0.85, room: 'hall', wet: 0.55, echo: 0.35, bass: 2, width: 1.4 },
+    { id: 'dark', name: 'Dark', speed: 0.7, room: 'church', wet: 0.65, echo: 0.15, bass: 7, width: 1.0 },
+    { id: 'romantic', name: 'Romantic', speed: 0.9, room: 'hall', wet: 0.45, echo: 0.3, bass: 1, width: 1.3 },
+    { id: 'lofi', name: 'Lofi', speed: 0.88, room: 'room', wet: 0.35, echo: 0.4, bass: 3, width: 1.1 },
+    { id: 'atmo', name: 'Atmospheric', speed: 0.8, room: 'church', wet: 0.7, echo: 0.45, bass: 0, width: 1.5 },
+  ];
+  function initSlowed() {
+    const grid = $('slowed-presets');
+    SLOWED_PRESETS.forEach((p) => {
+      const d = document.createElement('button');
+      d.className = 'style-card';
+      d.innerHTML = `<div class="sc-name">${A.escapeHtml(p.name)}</div><div class="sc-tag">${p.speed}×</div>`;
+      d.addEventListener('click', () => applySlowedPreset(p, d));
+      grid.appendChild(d);
+    });
+    const bind = (id, key, fmt) => {
+      $(id).addEventListener('input', (e) => {
+        A.state.slowed[key] = +e.target.value;
+        const v = $(id + '-v'); if (v) v.textContent = fmt(+e.target.value);
+        applySlowedLive();
+      });
+    };
+    bind('sl-speed', 'speed', (v) => v.toFixed(2) + '×');
+    bind('sl-wet', 'wet', (v) => Math.round(v * 100) + '%');
+    bind('sl-echo', 'echo', (v) => Math.round(v * 100) + '%');
+    bind('sl-bass', 'bass', (v) => (v > 0 ? '+' : '') + v + ' dB');
+    bind('sl-width', 'width', (v) => v.toFixed(1));
+    $('sl-room').addEventListener('change', (e) => { A.state.slowed.room = e.target.value; applySlowedLive(); });
+    $('sl-play').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      applySlowedLive();
+      A.ensureStudio();
+      const p = A.state.player;
+      if (p.playing) p.pause(); else p.play(0);
+    });
+  }
+  function applySlowedPreset(p, el) {
+    document.querySelectorAll('#slowed-presets .style-card').forEach((c) => c.classList.remove('sel'));
+    if (el) el.classList.add('sel');
+    Object.assign(A.state.slowed, { speed: p.speed, room: p.room, wet: p.wet, echo: p.echo, bass: p.bass, width: p.width });
+    $('sl-speed').value = p.speed; $('sl-speed-v').textContent = p.speed.toFixed(2) + '×';
+    $('sl-wet').value = p.wet; $('sl-wet-v').textContent = Math.round(p.wet * 100) + '%';
+    $('sl-echo').value = p.echo; $('sl-echo-v').textContent = Math.round(p.echo * 100) + '%';
+    $('sl-bass').value = p.bass; $('sl-bass-v').textContent = (p.bass > 0 ? '+' : '') + p.bass + ' dB';
+    $('sl-width').value = p.width; $('sl-width-v').textContent = p.width.toFixed(1);
+    $('sl-room').value = p.room;
+    applySlowedLive();
+  }
+  function applySlowedLive() {
+    const s = A.state.slowed;
+    const fx = A.defaultFx();
+    fx.eq3[0] = s.bass;
+    fx.filter = 16000;
+    fx.reverb.on = true; fx.reverb.room = s.room; fx.reverb.wet = s.wet;
+    fx.echo.on = s.echo > 0.02; fx.echo.time = 0.45; fx.echo.fb = 0.35; fx.echo.wet = s.echo * 0.6;
+    A.state.fx = fx;
+    A.applyFxToChain();
+    A.setWidth(s.width);
+    A.ensureStudio();
+    A.state.player.setRate(s.speed);
+  }
+
+  /* ================= stems UI ================= */
+  let stemPlayers = [];
+  function initStems() {
+    const grid = $('stems-grid');
+    RM.stems.ENGINES.forEach((e) => {
+      const d = document.createElement('div');
+      d.className = 'engine-card';
+      d.innerHTML = `
+        <div class="ec-name">${A.escapeHtml(e.name)} <span class="beta">BETA</span></div>
+        <div class="ec-desc">${A.escapeHtml(e.desc)}</div>
+        <div class="honest">${A.escapeHtml(e.note)}</div>
+        <button class="btn primary block" data-run="${e.id}">${HI() ? 'अलग करें' : 'Separate'}</button>`;
+      d.querySelector('[data-run]').addEventListener('click', () => runStemEngine(e.id));
+      grid.appendChild(d);
+    });
+  }
+  function stopStemPlayers() {
+    stemPlayers.forEach((p) => { try { p.stop(true); p.dispose(); } catch (e) {} });
+    stemPlayers = [];
+  }
+  function runStemEngine(id) {
+    if (!A.needAudio()) return;
+    const status = $('stems-status');
+    const results = $('stems-results');
+    results.innerHTML = '';
+    stopStemPlayers();
+    A.stopAll();
+    const eng = RM.stems.ENGINES.find((e) => e.id === id);
+    status.innerHTML = `<div class="progress"><div class="pbar" id="stems-pbar"></div></div><div id="stems-plabel">${A.escapeHtml(eng.name)}…</div>`;
+    const t0 = Date.now();
+    RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
+      const bar = $('stems-pbar'), lb = $('stems-plabel');
+      if (bar) bar.style.width = Math.round(p * 100) + '%';
+      if (lb) lb.textContent = (label || eng.name) + ' ' + Math.round(p * 100) + '%';
+    }).then((stems) => {
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      status.innerHTML = `<div class="ok">${HI() ? 'हो गया' : 'Done'} (${secs}s) — ${stems.length} stems</div><div class="honest">${A.escapeHtml(eng.note)}</div>`;
+      stems.forEach((s, i) => addStemRow(s, i));
+      A.toast(HI() ? 'Stems तैयार हैं' : 'Stems ready');
+    }).catch((e) => {
+      status.innerHTML = `<div class="err">${HI() ? 'विफल: ' : 'Failed: '}${A.escapeHtml(e.message || e)}</div>`;
+    });
+  }
+  function addStemRow(s, i) {
+    const box = $('stems-results');
+    const d = document.createElement('div');
+    d.className = 'stem-row';
+    d.innerHTML = `
+      <div class="sr-main">
+        <div class="sr-name">${A.escapeHtml(s.name)}</div>
+        <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
+      </div>
+      <button class="btn small" data-a="play">▶</button>
+      <button class="btn small ghost" data-a="mix">${HI() ? 'मिक्सर' : 'Mixer'}</button>
+      <button class="btn small ghost" data-a="exp">${HI() ? 'एक्सपोर्ट' : 'Export'}</button>`;
+    let player = null;
+    const btn = d.querySelector('[data-a="play"]');
+    btn.addEventListener('click', () => {
+      if (player && player.playing) { player.pause(); btn.textContent = '▶'; return; }
+      A.stopAll(); stopStemPlayers();
+      RM.audio.ensureCtx();
+      player = RM.audio.makePlayer();
+      stemPlayers.push(player);
+      player.load(s.buffer);
+      player.play(0);
+      btn.textContent = '⏸';
+      player.onended = () => { btn.textContent = '▶'; };
+    });
+    d.querySelector('[data-a="mix"]').addEventListener('click', () => {
+      if (A.sendToMixer(s.buffer, s.name)) A.show('mixer');
+    });
+    d.querySelector('[data-a="exp"]').addEventListener('click', () => {
+      A.state.exportSource = { kind: 'buffer', buffer: s.buffer, name: s.name };
+      A.show('export');
+      A.refreshExportSource();
+    });
+    box.appendChild(d);
+  }
+
+  return {
+    initEditor, initRemix, initSlowed, initStems,
+    updateEditorMeta, renderMarkers, updateTrimShade, stopStemPlayers,
+    SLOWED_PRESETS,
+  };
+  })());
+'use strict';
+/* =====================================================================
+   RuhMix — app.js (part 3)
+   Multitrack mixer, FX rack, mastering, beat tools, export screen,
+   projects, settings, RuhMix Pro, home, init.
+   ===================================================================== */
+Object.assign(RM.app, (function () {
+  const A = RM.app;
+  const $ = A.$, clamp = RM.audio.clamp;
+  const HI = () => { try { return (localStorage.getItem('ruhmix.lang') || 'hi') === 'hi'; } catch (e) { return true; } };
+
+  /* ================= multitrack mixer (5 tracks) ================= */
+  const mixer = { tracks: [] };
+  function initMixer() {
+    const box = $('mixer-tracks');
+    for (let i = 0; i < 5; i++) {
+      const tr = { id: i, name: 'Track ' + (i + 1), buffer: null, player: null, vol: 0.9, pan: 0, mute: false, solo: false };
+      mixer.tracks.push(tr);
+      const d = document.createElement('div');
+      d.className = 'track';
+      d.id = 'mx-track-' + i;
+      d.innerHTML = `
+        <div class="tr-head"><span class="tr-name">${tr.name}</span><span class="tr-src muted"></span></div>
+        <div class="tr-row">
+          <button class="btn small" data-a="load">${HI() ? 'लोड' : 'Load'}</button>
+          <button class="btn small" data-a="play">▶</button>
+          <button class="btn small tog" data-a="mute">M</button>
+          <button class="btn small tog" data-a="solo">S</button>
+        </div>
+        <div class="tr-row"><label>Vol</label><input type="range" min="0" max="120" value="90" data-a="vol"><span data-a="volv">90%</span></div>
+        <div class="tr-row"><label>Pan</label><input type="range" min="-100" max="100" value="0" data-a="pan"><span data-a="panv">C</span></div>`;
+      box.appendChild(d);
+      wireTrack(d, tr);
+    }
+    $('mx-play-all').addEventListener('click', () => {
+      RM.audio.ensureCtx();
+      mixer.tracks.forEach((tr) => {
+        if (!tr.buffer) return;
+        if (!tr.player) { tr.player = RM.audio.makePlayer(); tr.player.load(tr.buffer); }
+        applyTrackMix(tr);
+        tr.player.play(0);
+      });
+      refreshTrackUI();
+    });
+    $('mx-stop-all').addEventListener('click', stopMixer);
+  }
+  function stopMixer() {
+    mixer.tracks.forEach((tr) => { try { if (tr.player) tr.player.stop(true); } catch (e) {} });
+    refreshTrackUI();
+  }
+  A.stopMixer = stopMixer;
+  function applyTrackMix(tr) {
+    if (!tr.player) return;
+    const anySolo = mixer.tracks.some((x) => x.solo && x.buffer);
+    const audible = !tr.mute && (!anySolo || tr.solo);
+    tr.player.setVolume(audible ? tr.vol : 0);
+    tr.player.setPan(tr.pan);
+  }
+  function refreshTrackUI() {
+    mixer.tracks.forEach((tr) => {
+      const d = $('mx-track-' + tr.id);
+      if (!d) return;
+      d.querySelector('.tr-name').textContent = tr.name;
+      d.querySelector('.tr-src').textContent = tr.buffer ? A.fmtTime(tr.buffer.duration) : (HI() ? 'खाली' : 'empty');
+      d.querySelector('[data-a="mute"]').classList.toggle('on', tr.mute);
+      d.querySelector('[data-a="solo"]').classList.toggle('on', tr.solo);
+      d.querySelector('[data-a="play"]').textContent = (tr.player && tr.player.playing) ? '⏸' : '▶';
+    });
+  }
+  function wireTrack(d, tr) {
+    const q = (s) => d.querySelector(s);
+    q('[data-a="load"]').addEventListener('click', () => showTrackLoadMenu(tr));
+    q('[data-a="play"]').addEventListener('click', () => {
+      if (!tr.buffer) { A.toast(HI() ? 'पहले ट्रैक में ऑडियो लोड करें' : 'Load audio into the track first'); return; }
+      RM.audio.ensureCtx();
+      if (!tr.player) { tr.player = RM.audio.makePlayer(); tr.player.load(tr.buffer); }
+      if (tr.player.playing) tr.player.pause();
+      else { applyTrackMix(tr); tr.player.play(0); }
+      refreshTrackUI();
+    });
+    q('[data-a="mute"]').addEventListener('click', () => { tr.mute = !tr.mute; mixer.tracks.forEach(applyTrackMix); refreshTrackUI(); });
+    q('[data-a="solo"]').addEventListener('click', () => { tr.solo = !tr.solo; mixer.tracks.forEach(applyTrackMix); refreshTrackUI(); });
+    q('[data-a="vol"]').addEventListener('input', (e) => {
+      tr.vol = +e.target.value / 100;
+      q('[data-a="volv"]').textContent = e.target.value + '%';
+      applyTrackMix(tr);
+    });
+    q('[data-a="pan"]').addEventListener('input', (e) => {
+      tr.pan = +e.target.value / 100;
+      q('[data-a="panv"]').textContent = tr.pan === 0 ? 'C' : (tr.pan < 0 ? 'L' : 'R') + Math.abs(Math.round(tr.pan * 100));
+      applyTrackMix(tr);
+    });
+  }
+  function showTrackLoadMenu(tr) {
+    const opts = [];
+    if (A.state.viewBuffer) opts.push({ label: (HI() ? 'वर्तमान प्रोजेक्ट' : 'Current project'), buf: A.state.viewBuffer });
+    RM.stems.results.forEach((s) => opts.push({ label: 'Stem: ' + s.name, buf: s.buffer }));
+    A.state.imports.forEach((it) => opts.push({ label: it.name, buf: it.buffer }));
+    if (!opts.length) { A.toast(HI() ? 'लोड करने के लिए कुछ नहीं है' : 'Nothing to load'); return; }
+    const body = opts.map((o, i) => `<button class="btn block listbtn" data-i="${i}">${A.escapeHtml(o.label)}</button>`).join('');
+    A.dialog(HI() ? 'ट्रैक में लोड करें' : 'Load into track', body, null, HI() ? 'रद्द करें' : 'Cancel').then(() => {});
+    document.querySelectorAll('#dlg-body .listbtn').forEach((b) => {
+      b.addEventListener('click', () => {
+        const o = opts[+b.dataset.i];
+        tr.buffer = o.buf; tr.name = o.label.slice(0, 28);
+        if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
+        $('dlg').classList.remove('show');
+        refreshTrackUI();
+      });
+    });
+  }
+  // Stems/other screens use this to drop a buffer into the mixer.
+  function sendToMixer(buffer, name) {
+    let tr = mixer.tracks.find((x) => !x.buffer) || mixer.tracks[0];
+    tr.buffer = buffer;
+    tr.name = (name || 'Audio').slice(0, 28);
+    if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
+    refreshTrackUI();
+    A.toast((HI() ? 'मिक्सर में भेजा गया: ' : 'Sent to mixer: ') + tr.name);
+    return true;
+  }
+  A.sendToMixer = sendToMixer;
+
+  /* ================= FX rack ================= */
+  function initFxRack() {
+    const fx = A.state.fx;
+    const bind3 = (id, idx) => {
+      $(id).addEventListener('input', (e) => {
+        fx.eq3[idx] = +e.target.value;
+        $(id + '-v').textContent = (e.target.value > 0 ? '+' : '') + e.target.value + ' dB';
+        A.applyFxToChain();
+      });
+    };
+    bind3('fx-bass', 0); bind3('fx-mid', 1); bind3('fx-treble', 2);
+    // 10-band
+    const eq10box = $('fx-eq10');
+    RM.fx.EQ10_FREQS.forEach((f, i) => {
+      const w = document.createElement('div');
+      w.className = 'eq10b';
+      const label = f >= 1000 ? (f / 1000) + 'k' : f;
+      w.innerHTML = `<input type="range" min="-15" max="15" value="0" data-i="${i}" aria-label="${label} Hz"><span>${label}</span>`;
+      w.querySelector('input').addEventListener('input', (e) => {
+        fx.eq10[i] = +e.target.value;
+        A.applyFxToChain();
+      });
+      eq10box.appendChild(w);
+    });
+    const S = (id, fn) => $(id).addEventListener('input', (e) => { fn(+e.target.value); A.applyFxToChain(); });
+    const C = (id, fn) => $(id).addEventListener('change', (e) => { fn(e.target.type === 'checkbox' ? e.target.checked : e.target.value); A.applyFxToChain(); });
+    S('fx-filter', (v) => { fx.filter = v; $('fx-filter-v').textContent = v >= 1000 ? (v / 1000).toFixed(1) + ' kHz' : v + ' Hz'; });
+    S('fx-drive', (v) => { fx.drive = v / 100; $('fx-drive-v').textContent = v + '%'; });
+    C('fx-chorus-on', (v) => fx.chorus.on = v);
+    S('fx-chorus-rate', (v) => fx.chorus.rate = v / 10);
+    S('fx-chorus-depth', (v) => fx.chorus.depth = v / 100000);
+    C('fx-echo-on', (v) => fx.echo.on = v);
+    S('fx-echo-time', (v) => { fx.echo.time = v / 1000; $('fx-echo-time-v').textContent = v + ' ms'; });
+    S('fx-echo-fb', (v) => { fx.echo.fb = v / 100; $('fx-echo-fb-v').textContent = v + '%'; });
+    S('fx-echo-wet', (v) => { fx.echo.wet = v / 100; $('fx-echo-wet-v').textContent = v + '%'; });
+    C('fx-reverb-on', (v) => fx.reverb.on = v);
+    C('fx-reverb-room', (v) => fx.reverb.room = v);
+    S('fx-reverb-wet', (v) => { fx.reverb.wet = v / 100; $('fx-reverb-wet-v').textContent = v + '%'; });
+    C('fx-comp-on', (v) => fx.comp.on = v);
+    S('fx-comp-thr', (v) => { fx.comp.thr = v; $('fx-comp-thr-v').textContent = v + ' dB'; });
+    S('fx-comp-ratio', (v) => { fx.comp.ratio = v; $('fx-comp-ratio-v').textContent = v + ':1'; });
+    S('fx-out', (v) => { fx.out = v / 100; $('fx-out-v').textContent = v + '%'; });
+    // EQ preset quick select
+    const sel = $('fx-eqpreset');
+    Object.keys(RM.fx.EQ_PRESETS).forEach((k) => {
+      const o = document.createElement('option');
+      o.value = k; o.textContent = RM.fx.EQ_PRESETS[k].name;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+      const p = RM.fx.EQ_PRESETS[sel.value];
+      if (!p) return;
+      fx.eq3 = p.g.slice();
+      $('fx-bass').value = p.g[0]; $('fx-bass-v').textContent = (p.g[0] > 0 ? '+' : '') + p.g[0] + ' dB';
+      $('fx-mid').value = p.g[1]; $('fx-mid-v').textContent = (p.g[1] > 0 ? '+' : '') + p.g[1] + ' dB';
+      $('fx-treble').value = p.g[2]; $('fx-treble-v').textContent = (p.g[2] > 0 ? '+' : '') + p.g[2] + ' dB';
+      A.applyFxToChain();
+    });
+    $('fx-preview').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      A.ensureStudio(); A.applyFxToChain();
+      const p = A.state.player;
+      if (p.playing) p.pause(); else p.play(0);
+    });
+    $('fx-reset').addEventListener('click', () => {
+      A.state.fx = A.defaultFx();
+      A.applyFxToChain();
+      syncFxUI();
+      A.toast(HI() ? 'FX रीसेट हो गया' : 'FX reset');
+    });
+    $('fx-save').addEventListener('click', () => {
+      try {
+        const saved = JSON.parse(localStorage.getItem('ruhmix.fxpresets') || '{}');
+        const name = 'Preset ' + (Object.keys(saved).length + 1);
+        saved[name] = A.state.fx;
+        localStorage.setItem('ruhmix.fxpresets', JSON.stringify(saved));
+        renderFxSaved();
+        A.toast((HI() ? 'सहेजा गया: ' : 'Saved: ') + name);
+      } catch (e) {}
+    });
+    renderFxSaved();
+  }
+  function renderFxSaved() {
+    const box = $('fx-saved');
+    if (!box) return;
+    box.innerHTML = '';
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('ruhmix.fxpresets') || '{}'); } catch (e) {}
+    Object.keys(saved).forEach((name) => {
+      const b = document.createElement('button');
+      b.className = 'chip';
+      b.textContent = name;
+      b.addEventListener('click', () => {
+        A.state.fx = saved[name];
+        A.applyFxToChain(); syncFxUI();
+        A.toast((HI() ? 'लागू: ' : 'Applied: ') + name);
+      });
+      box.appendChild(b);
+    });
+  }
+  function syncFxUI() {
+    const fx = A.state.fx;
+    $('fx-bass').value = fx.eq3[0]; $('fx-mid').value = fx.eq3[1]; $('fx-treble').value = fx.eq3[2];
+    document.querySelectorAll('#fx-eq10 input').forEach((el) => { el.value = fx.eq10[+el.dataset.i] || 0; });
+    $('fx-chorus-on').checked = fx.chorus.on;
+    $('fx-echo-on').checked = fx.echo.on;
+    $('fx-reverb-on').checked = fx.reverb.on;
+    $('fx-reverb-room').value = fx.reverb.room;
+    $('fx-comp-on').checked = fx.comp.on;
+  }
+
+  /* ================= mastering ================= */
+  const mst = { player: null, chain: null, bypass: null, direct: null, ab: 'after' };
+  function initMastering() {
+    const sel = $('mst-preset');
+    Object.keys(RM.fx.MASTER_PRESETS).forEach((k) => {
+      const o = document.createElement('option');
+      o.value = k; o.textContent = RM.fx.MASTER_PRESETS[k].label;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+      A.state.mastering.preset = sel.value;
+      A.state.mastering.settings = Object.assign({}, RM.fx.MASTER_PRESETS[sel.value]);
+      syncMstUI();
+      applyMstChain();
+      RM.proj.autosave(A.state.project || RM.proj.create('x'));
+    });
+    A.state.mastering.settings = Object.assign({}, RM.fx.MASTER_PRESETS.clean);
+    const B = (id, key, fmt) => $(id).addEventListener('input', (e) => {
+      A.state.mastering.settings[key] = +e.target.value;
+      $(id + '-v').textContent = fmt(+e.target.value);
+      applyMstChain();
+    });
+    B('mst-eqb', 'eqB', (v) => (v > 0 ? '+' : '') + v + ' dB');
+    B('mst-eqm', 'eqM', (v) => (v > 0 ? '+' : '') + v + ' dB');
+    B('mst-eqt', 'eqT', (v) => (v > 0 ? '+' : '') + v + ' dB');
+    B('mst-thr', 'thr', (v) => v + ' dB');
+    $('mst-ratio').addEventListener('input', (e) => {
+      A.state.mastering.settings.ratio = +e.target.value / 10;
+      $('mst-ratio-v').textContent = (+e.target.value / 10).toFixed(1) + ':1';
+      applyMstChain();
+    });
+    $('mst-ab').addEventListener('click', (e) => {
+      mst.ab = mst.ab === 'after' ? 'before' : 'after';
+      e.target.textContent = mst.ab === 'after' ? (HI() ? 'सुन रहे हैं: AFTER (मास्टर्ड)' : 'Hearing: AFTER (mastered)') : (HI() ? 'सुन रहे हैं: BEFORE (मूल)' : 'Hearing: BEFORE (original)');
+      applyMstChain();
+    });
+    $('mst-play').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      ensureMst();
+      if (mst.player.playing) mst.player.pause();
+      else { applyMstChain(); mst.player.play(0); }
+    });
+    $('mst-normalize').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      A.toast(HI() ? 'नॉर्मलाइज़ हो रहा है…' : 'Normalizing…');
+      RM.audio.normalizeBuffer(A.state.viewBuffer, 0.95, (p) => {
+        $('mst-status').textContent = Math.round(p * 100) + '%';
+      }).then(() => {
+        $('mst-status').textContent = HI() ? '✓ Loudness normalize हो गया (peak −0.5 dB)' : '✓ Loudness normalized (peak −0.5 dB)';
+        A.refreshView();
+      });
+    });
+  }
+  function ensureMst() {
+    const ctx = RM.audio.ensureCtx();
+    if (!mst.player) {
+      mst.player = RM.audio.makePlayer();
+      mst.chain = RM.fx.makeMasterChain(ctx, A.state.mastering.settings);
+      mst.bypass = ctx.createGain(); // processed path gain
+      mst.direct = ctx.createGain(); // dry path gain
+      mst.player.insert.connect(mst.chain.input);
+      mst.chain.output.connect(mst.bypass);
+      mst.bypass.connect(RM.audio.masterIn());
+      mst.player.insert.connect(mst.direct);
+      mst.direct.connect(RM.audio.masterIn());
+    }
+    if (A.state.viewBuffer && mst.player.buffer !== A.state.viewBuffer) mst.player.load(A.state.viewBuffer);
+  }
+  function applyMstChain() {
+    if (!mst.chain) return;
+    const ctx = RM.audio.ensureCtx();
+    const t = ctx.currentTime;
+    mst.chain.apply(A.state.mastering.settings);
+    const after = mst.ab !== 'before';
+    mst.bypass.gain.setTargetAtTime(after ? 1 : 0, t, 0.02);
+    mst.direct.gain.setTargetAtTime(after ? 0 : 1, t, 0.02);
+  }
+  function syncMstUI() {
+    const s = A.state.mastering.settings;
+    $('mst-eqb').value = s.eqB; $('mst-eqm').value = s.eqM; $('mst-eqt').value = s.eqT;
+    $('mst-thr').value = s.thr; $('mst-ratio').value = s.ratio * 10;
+    $('mst-ratio-v').textContent = s.ratio.toFixed(1) + ':1';
+  }
+
+  /* ================= beat tools ================= */
+  const tap = { times: [] };
+  const metro = { playing: false, bpm: 120, beat: 0, nextTime: 0, timer: null };
+  function initBeat() {
+    $('tap-btn').addEventListener('click', () => {
+      const now = performance.now() / 1000;
+      tap.times.push(now);
+      if (tap.times.length > 6) tap.times.shift();
+      if (now - tap.times[0] > 3) tap.times = [now];
+      if (tap.times.length >= 2) {
+        const iv = [];
+        for (let i = 1; i < tap.times.length; i++) iv.push(tap.times[i] - tap.times[i - 1]);
+        const avg = iv.reduce((a, b) => a + b, 0) / iv.length;
+        const bpm = clamp(Math.round(60 / avg), 40, 220);
+        $('tap-bpm').textContent = bpm + ' BPM';
+        metro.bpm = bpm;
+        $('metro-bpm').value = bpm;
+        $('metro-bpm-v').textContent = bpm;
+      }
+    });
+    $('tap-reset').addEventListener('click', () => { tap.times = []; $('tap-bpm').textContent = '— BPM'; });
+    $('metro-bpm').addEventListener('input', (e) => {
+      metro.bpm = +e.target.value;
+      $('metro-bpm-v').textContent = metro.bpm;
+    });
+    $('metro-start').addEventListener('click', (e) => {
+      RM.audio.ensureCtx();
+      if (!metro.playing) {
+        metro.playing = true; metro.beat = 0;
+        metro.nextTime = RM.audio.ensureCtx().currentTime + 0.06;
+        metro.timer = setInterval(metroSchedule, 25);
+        e.target.textContent = HI() ? 'बंद करें' : 'Stop';
+        e.target.classList.add('on');
+      } else {
+        metro.playing = false;
+        clearInterval(metro.timer); metro.timer = null;
+        e.target.textContent = HI() ? 'शुरू करें' : 'Start';
+        e.target.classList.remove('on');
+      }
+    });
+  }
+  function metroClick(beat, t) {
+    const ctx = RM.audio.ensureCtx();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.value = beat === 0 ? 2000 : 1200;
+    g.gain.setValueAtTime(0.5, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+    o.connect(g); g.connect(RM.audio.masterIn());
+    o.start(t); o.stop(t + 0.08);
+  }
+  function metroSchedule() {
+    const ctx = RM.audio.ensureCtx();
+    if (metro.nextTime < ctx.currentTime - 0.1) metro.nextTime = ctx.currentTime + 0.06;
+    while (metro.nextTime < ctx.currentTime + 0.1) {
+      metroClick(metro.beat, metro.nextTime);
+      metro.nextTime += 60 / metro.bpm;
+      metro.beat = (metro.beat + 1) % 4;
+    }
+  }
+
+  /* ================= export screen ================= */
+  const expToken = { cancelled: false };
+  function refreshExportSource() {
+    const box = $('exp-sources');
+    if (!box) return;
+    box.innerHTML = '';
+    const opts = [];
+    if (A.state.viewBuffer) opts.push({ kind: 'project', label: (HI() ? 'वर्तमान प्रोजेक्ट' : 'Current project') + ' (' + A.state.fileName + ')', get: () => ({ buffer: A.state.viewBuffer, rate: A.state.project.settings.speed || 1, fx: A.state.fx, name: A.state.fileName }) });
+    RM.stems.results.forEach((s) => opts.push({ kind: 'stem', label: 'Stem: ' + s.name, get: () => ({ buffer: s.buffer, rate: 1, fx: A.defaultFx(), name: s.name }) }));
+    A.state.imports.forEach((it) => opts.push({ kind: 'import', label: it.name, get: () => ({ buffer: it.buffer, rate: 1, fx: A.defaultFx(), name: it.name }) }));
+    if (!opts.length) {
+      box.innerHTML = `<div class="empty">${HI() ? 'एक्सपोर्ट के लिए पहले ऑडियो लोड करें' : 'Load audio first to export'}</div>`;
+      return;
+    }
+    A.state.exportSource = A.state.exportSource || { idx: 0 };
+    opts.forEach((o, i) => {
+      const l = document.createElement('label');
+      l.className = 'radio-row';
+      l.innerHTML = `<input type="radio" name="expsrc" value="${i}" ${i === 0 ? 'checked' : ''}><span>${A.escapeHtml(o.label)}</span>`;
+      box.appendChild(l);
+    });
+    A.state._exportOpts = opts;
+  }
+  A.refreshExportSource = refreshExportSource;
+
+  function initExport() {
+    $('exp-format-mp3').addEventListener('change', syncExpFormat);
+    $('exp-format-wav').addEventListener('change', syncExpFormat);
+    syncExpFormat();
+    $('exp-bitrate').value = A.state.exportDefaults.bitrate;
+    $('exp-sr').value = A.state.exportDefaults.sampleRate;
+    $('exp-start').addEventListener('click', doExport);
+    $('exp-cancel').addEventListener('click', () => {
+      expToken.cancelled = true;
+      $('exp-status').textContent = HI() ? 'रद्द किया जा रहा है…' : 'Cancelling…';
+    });
+    $('exp-share').addEventListener('click', () => {
+      if (!A.state.lastDelivery) { A.toast(HI() ? 'पहले एक्सपोर्ट करें' : 'Export first'); return; }
+      const mime = A.state.lastDelivery.mime;
+      const r = RM.exp.share(A.state.lastDelivery, mime);
+      if (r === 'unavailable') A.toast(HI() ? 'शेयर इस डिवाइस पर उपलब्ध नहीं है' : 'Share unavailable on this device', 3000);
+    });
+  }
+  function syncExpFormat() {
+    const isMp3 = $('exp-format-mp3').checked;
+    $('exp-bitrate-row').style.display = isMp3 ? '' : 'none';
+    $('exp-note').textContent = isMp3
+      ? (HI() ? 'MP3 — छोटी फ़ाइल, हर जगह चलती है (lamejs, ऑफलाइन)' : 'MP3 — small file, plays everywhere (lamejs, offline)')
+      : (HI() ? 'WAV — बेस्ट क्वालिटी, बड़ी फ़ाइल (16-bit PCM)' : 'WAV — best quality, larger file (16-bit PCM)');
+  }
+  function setExpStage(label, frac) {
+    $('exp-status').textContent = label;
+    const bar = $('exp-pbar');
+    if (bar) bar.style.width = Math.round((frac || 0) * 100) + '%';
+  }
+  function doExport() {
+    const opts = A.state._exportOpts;
+    if (!opts || !opts.length) { A.toast(HI() ? 'एक्सपोर्ट के लिए कुछ नहीं है' : 'Nothing to export'); return; }
+    const sel = document.querySelector('input[name="expsrc"]:checked');
+    const src = opts[sel ? +sel.value : 0].get();
+    const isMp3 = $('exp-format-mp3').checked;
+    const kbps = +$('exp-bitrate').value;
+    const sr = +$('exp-sr').value;
+    const normalize = $('exp-normalize').checked;
+    const ext = isMp3 ? 'mp3' : 'wav';
+    const mime = isMp3 ? 'audio/mpeg' : 'audio/wav';
+    const fileName = (src.name || 'ruhmix').replace(/[^\w\- ]+/g, '').trim().slice(0, 40) + '.' + ext || RM.exp.defaultName(ext);
+    expToken.cancelled = false;
+    $('exp-start').disabled = true;
+    $('exp-share').style.display = 'none';
+    const done = (msg, ok) => {
+      $('exp-start').disabled = false;
+      setExpStage(msg, ok ? 1 : 0);
+    };
+
+    const stage = (label, frac) => {
+      if (expToken.cancelled) throw new Error('cancelled');
+      setExpStage(label, frac);
+    };
+    // 1. render
+    stage(HI() ? 'तैयार हो रहा है…' : 'Preparing…', 0.02);
+    let chain;
+    RM.exp.renderOffline(src.buffer, (oc, srcNode) => {
+      chain = RM.fx.makeChain(oc);
+      chain.applyPreset(src.fx || A.defaultFx());
+      srcNode.connect(chain.input);
+      return chain.output;
+    }, { sampleRate: sr, rate: src.rate || 1 })
+      .then((rendered) => {
+        try { if (chain) chain.dispose(); } catch (e) {}
+        stage(HI() ? 'रेंडर हो रहा है… कृपया प्रतीक्षा करें' : 'Rendering… please wait', 0.35);
+        const p2 = normalize
+          ? RM.audio.normalizeBuffer(rendered, 0.95, (p) => setExpStage((HI() ? 'नॉर्मलाइज़: ' : 'Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
+          : Promise.resolve(rendered);
+        return p2.then((buf) => {
+          stage(HI() ? 'एनकोड हो रहा है…' : 'Encoding…', 0.5);
+          if (!isMp3) {
+            return RM.audio.encodeWavBuffer(buf, (p) => setExpStage((HI() ? 'एनकोड: ' : 'Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35))
+              .then((ab) => new Blob([ab], { type: mime }));
+          }
+          // MP3: resample to 44100 (lamejs sweet spot), then encode
+          return RM.audio.resampleBuffer(buf, 44100, (p) => setExpStage((HI() ? 'रीसैंपल: ' : 'Resampling: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
+            .then((rs) => RM.audio.floatToInt16(rs, (p) => setExpStage((HI() ? 'तैयार: ' : 'Preparing: ') + Math.round(p * 100) + '%', 0.6 + p * 0.1)))
+            .then((i16) => {
+              stage(HI() ? 'MP3 एनकोड हो रहा है…' : 'Encoding MP3…', 0.7);
+              return RM.exp.encodeMp3(i16, kbps, 44100, (p) => setExpStage('MP3 ' + Math.round(p * 100) + '%', 0.7 + p * 0.2), expToken);
+            });
+        }).then((blob) => {
+          stage(HI() ? 'सहेजा जा रहा है…' : 'Saving…', 0.95);
+          return RM.exp.deliver(blob, fileName, mime, (p) => setExpStage((HI() ? 'सहेजा जा रहा है… ' : 'Saving… ') + Math.round(p * 100) + '%', 0.95));
+        }).then((delivery) => {
+          delivery.mime = mime;
+          A.state.lastDelivery = delivery;
+          try {
+            A.state.exportDefaults = { format: isMp3 ? 'mp3' : 'wav', bitrate: kbps, sampleRate: sr };
+            localStorage.setItem('ruhmix.exportDefaults', JSON.stringify(A.state.exportDefaults));
+          } catch (e) {}
+          const nat = RM.audio.native;
+          if (nat.method('showNotification')) nat.call('showNotification', 'RuhMix', (HI() ? 'एक्सपोर्ट हो गया: ' : 'Export complete: ') + fileName);
+          done((HI() ? '✓ हो गया: ' : '✓ Done: ') + fileName, true);
+          $('exp-share').style.display = '';
+          A.toast(HI() ? 'एक्सपोर्ट हो गया' : 'Export complete');
+        });
+      })
+      .catch((e) => {
+        if (e && e.message === 'cancelled') done(HI() ? 'रद्द कर दिया गया' : 'Cancelled', false);
+        else done((HI() ? 'विफल: ' : 'Failed: ') + (e.message || e), false);
+      });
+  }
+
+  /* ================= projects screen ================= */
+  function initProjects() {
+    $('proj-new').addEventListener('click', () => {
+      A.dialog(HI() ? 'नया प्रोजेक्ट' : 'New Project',
+        `<input id="dlg-name" class="textin" value="${HI() ? 'मेरा प्रोजेक्ट' : 'My Project'}" maxlength="40">`,
+        HI() ? 'बनाएं' : 'Create', HI() ? 'रद्द करें' : 'Cancel').then((ok) => {
+          if (!ok) return;
+          const name = ($('dlg-name') && $('dlg-name').value.trim()) || (HI() ? 'मेरा प्रोजेक्ट' : 'My Project');
+          RM.proj.save(A.state.project || RM.proj.create(name));
+          A.newProject(name);
+          renderProjects();
+        });
+    });
+    renderProjects();
+  }
+  function renderProjects() {
+    const box = $('projects-list');
+    if (!box) return;
+    box.innerHTML = '';
+    const arr = RM.proj.list();
+    if (!arr.length) {
+      box.innerHTML = `<div class="empty">${HI() ? 'अभी कोई सहेजा हुआ प्रोजेक्ट नहीं है' : 'No saved projects yet'}</div>`;
+      return;
+    }
+    arr.forEach((p) => {
+      const d = document.createElement('div');
+      d.className = 'import-item';
+      const dt = new Date(p.updatedAt).toLocaleDateString();
+      d.innerHTML = `
+        <div class="ii-main">
+          <div class="ii-name">${A.escapeHtml(p.name)}</div>
+          <div class="ii-meta">${A.escapeHtml((p.audioRef && p.audioRef.name) || (HI() ? 'कोई ऑडियो नहीं' : 'no audio'))} • ${p.ops.length} edits • ${dt}</div>
+        </div>
+        <button class="btn small" data-a="open">${HI() ? 'खोलें' : 'Open'}</button>
+        <button class="btn small ghost" data-a="del">✕</button>`;
+      d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
+      d.querySelector('[data-a="del"]').addEventListener('click', () => {
+        A.dialog(HI() ? 'हटाएं?' : 'Delete?', `<p>${A.escapeHtml(p.name)}</p>`, HI() ? 'हटाएं' : 'Delete', HI() ? 'रद्द करें' : 'Cancel')
+          .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
+      });
+      box.appendChild(d);
+    });
+  }
+  function openProject(p) {
+    A.stopAll();
+    A.state.project = p;
+    A.state.buffer = null;
+    A.state.viewBuffer = null;
+    A.state.redoStack = [];
+    A.state.fileName = (p.audioRef && p.audioRef.name) || '';
+    RM.proj.autosave(p);
+    A.show('import');
+    const hint = $('import-hint');
+    if (hint && p.audioRef) {
+      hint.innerHTML = (HI() ? 'इस प्रोजेक्ट का ऑडियो चुनें: <b>' : 'Pick this project\'s audio: <b>') + A.escapeHtml(p.audioRef.name) + '</b>';
+      hint.style.display = '';
+    }
+    A.toast((HI() ? 'प्रोजेक्ट खुल गया: ' : 'Project opened: ') + p.name);
+  }
+
+  /* ================= settings ================= */
+  function initSettings() {
+    $('set-theme').addEventListener('change', (e) => A.setTheme(e.target.value));
+    $('set-lang').addEventListener('change', (e) => A.setLang(e.target.value));
+    $('set-def-format').value = A.state.exportDefaults.format;
+    $('set-def-bitrate').value = String(A.state.exportDefaults.bitrate);
+    $('set-def-sr').value = String(A.state.exportDefaults.sampleRate);
+    ['set-def-format', 'set-def-bitrate', 'set-def-sr'].forEach((id) => {
+      $(id).addEventListener('change', () => {
+        A.state.exportDefaults = {
+          format: $('set-def-format').value,
+          bitrate: +$('set-def-bitrate').value,
+          sampleRate: +$('set-def-sr').value,
+        };
+        try { localStorage.setItem('ruhmix.exportDefaults', JSON.stringify(A.state.exportDefaults)); } catch (e) {}
+      });
+    });
+    $('set-clear-cache').addEventListener('click', () => {
+      const nat = RM.audio.native;
+      let nativeCleared = false;
+      if (nat.method('clearCache')) { nat.call('clearCache'); nativeCleared = true; }
+      try {
+        Object.keys(localStorage).filter((k) => k.indexOf('ruhmix.') === 0 && k !== 'ruhmix.projects.v1').forEach((k) => localStorage.removeItem(k));
+      } catch (e) {}
+      RM.stems.clear();
+      A.toast(nativeCleared ? (HI() ? 'कैश साफ़ हो गया' : 'Cache cleared') : (HI() ? 'अस्थायी डेटा साफ़ हो गया' : 'Temporary data cleared'));
+      updateStorageInfo();
+    });
+    $('set-check-update').addEventListener('click', () => A.checkUpdate(true));
+    updateStorageInfo();
+  }
+  function updateStorageInfo() {
+    const el = $('storage-info');
+    if (!el) return;
+    const nat = RM.audio.native;
+    let dir = '—';
+    if (nat.method('getCacheDir')) { try { dir = nat.call('getCacheDir') || '—'; } catch (e) {} }
+    let lsKB = 0;
+    try {
+      Object.keys(localStorage).forEach((k) => { if (k.indexOf('ruhmix.') === 0) lsKB += (localStorage.getItem(k) || '').length; });
+    } catch (e) {}
+    el.innerHTML = `<div>Cache: <span class="mono">${A.escapeHtml(String(dir))}</span></div>
+      <div>${HI() ? 'ऐप डेटा' : 'App data'}: ~${Math.round(lsKB / 1024)} KB • ${HI() ? 'प्रोजेक्ट' : 'Projects'}: ${RM.proj.list().length}</div>`;
+  }
+
+  /* ================= RuhMix Pro (locked, coming soon) ================= */
+  const PRO_FEATURES = [
+    { icon: '☁️', hi: 'क्लाउड बैकअप', en: 'Cloud backup' },
+    { icon: '🎚️', hi: '16-ट्रैक मिक्सर', en: '16-track mixer' },
+    { icon: '✨', hi: 'प्रीमियम FX पैक', en: 'Premium FX pack' },
+    { icon: '🎧', hi: 'एडवांस्ड मास्टरिंग', en: 'Advanced mastering' },
+    { icon: '📦', hi: 'स्टेम एक्सपोर्ट पैक', en: 'Stem export pack' },
+    { icon: '🚫', hi: 'विज्ञापन-मुक्त अनुभव', en: 'Ad-free experience' },
+  ];
+  function initPro() {
+    const grid = $('pro-grid');
+    PRO_FEATURES.forEach((f) => {
+      const d = document.createElement('div');
+      d.className = 'pro-card locked';
+      d.innerHTML = `<div class="pro-icon">${f.icon}</div><div class="pro-name">${HI() ? f.hi : f.en}</div><div class="pro-lock">🔒 PRO</div>`;
+      grid.appendChild(d);
+    });
+    $('pro-notify').addEventListener('click', () => {
+      try { localStorage.setItem('ruhmix.proNotify', '1'); } catch (e) {}
+      A.toast(HI() ? 'जानकारी मिलते ही बता देंगे ✓' : 'We will notify you ✓');
+      $('pro-notify').disabled = true;
+    });
+    if (A.state.pro.isPro) document.body.classList.add('pro');
+  }
+
+  /* ================= more screen ================= */
+  const MORE_LINKS = [
+    ['slowed', '🎛️', 'slowed'], ['stems', '🎤', 'stems'], ['fx', '🎚️', 'equalizer'],
+    ['master', '💎', 'mastering'], ['record', '🎙️', 'recorder'], ['beat', '🥁', null],
+    ['export', '📤', 'export_title'], ['projects', '📁', null], ['settings', '⚙️', 'settings_title'],
+    ['pro', '⭐', 'pro_title'],
+  ];
+  function initMore() {
+    const grid = $('more-grid');
+    MORE_LINKS.forEach(([scr, icon, i18n]) => {
+      const label = { slowed: HI() ? 'स्लोड+रिवर्ब स्टूडियो' : 'Slowed+Reverb Studio', stems: HI() ? 'स्टेम सेपरेटर' : 'Stem Separator', fx: HI() ? 'FX रैक' : 'FX Rack', master: HI() ? 'मास्टरिंग' : 'Mastering', record: HI() ? 'वॉइस रिकॉर्डर' : 'Voice Recorder', beat: HI() ? 'बीट टूल्स' : 'Beat Tools', export: HI() ? 'एक्सपोर्ट' : 'Export', projects: HI() ? 'प्रोजेक्ट्स' : 'Projects', settings: HI() ? 'सेटिंग्स' : 'Settings', pro: 'RuhMix Pro' }[scr];
+      const b = document.createElement('button');
+      b.className = 'home-card';
+      b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label">${label}</div>`;
+      b.addEventListener('click', () => A.show(scr));
+      grid.appendChild(b);
+    });
+    $('more-update').addEventListener('click', () => A.checkUpdate(true));
+  }
+
+  /* ================= home ================= */
+  const HOME_CARDS = [
+    ['import', '🆕', 'new_project', null],
+    ['remix', '✨', 'auto_remix', null],
+    ['slowed', '🎛️', 'slowed', null],
+    ['editor', '🎚️', 'audio_editor', null],
+    ['stems', '🎤', 'stems', null],
+    ['record', '🎙️', 'recorder', null],
+    ['fx', '🎛️', 'equalizer', null],
+    ['master', '💎', 'mastering', null],
+  ];
+  function initHome() {
+    const grid = $('home-grid');
+    HOME_CARDS.forEach(([scr, icon, i18n]) => {
+      const b = document.createElement('button');
+      b.className = 'home-card';
+      b.dataset.label = A.t(i18n).toLowerCase();
+      b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label" data-i18n="${i18n}">${A.t(i18n)}</div>`;
+      b.addEventListener('click', () => {
+        if (scr === 'import' && !A.state.project) { A.newProject(); return; }
+        if ((scr === 'editor' || scr === 'remix' || scr === 'slowed' || scr === 'master') && !A.needAudio()) return;
+        A.show(scr);
+      });
+      grid.appendChild(b);
+    });
+    $('home-search').addEventListener('input', (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll('#home-grid .home-card').forEach((c) => {
+        c.style.display = !q || (c.dataset.label || '').includes(q) ? '' : 'none';
+      });
+    });
+    $('home-new').addEventListener('click', () => A.newProject());
+    renderHomeRecent();
+  }
+  function renderHomeRecent() {
+    const box = $('home-recent');
+    if (!box) return;
+    box.innerHTML = '';
+    const arr = RM.proj.list().slice(0, 5);
+    if (!arr.length) {
+      box.innerHTML = `<div class="empty">${HI() ? 'अभी कोई प्रोजेक्ट नहीं है' : 'No projects yet'}</div>`;
+      return;
+    }
+    arr.forEach((p) => {
+      const b = document.createElement('button');
+      b.className = 'recent-row';
+      b.innerHTML = `<span>${A.escapeHtml(p.name)}</span><span class="muted">${p.ops.length} edits</span>`;
+      b.addEventListener('click', () => openProject(p));
+      box.appendChild(b);
+    });
+  }
+  A.renderHomeRecent = renderHomeRecent;
+
+  /* ================= init ================= */
+  function init() {
+    A.onShow = (name) => {
+      if (name === 'export') refreshExportSource();
+      if (name === 'projects') renderProjects();
+      if (name === 'settings') updateStorageInfo();
+      if (name === 'home') renderHomeRecent();
+    };    A.loadTheme();
+    A.setLang((() => { try { return localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) { return 'hi'; } })());
+    // nav
+    document.querySelectorAll('.navbtn').forEach((b) => {
+      b.addEventListener('click', () => {
+        const s = b.getAttribute('data-screen');
+        if ((s === 'editor' || s === 'remix') && !A.state.buffer) { A.needAudio(); return; }
+        A.show(s);
+      });
+    });
+    initHome();
+    // import
+    $('btn-pick').addEventListener('click', A.pickAudio);
+    $('file-input').addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []);
+      let ch = Promise.resolve();
+      files.forEach((f) => {
+        ch = ch.then(() => f.arrayBuffer().then((ab) => decodeAndAdd(ab, f.name, f.size)));
+      });
+      ch.then(() => { e.target.value = ''; });
+    });
+    A.renderImportList();
+    A.initEditor(); A.initRemix(); A.initSlowed(); A.initStems();
+    // mixer / fx / mastering / beat / export / projects / settings / pro / more
+    initMixer(); initFxRack(); initMastering(); initBeat();
+    initExport(); initProjects(); initSettings(); initPro(); initMore();
+    // recorder
+    $('rec-btn').addEventListener('click', () => {
+      if (recBusy()) return;
+      A.startRecording();
+    });
+    A.updateRecUI = A.updateRecUI || function () {};
+    // crash recovery
+    RM.proj.markDirty();
+    if (RM.proj.needsRecovery()) {
+      const p = RM.proj.loadAutosave();
+      const banner = $('recovery-banner');
+      if (p && banner) {
+        $('recovery-text').innerHTML = (HI() ? 'पिछला प्रोजेक्ट मिल गया: <b>' : 'Found a previous project: <b>') + A.escapeHtml(p.name) + '</b> — ' + (HI() ? 'रिकवर करें?' : 'Recover it?');
+        banner.style.display = '';
+        $('recovery-yes').addEventListener('click', () => {
+          banner.style.display = 'none';
+          openProject(p);
+        });
+        $('recovery-no').addEventListener('click', () => {
+          banner.style.display = 'none';
+          RM.proj.discardAutosave();
+          RM.proj.markCleanExit();
+        });
+      }
+    } else {
+      RM.proj.markCleanExit();
+    }
+    window.addEventListener('pagehide', () => RM.proj.markCleanExit());
+    // ensure audio on first touch (mobile autoplay policy)
+    document.addEventListener('pointerdown', () => { try { RM.audio.ensureCtx(); } catch (e) {} }, { once: true });
+    A.show('home');
+  }
+  function recBusy() {
+    // part 1's rec object isn't exported; use the button state instead
+    return $('rec-btn').classList.contains('rec-on') ? (A.stopRecording(), true) : false;
+  }
+
+  return {
+    initMixer, initFxRack, initMastering, initBeat, initExport, initProjects,
+    initSettings, initPro, initMore, initHome, init,
+    refreshExportSource, renderProjects, openProject, sendToMixer, updateStorageInfo,
+  };
+  })());
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => RM.app.init());
+} else {
+  RM.app.init();
+}

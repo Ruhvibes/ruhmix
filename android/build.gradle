@@ -1,0 +1,13 @@
+// Top-level build file for RuhMix
+// NOTE: uses legacy buildscript classpath (not plugins{} block) because the
+// Gradle Plugin Portal 303-redirects the AGP marker to Maven Central (404);
+// Google's Maven repo hosts the marker correctly. (See ~/AGENTS.md.)
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+    }
+}
