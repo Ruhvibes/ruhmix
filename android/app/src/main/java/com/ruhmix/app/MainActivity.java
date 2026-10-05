@@ -439,12 +439,15 @@ public class MainActivity extends ComponentActivity {
             webView.goBack();
         } else {
             // Confirm before exiting — no accidental closes mid-mix.
-            new AlertDialog.Builder(this)
-                    .setTitle("RuhMix band karein?")
-                    .setMessage("Kya aap app se bahar nikalna chahte hain?")
-                    .setPositiveButton("Haan", (d, w) -> MainActivity.super.onBackPressed())
-                    .setNegativeButton("Nahi", null)
-                    .show();
+            // Professional English dialog (Hasnain: clear "Exit" label, no Hindi Yes/No).
+            AlertDialog exitDialog = new AlertDialog.Builder(this)
+                    .setTitle("Exit RuhMix?")
+                    .setMessage("Are you sure you want to exit the app?")
+                    .setPositiveButton("Exit", (d, w) -> MainActivity.super.onBackPressed())
+                    .setNegativeButton("Cancel", null)
+                    .create();
+            exitDialog.show();
+            exitDialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(0xFFE53935);
         }
     }
 

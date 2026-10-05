@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 9 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 10 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -22,8 +22,7 @@ RM.app = (function () {
       equalizer: 'Equalizer', mastering: 'Mastering', recent: 'Recent Projects',
       search: 'Search…', import_title: 'Import Audio', pick_audio: 'Pick Audio',
       editor_title: 'Audio Editor', play: 'Play', pause: 'Pause', stop: 'Stop',
-      pro_title: 'RuhMix Pro', coming_soon: 'Coming soon',
-      settings_title: 'Settings', export_title: 'Export',
+      settings_title: 'Settings', export_title: 'Export', projects_title: 'Projects',
       by: 'By Hasnain Khan',
     },
   };
@@ -118,7 +117,6 @@ RM.app = (function () {
     mastering: { preset: 'clean', ab: 'after', settings: null },
     exportDefaults: { format: 'mp3', bitrate: 192, sampleRate: 44100 },
     lastDelivery: null,
-    pro: { isPro: false },
   };
   try {
     const d = JSON.parse(localStorage.getItem('ruhmix.exportDefaults') || 'null');
@@ -133,12 +131,13 @@ RM.app = (function () {
       reverb: { on: false, room: 'hall', wet: 0.4 },
       comp: { on: true, thr: -18, ratio: 4, atk: 0.01, rel: 0.25 },
       out: 1.0,
+      spatial: { mode: 'off', speed: 0.12, depth: 0.7 }, // 8D/3D/16D (fx.js makeSpatial)
     };
   }
   state.fx = defaultFx();
 
   /* ================= navigation ================= */
-  const SCREENS = ['home','import','editor','remix','slowed','stems','aistem','mixer','fx','master','record','beat','export','projects','settings','pro','more'];
+  const SCREENS = ['home','import','editor','remix','slowed','stems','aistem','mixer','fx','master','record','export','projects','settings','more'];
   function show(name) {
     if (!SCREENS.includes(name)) name = 'home';
     state.screen = name;
@@ -643,11 +642,12 @@ RM.app = (function () {
     const nat = RM.audio.native;
     const hasMusic = nat.method('listMusic');
     tabM.style.display = hasMusic ? '' : 'none';
-    if (!hasMusic) return;
+    if (!hasMusic) { switchImportTab('files'); return; }
     tabF.addEventListener('click', () => switchImportTab('files'));
     tabM.addEventListener('click', () => switchImportTab('music'));
     const sq = $('music-search');
     if (sq) sq.addEventListener('input', () => { music.query = sq.value || ''; renderMusicList(); });
+    switchImportTab('music'); // UX-flow Demand 1: Music default tab — list bhi auto-load hoti hai
   }
   function switchImportTab(which) {
     $('tab-files').classList.toggle('active', which === 'files');
@@ -922,7 +922,7 @@ RM.app = (function () {
     APP, state, $, toast, dialog, cleanErrMsg, t, setLang, setTheme, loadTheme,
     show, needAudio, ensureStudio, setWidth, applyFxToChain, defaultFx,
     newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
-    pickAudio, handleAudioPicked, handleMusicListed, initImportTabs, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
+    pickAudio, handleAudioPicked, handleMusicListed, initImportTabs, switchImportTab, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
     startRecording, stopRecording, recActive, handleRecordingStarted, handleRecordingStopped,
     handleRecordingError, updateRecUI,
     checkUpdate,
@@ -1390,8 +1390,11 @@ Object.assign(RM.app, (function () {
       A.applyFxToChain();
       A.ensureStudio();
       const rate = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : s.rate;
+      // AUTOPLAY FIX: Generate sirf remix taiyaar karta hai (BPM + style FX +
+      // tempo) — khud NAHI bajata. Baj raha tha to naya tempo live lag jata
+      // hai (setRate seamless hai); ruka tha to ruka rehta hai. Sunne ke liye
+      // explicit Preview button hai.
       A.state.player.setRate(rate);
-      A.state.player.play(0);
       // Round-6 (W7 Issue 6): preset-flow remix exportable banao — style rate +
       // style FX ke saath offline render, warna export me tempo kho jata hai.
       try {
@@ -1408,8 +1411,9 @@ Object.assign(RM.app, (function () {
         }).catch(() => {});
       } catch (e) {}
       status.innerHTML = `✓ <b>${A.escapeHtml(s.name)}</b> — BPM ${bpm}, tempo ${rate.toFixed(2)}×` +
-        (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '');
-      A.toast('Remix ready');
+        (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '') +
+        `<div class="hint">Tap <b>Preview</b> to hear it.</div>`;
+      A.toast('Remix ready — tap Preview');
     })).then((r) => {
       finishRemix();
       if (!r.ok) status.textContent = r.cancelled
@@ -1437,15 +1441,12 @@ Object.assign(RM.app, (function () {
       return RM.remix.stemPipeline.generate(id, pack, { customTempo, customFx }, setP).then((res) => {
         A.state.stemMix = res.buffer;
         A.state.remix.bpm = res.bpm;
-        RM.remix.stemPipeline.preview(res.buffer);
-        status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — BPM ${res.bpm}, tempo ${res.rate.toFixed(2)}×` +
+        // AUTOPLAY FIX: stem remix generate hone pe khud NAHI bajta — sunne
+        // ke liye explicit Preview button (toggleStemPreview) hai.
+        status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — BPM ${res.bpm}, tempo ${res.rate.toFixed(2)}× — ${'ready'}` +
           `<div class="honest">🎤 ${A.escapeHtml(srcName)} — ${pack.roles.length}-stem pipeline (per-stem FX → arrange → mix → master)</div>` +
-          `<div class="btn-row" style="margin-top:8px"><button class="btn small" id="remix-stem-stop">■ ${'Stop preview'}</button></div>`;
-        $('remix-stem-stop').addEventListener('click', () => {
-          RM.remix.stemPipeline.stopPreview();
-          status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — ${'ready'}`;
-        });
-        A.toast('Stem remix ready');
+          `<div class="hint">Tap <b>Preview</b> to hear it.</div>`;
+        A.toast('Stem remix ready — tap Preview');
       });
     }).then((r) => {
       if (finishRemix) finishRemix();
@@ -1843,6 +1844,34 @@ Object.assign(RM.app, (function () {
     S('fx-comp-thr', (v) => { fx.comp.thr = v; $('fx-comp-thr-v').textContent = v + ' dB'; });
     S('fx-comp-ratio', (v) => { fx.comp.ratio = v; $('fx-comp-ratio-v').textContent = v + ':1'; });
     S('fx-out', (v) => { fx.out = v / 100; $('fx-out-v').textContent = v + '%'; });
+    // 8D/3D/16D spatial — radio behavior: sirf ek mode ek baar me.
+    // (Pehle ye toggles unwired the — dead UI. Ab live hain.)
+    const spatialModes = ['8d', '3d', '16d'];
+    const syncSpatialUI = () => {
+      const m = (A.state.fx.spatial && A.state.fx.spatial.mode) || 'off';
+      spatialModes.forEach((k) => { const el = $('fx-' + k + '-on'); if (el) el.checked = (m === k); });
+    };
+    const ensureSpatial = () => A.state.fx.spatial || (A.state.fx.spatial = { mode: 'off', speed: 0.12, depth: 0.7 });
+    spatialModes.forEach((k) => {
+      C('fx-' + k + '-on', (v) => {
+        const sp = ensureSpatial();
+        sp.mode = v ? k : (sp.mode === k ? 'off' : sp.mode);
+        syncSpatialUI();
+      });
+      S('fx-' + k + '-speed', (v) => {
+        const sp = ensureSpatial();
+        sp.speed = Math.min(1, Math.max(0.05, v / 100));
+        $('fx-' + k + '-speed-v').textContent = v + '%';
+        if (sp.mode === 'off') { sp.mode = k; syncSpatialUI(); } // slider chhua to mode on
+      });
+      S('fx-' + k + '-depth', (v) => {
+        const sp = ensureSpatial();
+        sp.depth = v / 100;
+        $('fx-' + k + '-depth-v').textContent = v + '%';
+        if (sp.mode === 'off') { sp.mode = k; syncSpatialUI(); }
+      });
+    });
+    A.syncSpatialUI = syncSpatialUI;
     // EQ preset quick select
     const sel = $('fx-eqpreset');
     Object.keys(RM.fx.EQ_PRESETS).forEach((k) => {
@@ -1910,6 +1939,7 @@ Object.assign(RM.app, (function () {
     $('fx-reverb-on').checked = fx.reverb.on;
     $('fx-reverb-room').value = fx.reverb.room;
     $('fx-comp-on').checked = fx.comp.on;
+    if (A.syncSpatialUI) A.syncSpatialUI();
   }
 
   /* ================= mastering ================= */
@@ -2010,7 +2040,7 @@ Object.assign(RM.app, (function () {
     $('mst-ratio-v').textContent = s.ratio.toFixed(1) + ':1';
   }
 
-  /* ================= beat tools ================= */
+  /* ================= beat tools (merged into the Editor screen) ================= */
   const tap = { times: [] };
   const metro = { playing: false, bpm: 120, beat: 0, nextTime: 0, timer: null };
   function initBeat() {
@@ -2041,12 +2071,12 @@ Object.assign(RM.app, (function () {
         metro.playing = true; metro.beat = 0;
         metro.nextTime = RM.audio.ensureCtx().currentTime + 0.06;
         metro.timer = setInterval(metroSchedule, 25);
-        e.target.textContent = 'Stop';
+        e.target.textContent = 'Stop Metronome';
         e.target.classList.add('on');
       } else {
         metro.playing = false;
         clearInterval(metro.timer); metro.timer = null;
-        e.target.textContent = 'Start';
+        e.target.textContent = 'Start Metronome';
         e.target.classList.remove('on');
       }
     });
@@ -2059,6 +2089,7 @@ Object.assign(RM.app, (function () {
     g.gain.setValueAtTime(0.5, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
     o.connect(g); g.connect(RM.audio.masterIn());
+    o.onended = () => { try { o.disconnect(); } catch (e) {} try { g.disconnect(); } catch (e2) {} };
     o.start(t); o.stop(t + 0.08);
   }
   function metroSchedule() {
@@ -2151,6 +2182,7 @@ Object.assign(RM.app, (function () {
     $('exp-cancel').addEventListener('click', () => {
       expToken.cancelled = true;
       $('exp-status').textContent = 'Cancelling…';
+      if (!$('exp-start').disabled && window.RM && RM.ux) { try { RM.ux.onExportFinished(); } catch (e) {} }
     });
     $('exp-share').addEventListener('click', () => {
       if (!A.state.lastDelivery) { A.toast('Export first'); return; }
@@ -2194,6 +2226,7 @@ Object.assign(RM.app, (function () {
     const done = (msg, ok) => {
       $('exp-start').disabled = false;
       setExpStage(msg, ok ? 1 : 0);
+      if (ok && window.RM && RM.ux) { try { RM.ux.onExportFinished(); } catch (e) {} }
     };
 
     const stage = (label, frac) => {
@@ -2293,7 +2326,7 @@ Object.assign(RM.app, (function () {
         });
       })
       .catch((e) => {
-        if (e && e.message === 'cancelled') { done('Cancelled', false); return; }
+        if (e && e.message === 'cancelled') { done('Cancelled', false); if (window.RM && RM.ux) { try { RM.ux.onExportFinished(); } catch (ee) {} } return; }
         const msg = A.friendlyErr(e);
         done('Failed', false);
         A.dialog('Export failed',
@@ -2307,7 +2340,7 @@ Object.assign(RM.app, (function () {
   function initProjects() {
     $('proj-new').addEventListener('click', () => {
       A.dialog('New Project',
-        `<input id="dlg-name" class="textin" value="${'My Project'}" maxlength="40">`,
+        `<input id="dlg-name" class="textin" value="${'My Project'}" maxlength="40" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">`,
         'Create', 'Cancel').then((ok) => {
           if (!ok) return;
           const name = ($('dlg-name') && $('dlg-name').value.trim()) || ('My Project');
@@ -2367,9 +2400,9 @@ Object.assign(RM.app, (function () {
       hint.style.display = '';
     }
     A.toast(('Project opened: ') + p.name);
-    // Round-6: paste ops ka clipboard in-memory hai — restart ke baad reopen
-    // par paste wale hisse render nahi honge. Chup-chaap audio badalne ke
-    // bajay user ko saaf-saaf bata do.
+    // Round-6: paste ops' clipboard is in-memory — after a restart, pasted
+    // parts won't render on reopen. Tell the user plainly instead of
+    // silently changing audio.
     try {
       if (RM.proj.hasPasteOps(p) && !RM.proj.getClipboard()) {
         A.toast('Note: pasted audio could not be restored (clipboard is empty)', 4000);
@@ -2444,42 +2477,16 @@ Object.assign(RM.app, (function () {
       <div>${'App data'}: ~${Math.round(lsKB / 1024)} KB • ${'Projects'}: ${RM.proj.list().length}</div>`;
   }
 
-  /* ================= RuhMix Pro (locked, coming soon) ================= */
-  const PRO_FEATURES = [
-    { icon: '☁️', en: 'Cloud backup' },
-    { icon: '🎚️', en: '16-track mixer' },
-    { icon: '✨', en: 'Premium FX pack' },
-    { icon: '🎧', en: 'Advanced mastering' },
-    { icon: '📦', en: 'Stem export pack' },
-    { icon: '🚫', en: 'Ad-free experience' },
-  ];
-  function initPro() {
-    const grid = $('pro-grid');
-    PRO_FEATURES.forEach((f) => {
-      const d = document.createElement('div');
-      d.className = 'pro-card locked';
-      d.innerHTML = `<div class="pro-icon">${f.icon}</div><div class="pro-name">${f.en}</div><div class="pro-lock">🔒 PRO</div>`;
-      grid.appendChild(d);
-    });
-    $('pro-notify').addEventListener('click', () => {
-      try { localStorage.setItem('ruhmix.proNotify', '1'); } catch (e) {}
-      A.toast('We will notify you ✓');
-      $('pro-notify').disabled = true;
-    });
-    if (A.state.pro.isPro) document.body.classList.add('pro');
-  }
-
   /* ================= more screen ================= */
   const MORE_LINKS = [
-    ['slowed', '🎛️', 'slowed'], ['stems', '🎤', 'stems'], ['aistem', '🧠', null], ['fx', '🎚️', 'equalizer'],
-    ['master', '💎', 'mastering'], ['record', '🎙️', 'recorder'], ['beat', '🥁', null],
+    ['slowed', '🐌', 'slowed'], ['stems', '🎤', 'stems'], ['aistem', '🧠', null], ['fx', '🎚️', 'equalizer'],
+    ['master', '💎', 'mastering'], ['record', '🎙️', 'recorder'],
     ['export', '📤', 'export_title'], ['projects', '📁', null], ['settings', '⚙️', 'settings_title'],
-    ['pro', '⭐', 'pro_title'],
   ];
   function initMore() {
     const grid = $('more-grid');
     MORE_LINKS.forEach(([scr, icon, i18n]) => {
-      const label = { slowed: 'Slowed+Reverb Studio', stems: 'Stem Separator', aistem: 'AI Stem Separator', fx: 'FX Rack', master: 'Mastering', record: 'Voice Recorder', beat: 'Beat Tools', export: 'Export', projects: 'Projects', settings: 'Settings', pro: 'RuhMix Pro' }[scr];
+      const label = { slowed: 'Slowed+Reverb Studio', stems: 'Stem Separator', aistem: 'AI Stem Separator', fx: 'FX Rack', master: 'Mastering', record: 'Voice Recorder', export: 'Export', projects: 'Projects', settings: 'Settings' }[scr];
       const b = document.createElement('button');
       b.className = 'home-card';
       b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label">${label}</div>`;
@@ -2494,15 +2501,19 @@ Object.assign(RM.app, (function () {
 
   /* ================= home ================= */
   const HOME_CARDS = [
-    ['import', '🆕', 'new_project', null],
-    ['remix', '✨', 'auto_remix', null],
-    ['slowed', '🎛️', 'slowed', null],
-    ['editor', '🎚️', 'audio_editor', null],
-    ['stems', '🎤', 'stems', null],
-    ['aistem', '🧠', 'ai_stems', null],
-    ['record', '🎙️', 'recorder', null],
-    ['fx', '🎛️', 'equalizer', null],
-    ['master', '💎', 'mastering', null],
+    ['import', '🆕', 'new_project'],
+    ['remix', '✨', 'auto_remix'],
+    ['slowed', '🐌', 'slowed'],
+    ['editor', '🎚️', 'audio_editor'],
+    ['stems', '🎤', 'stems'],
+    ['aistem', '🧠', 'ai_stems'],
+    ['record', '🎙️', 'recorder'],
+    ['fx', '🎚️', 'equalizer'],
+    ['master', '💎', 'mastering'],
+    ['mixer', '🎧', 'nav_mixer'],
+    ['export', '📤', 'export_title'],
+    ['projects', '📁', 'projects_title'],
+    ['settings', '⚙️', 'settings_title'],
   ];
   function initHome() {
     const grid = $('home-grid');
@@ -2579,9 +2590,9 @@ Object.assign(RM.app, (function () {
     });
     A.renderImportList();
     A.initEditor(); A.initRemix(); A.initSlowed(); A.initStems();
-    // mixer / fx / mastering / beat / export / projects / settings / pro / more
+    // mixer / fx / mastering / beat / export / projects / settings / more
     initMixer(); initFxRack(); initMastering(); initBeat();
-    initExport(); initProjects(); initSettings(); initPro(); initMore();
+    initExport(); initProjects(); initSettings(); initMore();
     RM.aiStems.init();
     // AdMob: rewarded + interstitial preload (native bridge ho to; warna silent skip)
     try { if (window.RM && RM.ads) RM.ads.preload(); } catch (e) {}
@@ -2626,8 +2637,9 @@ Object.assign(RM.app, (function () {
 
   return {
     initMixer, initFxRack, initMastering, initBeat, initExport, initProjects,
-    initSettings, initPro, initMore, initHome, init,
+    initSettings, initMore, initHome, init,
     refreshExportSource, renderProjects, openProject, sendToMixer, updateStorageInfo,
+    getMixerTracks: () => mixer.tracks,
   };
   })());
 

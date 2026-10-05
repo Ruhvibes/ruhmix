@@ -249,10 +249,10 @@ RM.proj = (function () {
   function setClipboard(buf) { clipboard = buf; clipGen++; }
   function getClipboard() { return clipboard; }
   function clearClipboard() { clipboard = null; clipGen++; }
-  // Round-6: paste ops ka clipboard in-memory hai — app restart ke baad
-  // reopen par paste ops render nahi honge (clipboard khaali). openProject
-  // me isko check karke user ko Hindi me batana chahiye (silent audio
-  // change na ho). hasPasteOps(p): project me paste ops hain ya nahi.
+  // Round-6: paste ops' clipboard is in-memory — after an app restart,
+  // reopen shows no pasted parts (clipboard empty). openProject checks
+  // this and tells the user (no silent audio change). hasPasteOps(p):
+  // does the project contain paste ops or not.
   function hasPasteOps(p) {
     try { return !!(p && Array.isArray(p.ops) && p.ops.some((o) => o && o.t === 'paste')); }
     catch (e) { return false; }

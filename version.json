@@ -1,1 +1,1 @@
-{"apkUrl":"https://github.com/Ruhvibes/ruhmix/releases/download/v1/RuhMix.apk","notes":"RuhMix 1.0 — new update: fixed audio import (every song failed to decode), new Music library tab","versionCode":9,"versionName":"1.0"}
+{"apkUrl": "https://github.com/Ruhvibes/ruhmix/releases/download/v1/RuhMix.apk", "notes": "RuhMix 1.0 \u2014 new update: no more autoplay on tool change, smoother audio (57% less CPU), simpler navigation, Pick Music in 2 taps, Export on every screen", "versionCode": 10, "versionName": "1.0"}

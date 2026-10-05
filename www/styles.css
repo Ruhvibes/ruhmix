@@ -87,6 +87,7 @@ h4 { font-size: 14px; margin: 0 0 10px; color: var(--blue); line-height: 1.4; }
 .style-card {
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px; color: var(--txt); cursor: pointer; text-align: left;
+  min-height: 48px;
 }
 .style-card.sel { border-color: var(--purple); box-shadow: 0 0 10px rgba(181, 55, 242, 0.35); }
 .sc-name { font-weight: 700; font-size: 15px; }
@@ -96,9 +97,9 @@ h4 { font-size: 14px; margin: 0 0 10px; color: var(--blue); line-height: 1.4; }
   background: var(--card2); color: var(--txt);
   border: 1px solid var(--line); border-radius: 10px;
   padding: 10px 14px; font-size: 14px; font-weight: 600; cursor: pointer;
-  /* Touch: minimum 44px target (Worker-3 audit 2026-10-05) */
+  /* Touch: minimum 48px target (clutter/navigation audit 2026-10-05) */
   display: inline-flex; align-items: center; justify-content: center;
-  min-height: 44px;
+  min-height: 48px;
 }
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: grayscale(0.35); }
@@ -121,23 +122,25 @@ select:disabled, .textin:disabled, .numin:disabled { opacity: 0.5; cursor: not-a
 .chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .chip { background: var(--card); border: 1px solid var(--blue); color: var(--blue);
   border-radius: 20px; padding: 8px 16px; font-size: 13px; cursor: pointer;
-  display: inline-flex; align-items: center; min-height: 44px; }
+  display: inline-flex; align-items: center; min-height: 48px; }
 .textin, .numin, select {
   background: var(--card); color: var(--txt);
   border: 1px solid var(--line); border-radius: 10px;
   padding: 10px 12px; font-size: 14px; width: 100%; margin: 6px 0;
-  min-height: 44px;
+  min-height: 48px;
 }
 .numin { width: 90px; }
 select { width: auto; }
 .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
 .row label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 180px; font-size: 13px; }
 .row span { font-size: 12px; color: var(--muted); min-width: 52px; text-align: right; }
-input[type="range"] { flex: 1; accent-color: var(--purple); min-width: 120px; }
+input[type="range"] { flex: 1; accent-color: var(--purple); min-width: 120px;
+  /* Touch: 48px hit area — track stays centered in Chrome */
+  min-height: 48px; }
 .radio-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 14px; cursor: pointer;
-  min-height: 44px; }
+  min-height: 48px; }
 .radio-row input { width: 18px; height: 18px; accent-color: var(--purple); }
-.sw { display: inline-flex; align-items: center; min-height: 44px; gap: 6px; font-size: 12px; color: var(--muted); }
+.sw { display: inline-flex; align-items: center; min-height: 48px; gap: 6px; font-size: 12px; color: var(--muted); }
 .sw input { width: 18px; height: 18px; accent-color: var(--purple); }
 /* ======================= panels / cards ======================= */
 .panel { background: var(--card); border: 1px solid var(--line);
@@ -204,7 +207,7 @@ body.light #ed-wave { background: #e8ecf6; }
   background: var(--card2); border: 1px solid var(--line);
   border-radius: 10px; padding: 8px 10px; margin: 6px 0; font-size: 13px; }
 .recent-row { width: 100%; color: var(--txt); cursor: pointer; justify-content: space-between;
-  min-height: 44px; }
+  min-height: 48px; }
 .recent-row:active { border-color: var(--blue); }
 /* ======================= progress ======================= */
 .progress { background: var(--card2); border: 1px solid var(--line);
@@ -216,12 +219,6 @@ body.light #ed-wave { background: #e8ecf6; }
 @keyframes pbar-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
 .big-num { font-size: 42px; font-weight: 800; margin: 8px 0;
   background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
-/* ======================= pro ======================= */
-.pro-card { position: relative; text-align: center; padding: 20px 10px; }
-.pro-card.locked { opacity: 0.85; }
-.pro-icon { font-size: 34px; }
-.pro-name { font-weight: 700; margin: 6px 0; font-size: 14px; }
-.pro-lock { font-size: 11px; color: var(--purple); font-weight: 800; }
 /* ======================= bottom nav ======================= */
 #bottomnav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 50;
@@ -295,7 +292,7 @@ body.light #bottomnav { background: rgba(255, 255, 255, 0.96); }
 /* ======================= import tabs + music library ======================= */
 .tabbar { display: flex; gap: 8px; margin: 12px 0; }
 .tabbtn {
-  flex: 1; padding: 10px 12px; border-radius: 12px; min-height: 44px;
+  flex: 1; padding: 10px 12px; border-radius: 12px; min-height: 48px;
   border: 1px solid var(--line); background: var(--card2); color: var(--txt);
   font-size: 14px; font-weight: 700; cursor: pointer;
 }
@@ -311,3 +308,32 @@ body.light #bottomnav { background: rgba(255, 255, 255, 0.96); }
 .music-item { cursor: pointer; }
 .music-item:active { transform: scale(0.99); }
 .music-item.busy { opacity: 0.5; pointer-events: none; }
+
+/* ================= UX-flow (Demand 1 + 2, 2026-10-05) ================= */
+/* Big "Pick Music" CTA on the Home screen: min 64px height, gradient. */
+.pick-music {
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-height: 64px;
+  margin: 10px 0;
+  padding: 12px 16px;
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #7c3aed, #2563eb);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(80, 60, 220, 0.35);
+}
+.pick-music:active { transform: scale(0.98); }
+.pm-title { font-size: 19px; font-weight: 700; }
+.pm-sub { font-size: 12px; font-weight: 400; opacity: 0.88; }
+
+/* Screen header row: title left, Export button right (Demand 2). */
+.ux-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ux-head h2 { margin: 6px 0 4px; }
+.ux-export-btn { flex: 0 0 auto; white-space: nowrap; }

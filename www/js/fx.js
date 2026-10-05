@@ -132,6 +132,16 @@ RM.fx = (function () {
         st.speed = m.speed; st.depth = 1;
         apply(0.3);
       },
+      // Outer true-bypass support: jab makeChain spatial ko bypass karta hai
+      // (mode 'off'), iska internal convolver (1.0s IR) silence pe bhi FFT
+      // chalata rehta — is edge ko disconnect karne se wo bilkul idle hota hai.
+      setConvolverStarved(starved) {
+        starved = !!starved;
+        if (starved === !!api._convStarved) return;
+        api._convStarved = starved;
+        if (starved) { try { N.pan.disconnect(N.rvSend); } catch (e) {} }
+        else { try { N.pan.connect(N.rvSend); } catch (e) {} }
+      },
       setSpeed(hz) { st.speed = clamp(+hz || 0.12, 0.05, 1); apply(0.03); },
       setDepth(d) { st.depth = clamp(+d || 0, 0, 1); apply(0.03); },
       getSettings() { return { mode: st.mode, speed: +st.speed.toFixed(3), depth: +st.depth.toFixed(3) }; },
@@ -146,18 +156,23 @@ RM.fx = (function () {
   }
 
   function driveCurve(amount) {
+    // Cache: slider drags call set('drive') per input event — rebuilding the
+    // Float32Array every tick is GC churn during playback. Quantize to 1%.
+    const key = Math.round(clamp(amount, 0, 1) * 100);
+    if (driveCurve._cache && driveCurve._cache.key === key) return driveCurve._cache.curve;
     const n = 256, curve = new Float32Array(n);
-    if (amount <= 0) {
+    if (key <= 0) {
       // Transparent at 0: pehle tanh(kx)/tanh(k) with k=1 small-signal gain
       // +2.37dB deta tha aur THD add karta tha — default chain hamesha colored thi.
       for (let i = 0; i < n; i++) curve[i] = (i / (n - 1)) * 2 - 1;
-      return curve;
+    } else {
+      const k = 1 + (key / 100) * 5;
+      for (let i = 0; i < n; i++) {
+        const x = (i / (n - 1)) * 2 - 1;
+        curve[i] = Math.tanh(k * x) / Math.tanh(k);
+      }
     }
-    const k = 1 + amount * 5;
-    for (let i = 0; i < n; i++) {
-      const x = (i / (n - 1)) * 2 - 1;
-      curve[i] = Math.tanh(k * x) / Math.tanh(k);
-    }
+    driveCurve._cache = { key, curve };
     return curve;
   }
 
@@ -248,10 +263,10 @@ RM.fx = (function () {
 
     // 8D/3D/16D spatial auto-pan: limiter ke BAAD (comp/limiter kaam kar chuke
     // hain, pan ke baad dynamics nahi badalte), output se pehle. Mode 'off'
-    // me transparent passthrough (dry=1).
+    // me poora sub-graph bypass hota hai (true bypass, neeche) — sirf dry=1
+    // passthrough rakhne se uska convolver (1.0s IR) bekaar me chalta rehta.
     N.spatial = makeSpatial(ctx);
-    N.limiter.connect(N.spatial.input);
-    N.spatial.output.connect(N.output);
+    // (limiter routing yahan nahi — true-bypass block me neeche hoti hai)
 
     // Static wiring — final topology (documented):
     //   input -> eq3 -> eq10 -> filter -> drive -+-> chorusDry -> comp
@@ -273,14 +288,43 @@ RM.fx = (function () {
     N.drive.connect(N.echoDelay);                                // echo send
     N.echoDelay.connect(N.echoFB); N.echoFB.connect(N.echoDelay);// feedback loop
     N.echoDelay.connect(N.echoWet); N.echoWet.connect(N.comp);   // echo return
-    N.drive.connect(N.rvSend);                                  // reverb send
-    N.rvSend.connect(N.rvHP); N.rvHP.connect(N.convolver);
+    // reverb send chain: drive -> rvSend -> rvHP ->[GATE]-> convolver -> rvWet -> comp.
+    // GATE (rvHP -> convolver) is connected ON DEMAND by set('reverbOn') —
+    // the convolver (~79k taps @44.1k) must not convolve every sample while
+    // reverb is OFF (pehle sirf wet gain 0 hota tha, convolver chalta rehta tha).
+    N.drive.connect(N.rvSend); N.rvSend.connect(N.rvHP);
     N.convolver.connect(N.rvWet); N.rvWet.connect(N.comp);      // reverb return
     N.comp.connect(N.limiter);
-    // NOTE: limiter -> output DIRECT connect nahi hai — limiter -> spatial.input
-    // -> spatial.output -> output (upar wired). Direct connect wapas jodne se
-    // signal DOUBLE (+6dB) ho jayega.
+    // NOTE: limiter ka SINGLE outgoing edge hamesha exactly ek jagah jata hai —
+    // spatial on  -> limiter -> spatial.input ... spatial.output -> output
+    // spatial off -> limiter -> output (direct). Dono ek saath jude to
+    // signal DOUBLE (+6dB) ho jayega; setSpatialBypass() isko guard karta hai.
     N.output.connect(N.clip); // clipper is the chain's output: 0 dBFS ceiling
+
+    // ---- true bypass: idle heavy nodes cost ~nothing ----
+    // Convolvers are by far the heaviest nodes in the graph. Before this,
+    // both convolvers (1.8s main reverb + 1.0s spatial) processed the FULL
+    // signal at all times — even with reverb OFF and spatial mode 'off'
+    // (only wet gains were zeroed). On budget phones that idle convolution
+    // is the #1 stutter source. Now:
+    //  - reverb OFF  -> rvHP->convolver edge physically disconnected
+    //    (convolver input-less; drive->rvSend->rvHP biquad sirf sasta HP hai)
+    //  - spatial 'off' -> limiter->output wired directly, the whole spatial
+    //    sub-graph (splitter/merger/pan/2nd convolver/delay/LFOs) skipped
+    let reverbBypassed = true;   // matches rvWet = 0 initial
+    let spatialBypassed = true;  // matches spatial mode 'off' initial
+    let spatialGen = 0;          // guards the delayed off->bypass switch
+    N.spatial.output.connect(N.output);
+    N.limiter.connect(N.output); // spatial bypassed by default (mode 'off')
+    function setSpatialBypass(off) {
+      if (off === spatialBypassed) return;
+      spatialBypassed = off;
+      try { N.limiter.disconnect(); } catch (e) {}
+      if (off) { N.limiter.connect(N.output); N.spatial.setConvolverStarved(true); }
+      else { N.spatial.setConvolverStarved(false); N.limiter.connect(N.spatial.input); }
+    }
+    // Default: bypassed + starved (mode 'off')
+    N.spatial.setConvolverStarved(true);
 
     const t = (param, v, tc) => param.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
 
@@ -304,7 +348,16 @@ RM.fx = (function () {
           case 'echoTime': t(N.echoDelay.delayTime, clamp(v, 0.02, 1.8), 0.03); break;
           case 'echoFeedback': t(N.echoFB.gain, clamp(v, 0, 0.85)); break;
           case 'echoWet': t(N.echoWet.gain, clamp(v, 0, 0.8)); break;
-          case 'reverbOn': t(N.rvWet.gain, v ? 0.4 : 0); break;
+          case 'reverbOn': {
+            const on = !!v;
+            // True bypass: OFF pe rvHP->convolver edge disconnect — convolver
+            // (~79k taps) input-less rehta hai, idle me full signal convolve
+            // nahi karta. Gain glide reverb tail ko click-free band karta hai.
+            if (on && reverbBypassed) { N.rvHP.connect(N.convolver); reverbBypassed = false; }
+            else if (!on && !reverbBypassed) { try { N.rvHP.disconnect(N.convolver); } catch (e) {} reverbBypassed = true; }
+            t(N.rvWet.gain, on ? 0.4 : 0);
+            break;
+          }
           case 'reverbWet': t(N.rvWet.gain, clamp(v, 0, 1)); break;
           case 'reverbRoom': {
             const r = REVERB_ROOMS[value] || REVERB_ROOMS.hall;
@@ -324,7 +377,17 @@ RM.fx = (function () {
           case 'compAttack': t(N.comp.attack, clamp(v, 0.001, 0.5), 0.05); break;
           case 'compRelease': t(N.comp.release, clamp(v, 0.01, 2), 0.05); break;
           case 'outGain': t(N.output.gain, clamp(v, 0, 2)); break;
-          case 'spatialMode': N.spatial.setMode(String(value)); break; // string! v (number) nahi
+          case 'spatialMode': { // string! v (number) nahi
+            const m = String(value);
+            const gen = ++spatialGen;
+            N.spatial.setMode(m);
+            if (m === 'off') {
+              // Pehle wet gains glide se 0 pe (tc 0.3, click-free), phir
+              // physical bypass — turant disconnect wet tail kaat ke click dega.
+              setTimeout(() => { if (gen === spatialGen) setSpatialBypass(true); }, 400);
+            } else setSpatialBypass(false);
+            break;
+          }
           case 'spatialSpeed': N.spatial.setSpeed(v); break;
           case 'spatialDepth': N.spatial.setDepth(v); break;
         }
@@ -371,6 +434,7 @@ RM.fx = (function () {
         }
       },
       getSpatial() { return N.spatial.getSettings(); },
+      getBypass() { return { reverb: reverbBypassed, spatial: spatialBypassed }; },
       dispose() {
         try { N.spatial.dispose(); } catch (e) {} // pehle: iske LFOs stop hon
         try { N.chLFO.stop(); } catch (e) {}

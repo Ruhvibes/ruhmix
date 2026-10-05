@@ -36,7 +36,8 @@
     <p class="muted" data-i18n="tagline">Professional Music &amp; Remix Studio</p>
     <p class="byline" data-i18n="by">By Hasnain Khan</p>
     <button class="btn primary big" id="home-new">＋ <span data-i18n="new_project">New Project</span></button>
-    <input id="home-search" class="textin" data-i18n-ph="search" placeholder="Search…">
+    <button class="btn pick-music" id="home-pick-music"><span class="pm-title">🎵 Pick Music</span><span class="pm-sub">Choose from your music library</span></button>
+    <input id="home-search" class="textin" data-i18n-ph="search" placeholder="Search…" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">
   </div>
   <div class="card-grid" id="home-grid"></div>
   <h3 data-i18n="recent">Recent Projects</h3>
@@ -50,24 +51,24 @@
   <div id="import-hint" class="hint" style="display:none"></div>
   <p class="muted">MP3 • WAV • M4A • FLAC — decoded with Web Audio</p>
   <div class="tabbar" id="import-tabs">
-    <button class="tabbtn active" id="tab-files">📁 Files</button>
-    <button class="tabbtn" id="tab-music">🎵 Music</button>
+    <button class="tabbtn active" id="tab-music">🎵 Music</button>
+    <button class="tabbtn" id="tab-files">📁 Files</button>
   </div>
-  <div id="pane-files">
+  <div id="pane-music">
+    <input type="search" id="music-search" class="textin" placeholder="Search title or artist" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">
+    <div id="music-list"></div>
+  </div>
+  <div id="pane-files" hidden>
     <button class="btn primary big block" id="btn-pick">📁 <span data-i18n="pick_audio">Pick Audio</span></button>
     <input type="file" id="file-input" accept="audio/*" multiple hidden>
     <h3>Imported</h3>
     <div id="import-list"></div>
   </div>
-  <div id="pane-music" hidden>
-    <input type="search" id="music-search" class="textin" placeholder="Search title or artist">
-    <div id="music-list"></div>
-  </div>
 </section>
 
 <!-- ======================= 3. EDITOR ======================= -->
 <section class="screen" id="screen-editor">
-  <h2 data-i18n="editor_title">Audio Editor</h2>
+<div class="ux-head"><h2 data-i18n="editor_title">Audio Editor</h2><button class="btn small ux-export-btn" data-from="editor">📤 Export</button></div>
   <div id="ed-meta" class="muted"></div>
   <canvas id="ed-wave"></canvas>
   <div class="row">
@@ -119,11 +120,23 @@
     <button class="btn small" id="ed-marker-add">＋ Add Marker (current position)</button>
     <div id="ed-markers"></div>
   </div>
+  <div class="panel">
+    <h4>🥁 Beat Tools</h4>
+    <div class="row"><span id="tap-bpm" class="big-num">— BPM</span></div>
+    <div class="btn-row">
+      <button class="btn primary" id="tap-btn">👆 TAP</button>
+      <button class="btn ghost" id="tap-reset">Reset</button>
+    </div>
+    <div class="row"><label>BPM <input type="range" id="metro-bpm" min="40" max="220" value="120"></label><span id="metro-bpm-v">120</span></div>
+    <div class="btn-row">
+      <button class="btn" id="metro-start">Start Metronome</button>
+    </div>
+  </div>
 </section>
 
 <!-- ======================= 4. AUTO REMIX ======================= -->
 <section class="screen" id="screen-remix">
-  <h2 data-i18n="auto_remix">Auto Remix</h2>
+<div class="ux-head"><h2 data-i18n="auto_remix">Auto Remix</h2><button class="btn small ux-export-btn" data-from="remix">📤 Export</button></div>
   <p class="muted">BPM is detected automatically • 11 style presets (DSP chain)</p>
   <div id="remix-stem-badge" class="panel" style="display:none"></div>
   <div class="card-grid" id="remix-grid"></div>
@@ -145,7 +158,7 @@
 
 <!-- ======================= 5. SLOWED+REVERB ======================= -->
 <section class="screen" id="screen-slowed">
-  <h2 data-i18n="slowed">Slowed+Reverb</h2>
+<div class="ux-head"><h2 data-i18n="slowed">Slowed+Reverb</h2><button class="btn small ux-export-btn" data-from="slowed">📤 Export</button></div>
   <p class="muted">Slowed + Reverb Studio</p>
   <div class="honest">Pitch changes with tempo (no independent pitch-shift in v1).</div>
   <div class="card-grid" id="slowed-presets"></div>
@@ -162,7 +175,7 @@
 
 <!-- ======================= 6. STEMS ======================= -->
 <section class="screen" id="screen-stems">
-  <h2 data-i18n="stems">Stem Separator</h2>
+<div class="ux-head"><h2 data-i18n="stems">Stem Separator</h2><button class="btn small ux-export-btn" data-from="stems">📤 Export</button></div>
   <!-- AI (neural, server) — the ONLY flow allowed to say "AI" -->
   <div class="engine-card ai-card">
     <div class="ec-name">🧠 AI Stem Separation <span class="beta">AI • SERVER</span></div>
@@ -189,7 +202,7 @@
 
 <!-- ======================= 7. MIXER ======================= -->
 <section class="screen" id="screen-mixer">
-  <h2 data-i18n="nav_mixer">Mixer</h2>
+<div class="ux-head"><h2 data-i18n="nav_mixer">Mixer</h2><button class="btn small ux-export-btn" data-from="mixer">📤 Export</button></div>
   <p class="muted">6 tracks • Volume / Pan / Mute / Solo</p>
   <div class="btn-row">
     <button class="btn primary" id="mx-play-all">▶ Play All</button>
@@ -273,7 +286,7 @@
 
 <!-- ======================= 9. MASTERING ======================= -->
 <section class="screen" id="screen-master">
-  <h2 data-i18n="mastering">Mastering</h2>
+<div class="ux-head"><h2 data-i18n="mastering">Mastering</h2><button class="btn small ux-export-btn" data-from="master">📤 Export</button></div>
   <p class="muted">EQ → Compressor → Limiter → Normalizer</p>
   <div class="panel">
     <div class="row"><label>Preset <select id="mst-preset"></select></label></div>
@@ -295,7 +308,7 @@
 
 <!-- ======================= 10. RECORDER ======================= -->
 <section class="screen" id="screen-record">
-  <h2 data-i18n="recorder">Voice Recorder</h2>
+<div class="ux-head"><h2 data-i18n="recorder">Voice Recorder</h2><button class="btn small ux-export-btn" data-from="record">📤 Export</button></div>
   <p class="muted">Recordings are saved in the device's native format</p>
   <div class="panel center">
     <div id="rec-status" class="status">Ready</div>
@@ -304,29 +317,7 @@
   </div>
 </section>
 
-<!-- ======================= 11. BEAT TOOLS ======================= -->
-<section class="screen" id="screen-beat">
-  <h2>Beat Tools</h2>
-  <div class="panel center">
-    <h4>BPM Tapper</h4>
-    <div id="tap-bpm" class="big-num">— BPM</div>
-    <div class="btn-row center">
-      <button class="btn primary big" id="tap-btn">👆 TAP</button>
-      <button class="btn ghost" id="tap-reset">Reset</button>
-    </div>
-  </div>
-  <div class="panel">
-    <h4>Metronome</h4>
-    <div class="row"><label>BPM <input type="range" id="metro-bpm" min="40" max="220" value="120"></label><span id="metro-bpm-v">120</span></div>
-    <button class="btn primary" id="metro-start">Start</button>
-  </div>
-  <div class="panel">
-    <h4>Markers</h4>
-    <p class="muted">Markers are added and viewed on the Editor screen.</p>
-  </div>
-</section>
-
-<!-- ======================= 12. EXPORT ======================= -->
+<!-- ======================= 11. EXPORT ======================= -->
 <section class="screen" id="screen-export">
   <h2 data-i18n="export_title">Export</h2>
   <div class="panel">
@@ -353,15 +344,15 @@
   <button class="btn block" id="exp-share" style="display:none">🔗 Share</button>
 </section>
 
-<!-- ======================= 13. PROJECTS ======================= -->
+<!-- ======================= 12. PROJECTS ======================= -->
 <section class="screen" id="screen-projects">
   <h2>Projects</h2>
   <button class="btn primary block" id="proj-new">＋ New Project</button>
-  <input id="proj-search" class="textin" placeholder="🔍 Search projects…" style="margin-top:8px">
+  <input id="proj-search" class="textin" placeholder="🔍 Search projects…" style="margin-top:8px" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">
   <div id="projects-list"></div>
 </section>
 
-<!-- ======================= 14. SETTINGS ======================= -->
+<!-- ======================= 13. SETTINGS ======================= -->
 <section class="screen" id="screen-settings">
   <h2 data-i18n="settings_title">Settings</h2>
   <div class="panel">
@@ -403,15 +394,15 @@
     <div id="ai-backend-picker" class="btn-row" style="margin-bottom:8px"></div>
     <div id="ai-hf-fields" style="display:none">
       <p class="muted small">🤗 <b>Hugging Face — FREE AI</b> (daily limit ~6-10 songs, no ads). Paste your duplicated Space URL here.</p>
-      <div class="row"><label>Space URL <input type="text" id="ai-hf-url" class="textin" placeholder="https://username-music-separation.hf.space" inputmode="url" autocomplete="off"></label></div>
+      <div class="row"><label>Space URL <input type="text" id="ai-hf-url" class="textin" placeholder="https://username-music-separation.hf.space" inputmode="url" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
       <p class="muted small">💡 Hint: the URL of your duplicated Space (e.g. https://username-music-separation.hf.space).</p>
-      <div class="row"><label>API Name <input type="text" id="ai-hf-api" class="textin" placeholder="inference" autocomplete="off"></label></div>
+      <div class="row"><label>API Name <input type="text" id="ai-hf-api" class="textin" placeholder="inference" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
       <p class="muted small">💡 Find the name via "View API" on the Space page (default: inference).</p>
     </div>
     <div id="ai-modal-fields" style="display:none">
       <p class="muted small">☁️ <b>Modal — requires a card</b> (future). Paste the URL you get after deploying Modal here. The key stays on this device only — it is never uploaded.</p>
-      <div class="row"><label>Modal Endpoint URL <input type="text" id="ai-url" class="textin" placeholder="https://xxx--ruhmix-stems-web.modal.run" inputmode="url" autocomplete="off"></label></div>
-      <div class="row"><label>API Key <input type="password" id="ai-key" class="textin" placeholder="••••••••" autocomplete="off"></label></div>
+      <div class="row"><label>Modal Endpoint URL <input type="text" id="ai-url" class="textin" placeholder="https://xxx--ruhmix-stems-web.modal.run" inputmode="url" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
+      <div class="row"><label>API Key <input type="password" id="ai-key" class="textin" placeholder="••••••••" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
     </div>
     <div class="row"><span id="ai-dot" class="status-dot"></span><span id="ai-status-text" class="muted small">Not set</span></div>
     <div class="btn-row">
@@ -433,18 +424,7 @@
   </div>
 </section>
 
-<!-- ======================= 15. PRO ======================= -->
-<section class="screen" id="screen-pro">
-  <h2 data-i18n="pro_title">RuhMix Pro</h2>
-  <p class="muted" data-i18n="coming_soon">Coming soon</p>
-  <div class="card-grid" id="pro-grid"></div>
-  <div class="panel center">
-    <p class="muted">Pro features are in the works. You will be notified as soon as they are available.</p>
-    <button class="btn primary" id="pro-notify">🔔 Notify Me</button>
-  </div>
-</section>
-
-<!-- ======================= 16. MORE ======================= -->
+<!-- ======================= 14. MORE ======================= -->
 <section class="screen" id="screen-more">
   <h2 data-i18n="nav_more">More</h2>
   <div class="card-grid" id="more-grid"></div>
@@ -485,5 +465,6 @@
 <script src="js/projects.js"></script>
 <script src="js/import-hardening.js"></script>
 <script src="js/app.js"></script>
+<script src="js/ux-flow.js"></script>
 </body>
 </html>
