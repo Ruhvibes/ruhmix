@@ -122,7 +122,8 @@ public class MainActivity extends ComponentActivity {
 
     private static String jsStr(String s) {
         if (s == null) return "''";
-        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'")
+                .replace("\n", "\\n").replace("\r", "\\r") + "'";
     }
 
     /** Preloads a rewarded + interstitial ad so they show without delay. */
@@ -448,7 +449,8 @@ public class MainActivity extends ComponentActivity {
 
     private static String jsString(String s) {
         if (s == null) return "''";
-        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'")
+                .replace("\n", "\\n").replace("\r", "\\r") + "'";
     }
 
     // ---------- Permissions ----------

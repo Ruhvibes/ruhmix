@@ -38,8 +38,9 @@ RM.hfStems = (function () {
   const UPLOAD_TIMEOUT = 2 * 60 * 1000;
   const CALL_TIMEOUT = 60 * 1000;
 
-  // Consent text — consent dialog me verbatim dikhaya jata hai.
-  const CONSENT_HF = 'Free AI pe ~30-60 second lag sakta hai, roz ~6-10 gaane ki limit hoti hai. Aapka audio Hugging Face ke free AI server par process hoga; processing khatm hote hi file delete ho jati hai. Is option me koi ad nahi hai — bilkul free.';
+  // Consent text — consent dialog me verbatim dikhaya jata hai. The Space is
+  // the USER's own duplicate (setup guide), so the text says "aapke Space".
+  const CONSENT_HF = 'Free AI pe ~30-60 second lag sakta hai, roz ~6-10 gaane ki limit hoti hai. Aapka audio aapke Hugging Face Space (free AI server) par process hoga; processing khatm hote hi file delete ho jati hai. Is option me koi ad nahi hai — bilkul free.';
 
   const st = {
     song: null,
@@ -438,7 +439,8 @@ RM.hfStems = (function () {
       if ((e && e.kind === 'cancel') || !st.running) return; // user ne cancel kiya
       if (!autoRetried && e && (e.kind === 'asleep' || e.kind === 'connect')) {
         // 1 auto-retry — space jag raha ho to dusri baar lag jata hai.
-        showProgress(-1, T('🔁 Dobara koshish ho rahi hai…', '🔁 Retrying…'), false);
+        // Cancel button rakha hai taaki 5 s wait me user atka na rahe.
+        showProgress(-1, T('🔁 Dobara koshish ho rahi hai…', '🔁 Retrying…'), true);
         setTimeout(() => { if (st.running) runHf(cfg, true); }, 5000);
         return;
       }

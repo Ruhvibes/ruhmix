@@ -246,7 +246,7 @@
     <div class="row"><label>Preset <select id="mst-preset"></select></label></div>
     <div class="row"><label>Bass <input type="range" id="mst-eqb" min="-12" max="12" value="0"></label><span id="mst-eqb-v">0 dB</span></div>
     <div class="row"><label>Mid <input type="range" id="mst-eqm" min="-12" max="12" value="0"></label><span id="mst-eqm-v">0 dB</span></div>
-    <div class="row"><label>Treble <input type="range" id="mst-eqt" min="-12" max="12" value="1"></label><span id="mst-eqt-v">0 dB</span></div>
+    <div class="row"><label>Treble <input type="range" id="mst-eqt" min="-12" max="12" value="1"></label><span id="mst-eqt-v">+1 dB</span></div>
     <div class="row"><label>Threshold <input type="range" id="mst-thr" min="-30" max="0" value="-14"></label><span id="mst-thr-v">-14 dB</span></div>
     <div class="row"><label>Ratio <input type="range" id="mst-ratio" min="10" max="100" value="25"></label><span id="mst-ratio-v">2.5:1</span></div>
   </div>
@@ -324,6 +324,7 @@
 <section class="screen" id="screen-projects">
   <h2>प्रोजेक्ट्स</h2>
   <button class="btn primary block" id="proj-new">＋ नया प्रोजेक्ट</button>
+  <input id="proj-search" class="textin" placeholder="🔍 प्रोजेक्ट खोजें…" style="margin-top:8px">
   <div id="projects-list"></div>
 </section>
 

@@ -29,8 +29,11 @@ RM.audio = (function () {
   }
 
   // Master chain: everything flows master -> analyser -> limiter -> destination.
-  // The limiter is a transparent soft-knee DynamicsCompressor: stops clipping
-  // without squash. Never wire sources directly to destination.
+  // The limiter is a true brickwall (20:1, zero knee): with stacked EQ boosts
+  // (+15dB/band), wet FX sends and multi-track mixer sums, a soft limiter can
+  // still let peaks past 0dBFS (digital clipping at the DAC). The brickwall
+  // is transparent at normal levels and only engages on would-be overs.
+  // Never wire sources directly to destination.
   function buildMaster() {
     master = ctx.createGain();
     master.gain.value = 1.0;
@@ -38,11 +41,11 @@ RM.audio = (function () {
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.8;
     limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = -3;
-    limiter.knee.value = 6;
-    limiter.ratio.value = 4;
-    limiter.attack.value = 0.003;
-    limiter.release.value = 0.25;
+    limiter.threshold.value = -1.5;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.15;
     master.connect(analyser);
     analyser.connect(limiter);
     limiter.connect(ctx.destination);
@@ -129,12 +132,14 @@ RM.audio = (function () {
     const hop = 512;
     const frames = Math.max(8, Math.floor(len / hop));
     const env = new Float32Array(frames);
+    // prev MUST persist across chunks: resetting it per chunk injects a
+    // phantom onset spike at every chunk boundary (~3s), biasing BPM.
+    let prev = 0;
     return runChunked(frames, 256, (a, b) => {
-      let prev = 0;
       for (let i = a; i < b; i++) {
         let sum = 0;
         const off = i * hop;
-        for (let n = 0; n < hop; n++) {
+        for (let n = 0; n < hop && off + n < len; n++) {
           const x = Math.abs((ch0[off + n] + ch1[off + n]) * 0.5);
           sum += Math.max(0, x - prev);
           prev = x;
@@ -144,7 +149,7 @@ RM.audio = (function () {
     }, onProgress ? (p) => onProgress(p * 0.9) : null).then(() => {
       let r0 = 0;
       for (let i = 0; i < frames; i++) r0 += env[i] * env[i];
-      if (r0 === 0) { if (onProgress) onProgress(1); return 120; }
+      if (!isFinite(r0) || r0 === 0) { if (onProgress) onProgress(1); return 120; }
       const minLag = Math.max(1, Math.round((60 / 200) * sr / hop));
       const maxLag = Math.min(frames - 1, Math.round((60 / 60) * sr / hop));
       const Rs = new Float64Array(maxLag + 2);
@@ -269,11 +274,13 @@ RM.audio = (function () {
   // insertPoint is the node the caller wires into their FX chain.
   function makePlayer() {
     ensureCtx();
+    const FADE_TC = 0.008;  // click-free envelope time constant (start/stop)
+    const FADE_STOP = 0.08; // source stopped this long after the fade begins
     const p = {
-      buffer: null, src: null, panner: null, gain: null,
+      buffer: null, src: null, env: null, panner: null, gain: null,
       playing: false, startCtxTime: 0, offset: 0, rate: 1,
       loop: false, loopStart: 0, loopEnd: 0,
-      onended: null, _token: 0,
+      onended: null, _token: 0, _vol: 1,
       insert: null, // connect this into your chain
     };
     p.panner = ctx.createStereoPanner();
@@ -292,18 +299,37 @@ RM.audio = (function () {
       const t0 = clamp(fromSec != null ? fromSec : p.offset, 0, p.buffer.duration);
       const token = ++p._token;
       p.src._token = token;
-      p.src.onended = () => { if (p.src && p.src._token === token) { p.playing = false; p.offset = 0; if (p.onended) p.onended(); } };
+      p.src.onended = () => {
+        const s = p.src, e = p.env;
+        if (s && s._token === token) {
+          p.playing = false; p.offset = 0;
+          try { s.disconnect(); } catch (e2) {}
+          try { if (e) e.disconnect(); } catch (e2) {}
+          if (p.src === s) { p.src = null; p.env = null; }
+          if (p.onended) p.onended();
+        }
+      };
+      // Per-source envelope: starting/stopping a buffer mid-waveform at full
+      // gain is an audible click. The env node ramps 0->1 on start; stop()
+      // ramps it back down before stopping the source. Kept per-source (not
+      // on the shared gain) so a rapid seek becomes a clean crossfade.
+      p.env = ctx.createGain();
+      p.env.gain.value = 0;
+      const tNow = ctx.currentTime;
+      p.env.gain.setTargetAtTime(1, tNow, FADE_TC);
       if (p.loop && p.loopEnd > p.loopStart) {
         p.src.loop = true; p.src.loopStart = p.loopStart; p.src.loopEnd = p.loopEnd;
-        p.src.connect(p.insert);
-        p.src.start(0, t0);
+        p.src.connect(p.env);
+        p.env.connect(p.insert);
+        p.src.start(tNow, t0);
       } else {
-        p.src.connect(p.insert);
-        p.src.start(0, t0, Math.max(0.05, p.buffer.duration - t0));
+        p.src.connect(p.env);
+        p.env.connect(p.insert);
+        p.src.start(tNow, t0, Math.max(0.05, p.buffer.duration - t0));
       }
       p.playing = true;
       p.offset = t0;
-      p.startCtxTime = ctx.currentTime;
+      p.startCtxTime = tNow;
       return true;
     };
     p.pause = () => {
@@ -313,13 +339,25 @@ RM.audio = (function () {
     };
     p.stop = (silent) => {
       p._token++;
-      if (p.src) {
-        try { p.src.onended = null; } catch (e) {}
-        try { p.src.stop(); } catch (e) {}
-        try { p.src.disconnect(); } catch (e) {}
-        p.src = null;
-      }
+      const s = p.src, e = p.env;
+      p.src = null; p.env = null;
       p.playing = false;
+      if (s) {
+        try { s.onended = null; } catch (e2) {}
+        try {
+          const t = ctx.currentTime;
+          if (e) e.gain.setTargetAtTime(0.0001, t, FADE_TC);
+          s.stop(t + FADE_STOP);
+          setTimeout(() => {
+            try { s.disconnect(); } catch (e2) {}
+            try { if (e) e.disconnect(); } catch (e2) {}
+          }, 160);
+        } catch (e2) {
+          try { s.stop(); } catch (e3) {}
+          try { s.disconnect(); } catch (e3) {}
+          try { if (e) e.disconnect(); } catch (e3) {}
+        }
+      }
       if (!silent && p.onended) p.onended();
     };
     p.position = () => {
@@ -331,10 +369,18 @@ RM.audio = (function () {
       return clamp(pos, 0, p.buffer.duration);
     };
     p.setRate = (r) => {
-      p.rate = clamp(r, 0.25, 4);
+      r = clamp(r, 0.25, 4);
+      // Snapshot position BEFORE changing rate: position() assumes the
+      // current rate held since startCtxTime, so a mid-playback rate change
+      // without a snapshot makes pause()/playhead jump.
+      if (p.playing) { p.offset = p.position(); p.startCtxTime = ctx.currentTime; }
+      p.rate = r;
       if (p.src) p.src.playbackRate.setTargetAtTime(p.rate, ctx.currentTime, 0.01);
     };
-    p.setVolume = (v) => { p.gain.gain.setTargetAtTime(clamp(v, 0, 1.5), ctx.currentTime, 0.01); };
+    p.setVolume = (v) => {
+      p._vol = clamp(v, 0, 1.5);
+      p.gain.gain.setTargetAtTime(p._vol, ctx.currentTime, 0.01);
+    };
     p.setPan = (pan) => { p.panner.pan.setTargetAtTime(clamp(pan, -1, 1), ctx.currentTime, 0.01); };
     p.dispose = () => {
       p.stop(true);

@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 2 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 4 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -97,6 +97,7 @@ RM.app = (function () {
     project: null,
     buffer: null,       // original decoded AudioBuffer (untouched)
     viewBuffer: null,   // op-list rendered buffer (what plays)
+    viewGen: 0,         // generation token: stale refreshView renders are discarded
     fileName: '',
     imports: [],        // [{name, buffer, size, type}]
     player: null,       // studio player
@@ -245,10 +246,14 @@ RM.app = (function () {
     });
   }
 
-  // Re-render view buffer from op-list (cached when ops unchanged)
+  // Re-render view buffer from op-list (cached when ops unchanged).
+  // Generation token: rapid undo/redo (or op spam) fires concurrent chunked
+  // renders; the LAST-INITIATED render must win, not the last-to-finish.
   function refreshView(onProgress) {
     if (!state.buffer) return Promise.resolve(null);
+    const gen = ++state.viewGen;
     return RM.proj.applyOps(state.buffer, state.project.ops, onProgress).then((view) => {
+      if (gen !== state.viewGen) return null; // superseded by a newer refresh
       state.viewBuffer = view;
       ensureStudio();
       const wasPlaying = state.player.playing;
@@ -328,13 +333,13 @@ RM.app = (function () {
       renderImportList();
       return buf;
     }).catch(() => {
-      const msg = lang() === 'hi'
+      const msg = lang === 'hi'
         ? 'ऑडियो फ़ाइल डिकोड नहीं हो पाई — फ़ॉर्मेट इस डिवाइस पर सपोर्टेड नहीं हो सकता।'
         : 'Could not decode the audio file — the format may be unsupported on this device.';
-      return dialog(lang() === 'hi' ? 'डिकोड विफल' : 'Decode failed',
+      return dialog(lang === 'hi' ? 'डिकोड विफल' : 'Decode failed',
         `<p>${escapeHtml(msg)}</p><p class="muted">${escapeHtml(name)}</p>`,
-        lang() === 'hi' ? '🔁 पुनः प्रयास' : '🔁 Retry',
-        lang() === 'hi' ? 'रद्द करें' : 'Cancel').then((retry) => {
+        lang === 'hi' ? '🔁 पुनः प्रयास' : '🔁 Retry',
+        lang === 'hi' ? 'रद्द करें' : 'Cancel').then((retry) => {
           if (retry) return decodeAndAdd(ab, name, size);
           return null;
         });
@@ -903,7 +908,8 @@ Object.assign(RM.app, (function () {
     };
     guarded(HI() ? 'स्टेम रीमिक्स' : 'Stem Remix', () => {
       const customTempo = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : null;
-      return RM.remix.stemPipeline.generate(id, pack, { customTempo }, setP).then((res) => {
+      const customFx = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.fx : null;
+      return RM.remix.stemPipeline.generate(id, pack, { customTempo, customFx }, setP).then((res) => {
         A.state.stemMix = res.buffer;
         A.state.remix.bpm = res.bpm;
         RM.remix.stemPipeline.preview(res.buffer);
@@ -1455,7 +1461,12 @@ Object.assign(RM.app, (function () {
   function syncMstUI() {
     const s = A.state.mastering.settings;
     $('mst-eqb').value = s.eqB; $('mst-eqm').value = s.eqM; $('mst-eqt').value = s.eqT;
-    $('mst-thr').value = s.thr; $('mst-ratio').value = s.ratio * 10;
+    const db = (v) => (v > 0 ? '+' : '') + v + ' dB';
+    $('mst-eqb-v').textContent = db(s.eqB);
+    $('mst-eqm-v').textContent = db(s.eqM);
+    $('mst-eqt-v').textContent = db(s.eqT);
+    $('mst-thr').value = s.thr; $('mst-thr-v').textContent = s.thr + ' dB';
+    $('mst-ratio').value = s.ratio * 10;
     $('mst-ratio-v').textContent = s.ratio.toFixed(1) + ':1';
   }
 
@@ -1599,7 +1610,8 @@ Object.assign(RM.app, (function () {
     const normalize = $('exp-normalize').checked;
     const ext = isMp3 ? 'mp3' : isFlac ? 'flac' : 'wav';
     const mime = isMp3 ? 'audio/mpeg' : isFlac ? 'audio/flac' : 'audio/wav';
-    const fileName = (src.name || 'ruhmix').replace(/[^\w\- ]+/g, '').trim().slice(0, 40) + '.' + ext || RM.exp.defaultName(ext);
+    const base = (src.name || 'ruhmix').replace(/[^\w\- ]+/g, '').trim().slice(0, 40);
+    const fileName = base ? base + '.' + ext : RM.exp.defaultName(ext);
     expToken.cancelled = false;
     $('exp-start').disabled = true;
     $('exp-share').style.display = 'none';
@@ -1627,7 +1639,10 @@ Object.assign(RM.app, (function () {
         const p2 = normalize
           ? RM.audio.normalizeBuffer(rendered, 0.95, (p) => setExpStage((HI() ? 'नॉर्मलाइज़: ' : 'Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
           : Promise.resolve(rendered);
-        return p2.then((buf) => {
+        return p2.then(() => {
+          // NOTE: normalizeBuffer normalizes IN PLACE and resolves to the peak
+          // (a number), NOT the buffer — always use `rendered` here.
+          const buf = rendered;
           stage(HI() ? 'एनकोड हो रहा है…' : 'Encoding…', 0.5);
           if (isFlac) {
             // FLAC: 16-bit PCM -> pure-JS FLAC encoder (offline, lossless)
@@ -1642,12 +1657,12 @@ Object.assign(RM.app, (function () {
             return RM.audio.encodeWavBuffer(buf, (p) => setExpStage((HI() ? 'एनकोड: ' : 'Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35))
               .then((ab) => new Blob([ab], { type: mime }));
           }
-          // MP3: resample to 44100 (lamejs sweet spot), then encode
-          return RM.audio.resampleBuffer(buf, 44100, (p) => setExpStage((HI() ? 'रीसैंपल: ' : 'Resampling: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
+          // MP3: resample to the chosen sample rate (44100/48000 — both valid MPEG-1), then encode
+          return RM.audio.resampleBuffer(buf, sr, (p) => setExpStage((HI() ? 'रीसैंपल: ' : 'Resampling: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
             .then((rs) => RM.audio.floatToInt16(rs, (p) => setExpStage((HI() ? 'तैयार: ' : 'Preparing: ') + Math.round(p * 100) + '%', 0.6 + p * 0.1)))
             .then((i16) => {
               stage(HI() ? 'MP3 एनकोड हो रहा है…' : 'Encoding MP3…', 0.7);
-              return RM.exp.encodeMp3(i16, kbps, 44100, (p) => setExpStage('MP3 ' + Math.round(p * 100) + '%', 0.7 + p * 0.2), expToken);
+              return RM.exp.encodeMp3(i16, kbps, sr, (p) => setExpStage('MP3 ' + Math.round(p * 100) + '%', 0.7 + p * 0.2), expToken);
             });
         }).then((blob) => {
           stage(HI() ? 'सहेजा जा रहा है…' : 'Saving…', 0.95);
@@ -1693,15 +1708,18 @@ Object.assign(RM.app, (function () {
           renderProjects();
         });
     });
+    $('proj-search').addEventListener('input', renderProjects);
     renderProjects();
   }
   function renderProjects() {
     const box = $('projects-list');
     if (!box) return;
     box.innerHTML = '';
-    const arr = RM.proj.list();
+    const q = (($('proj-search') && $('proj-search').value) || '').trim().toLowerCase();
+    let arr = RM.proj.list();
+    if (q) arr = arr.filter((p) => (p.name || '').toLowerCase().includes(q));
     if (!arr.length) {
-      box.innerHTML = `<div class="empty">${HI() ? 'अभी कोई सहेजा हुआ प्रोजेक्ट नहीं है' : 'No saved projects yet'}</div>`;
+      box.innerHTML = `<div class="empty">${q ? (HI() ? 'कोई प्रोजेक्ट नहीं मिला' : 'No projects found') : (HI() ? 'अभी कोई सहेजा हुआ प्रोजेक्ट नहीं है' : 'No saved projects yet')}</div>`;
       return;
     }
     arr.forEach((p) => {

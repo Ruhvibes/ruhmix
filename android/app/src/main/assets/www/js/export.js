@@ -38,13 +38,21 @@ RM.exp = (function () {
     // If the source is played at a different rate (e.g. slowed+reverb),
     // the offline render must be longer/shorter to hold the whole take.
     const rate = opts.rate || 1;
-    const dur = opts.duration || (rate !== 1 ? buffer.duration / rate : buffer.duration);
+    // Effect tails (convolver reverb IR up to ~2.2s, echo repeats) ring past
+    // the last source sample — without a tail allowance the export chops
+    // them off mid-decay. Default +2.5s; opts.tail overrides (0 disables).
+    // An explicit opts.duration is used as-is (caller owns the full length).
+    let dur = opts.duration || (rate !== 1 ? buffer.duration / rate : buffer.duration);
+    if (!opts.duration) {
+      const tail = opts.tail === undefined ? 2.5 : Math.max(0, opts.tail);
+      dur += tail;
+    }
     const oc = new OC(2, Math.max(1, Math.ceil(dur * sr)), sr);
     const src = oc.createBufferSource();
     src.buffer = buffer;
     if (rate !== 1) src.playbackRate.value = rate;
-    const tail = buildGraph(oc, src) || src;
-    tail.connect(oc.destination);
+    const tailNode = buildGraph(oc, src) || src;
+    tailNode.connect(oc.destination);
     src.start(0);
     return oc.startRendering();
   }

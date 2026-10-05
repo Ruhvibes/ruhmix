@@ -106,11 +106,13 @@ RM.fx = (function () {
     N.convolver._room = 'hall';
     N.rvWet = G(0);
 
-    // compressor + limiter
+    // compressor + brickwall limiter (safety: stacked EQ boosts of +15dB/band
+    // plus wet FX sends can otherwise push peaks past 0dBFS — a soft 4:1
+    // limiter still lets overshoot through; 20:1 with zero knee cannot)
     N.comp = ctx.createDynamicsCompressor();
     N.limiter = ctx.createDynamicsCompressor();
-    N.limiter.threshold.value = -3; N.limiter.knee.value = 6;
-    N.limiter.ratio.value = 4; N.limiter.attack.value = 0.003; N.limiter.release.value = 0.25;
+    N.limiter.threshold.value = -1.5; N.limiter.knee.value = 0;
+    N.limiter.ratio.value = 20; N.limiter.attack.value = 0.002; N.limiter.release.value = 0.15;
 
     N.output = G(1);
 

@@ -54,8 +54,10 @@ RM.aiStems = (function () {
     { id: 'bass',   name: 'Bass (AI)',   trackIdx: 2 },
     { id: 'other',  name: 'Other (AI)',  trackIdx: 3 },
   ];
-  // Consent text shown verbatim before the first upload.
-  const CONSENT_TEXT = 'Aapka audio hamare secure cloud server (Modal, GPU) par process hoga. Processing khatm hote hi aapki file turant delete ho jayegi — koi copy save nahi hoti. Is free seva ka kharcha ads se nikalta hai: separation se pehle ek chhota ad dekhna hoga (1 ad = 1 gaana).';
+  // Consent text shown verbatim before the first upload. The server is the
+  // USER's own Modal deployment (setup guide: "Apna AI server chalayein"),
+  // so the text says "aapke apne" — not "hamare".
+  const CONSENT_TEXT = 'Aapka audio aapke apne cloud server (Modal, GPU) par process hoga. Processing khatm hote hi aapki file turant delete ho jayegi — koi copy save nahi hoti. Is seva ka kharcha ads se nikalta hai: separation se pehle ek chhota ad dekhna hoga (1 ad = 1 gaana).';
 
   const st = {
     song: null,          // {label, buffer}
@@ -689,8 +691,10 @@ RM.aiStems = (function () {
   /* HF test: /gradio_api/info se API name verify hota hai (koi key nahi). */
   function testHfConnection() {
     if (!RM.hfStems) return;
-    const url = $('ai-hf-url').value.trim().replace(/\/+$/, '');
-    const api = ($('ai-hf-api').value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
+    const urlEl = $('ai-hf-url'), apiEl = $('ai-hf-api');
+    if (!urlEl || !apiEl) return; // settings HTML me HF fields nahi hain
+    const url = urlEl.value.trim().replace(/\/+$/, '');
+    const api = (apiEl.value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
     const res = $('ai-test-result');
     if (res) res.innerHTML = '';
     if (!url) {
@@ -797,6 +801,10 @@ RM.aiStems = (function () {
     const urlIn = $('ai-url'), keyIn = $('ai-key');
     const url = urlIn.value.trim().replace(/\/+$/, '');
     if (!url) { setAiStatus('err', T('Pehle Server URL daalein', 'Enter the server URL first')); return; }
+    if (!/^https?:\/\//i.test(url)) {
+      setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+      return;
+    }
     setCfg(url, keyIn.value);
     setAiStatus('', T('सहेजा गया ✓', 'Saved ✓'));
     A.toast(T('AI Server settings सहेजी गईं', 'AI server settings saved'));

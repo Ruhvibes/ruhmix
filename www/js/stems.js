@@ -190,6 +190,53 @@ RM.stems = (function () {
     ]);
   }
 
+  // HPSS masks in small batches with UI yields between them, so one 30 s
+  // segment never blocks the main thread for a full second on a phone.
+  async function hpssMasks(mag, frames, bins, reS, imS) {
+    const H = new Float32Array(mag.length);
+    const P = new Float32Array(mag.length);
+    const tmp = new Float32Array(13);
+    const HW = 6; // median window 13
+    for (let b0 = 0; b0 < bins; b0 += 64) {
+      const b1 = Math.min(bins, b0 + 64);
+      for (let b = b0; b < b1; b++) {
+        for (let f = 0; f < frames; f++) {
+          let n = 0;
+          for (let k = -HW; k <= HW; k++) {
+            const ff = f + k < 0 ? 0 : (f + k >= frames ? frames - 1 : f + k);
+            tmp[n++] = mag[ff * bins + b];
+          }
+          H[f * bins + b] = medianOfSorted(tmp, n);
+        }
+      }
+      await yieldUI();
+    }
+    for (let f0 = 0; f0 < frames; f0 += 32) {
+      const f1 = Math.min(frames, f0 + 32);
+      for (let f = f0; f < f1; f++) {
+        const base = f * bins;
+        for (let b = 0; b < bins; b++) {
+          let n = 0;
+          for (let k = -HW; k <= HW; k++) {
+            const bb = b + k < 0 ? 0 : (b + k >= bins ? bins - 1 : b + k);
+            tmp[n++] = mag[base + bb];
+          }
+          P[base + b] = medianOfSorted(tmp, n);
+        }
+      }
+      await yieldUI();
+    }
+    for (let i0 = 0; i0 < mag.length; i0 += (1 << 18)) {
+      const i1 = Math.min(mag.length, i0 + (1 << 18));
+      for (let i = i0; i < i1; i++) {
+        const h = H[i], p = P[i];
+        const mP = (p * p) / (h * h + p * p + 1e-10);
+        reS[i] *= mP; imS[i] *= mP;
+      }
+      await yieldUI();
+    }
+  }
+
   /* ================= engine: Drum Extract (HPSS) ================= */
   // Genuine harmonic-percussive separation on a 22050 Hz mono downmix,
   // processed in 30 s segments to bound memory. Returns stereo stems.
@@ -213,8 +260,11 @@ RM.stems = (function () {
       const nSeg = Math.max(1, Math.ceil(x.length / segLen));
       const perc = new Float32Array(x.length);
       const harm = new Float32Array(x.length);
+      // 50 ms overlap between consecutive segments: the join gets a linear
+      // crossfade instead of a hard cut, so no click/pop at 30 s boundaries.
+      const XF = Math.floor(ANA_SR * 0.05);
       let done = 0;
-      const stepSeg = () => {
+      const stepSeg = async () => {
         if (done >= nSeg) {
           // resample back to original rate, stereo-ize
           const mk = (data) => {
@@ -228,32 +278,41 @@ RM.stems = (function () {
             });
           };
           if (onProgress) onProgress(0.92, 'Finalize…');
-          return mk(perc).then((pBuf) => mk(harm).then((hBuf) => [
+          const pBuf = await mk(perc);
+          const hBuf = await mk(harm);
+          return [
             { name: 'Drums (Percussive)', buffer: pBuf },
             { name: 'Harmonic (Rest)', buffer: hBuf },
-          ]));
+          ];
         }
         const s0 = done * segLen;
         const s1 = Math.min(x.length, s0 + segLen);
-        const seg = x.subarray(s0, s1);
+        const ext0 = done > 0 ? s0 - XF : s0; // overlap previous tail
+        const seg = x.subarray(ext0, s1);
+        const head = done > 0 ? XF : 0;       // percSeg[head] == output[s0]
         if (onProgress) onProgress(0.08 + 0.8 * (done / nSeg), `HPSS segment ${done + 1}/${nSeg}…`);
-        return yieldUI().then(() => {
-          const { reS, imS, mag, frames, bins } = stft(seg, N, HOP, WIN);
-          const H = medfiltTime(mag, frames, bins, 13);
-          const P = medfiltFreq(mag, frames, bins, 13);
-          for (let i = 0; i < mag.length; i++) {
-            const h = H[i], p = P[i];
-            const mP = (p * p) / (h * h + p * p + 1e-10);
-            reS[i] *= mP; imS[i] *= mP;
+        await yieldUI();
+        const { reS, imS, mag, frames, bins } = stft(seg, N, HOP, WIN);
+        await hpssMasks(mag, frames, bins, reS, imS);
+        const percSeg = istft(reS, imS, frames, bins, N, HOP, seg.length, WIN);
+        if (done > 0) {
+          // Crossfade the overlapped tail with what the previous segment wrote.
+          for (let j = 0; j < XF; j++) {
+            const idx = s0 - XF + j;
+            const t = j / XF;
+            const pv = perc[idx] * (1 - t) + percSeg[j] * t;
+            perc[idx] = pv;
+            harm[idx] = x[idx] - pv; // perc + harm stays exactly the original
           }
-          const percSeg = istft(reS, imS, frames, bins, N, HOP, seg.length, WIN);
-          for (let i = 0; i < seg.length; i++) {
-            perc[s0 + i] = percSeg[i];
-            harm[s0 + i] = seg[i] - percSeg[i];
-          }
-          done++;
-          return stepSeg();
-        });
+        }
+        for (let i = 0; i < s1 - s0; i++) {
+          const idx = s0 + i;
+          const pv = percSeg[head + i];
+          perc[idx] = pv;
+          harm[idx] = x[idx] - pv;
+        }
+        done++;
+        return stepSeg();
       };
       return stepSeg();
     });

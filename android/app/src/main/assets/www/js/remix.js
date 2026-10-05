@@ -127,10 +127,11 @@ RM.remix = (function () {
   const stemPipeline = (function () {
     const MASTER_BY_STYLE = { edm: 'loud', trap: 'loud', lofi: 'lofi', acoustic: 'clean' };
 
-    // Per-role FX: style chain + role overrides. Unknown/band roles get the
-    // pure style chain.
-    function roleFx(style, role, bpm) {
-      const fx = JSON.parse(JSON.stringify(style.fx));
+    // Per-role FX: base FX chain + role overrides. Unknown/band roles get the
+    // pure style chain. baseFx is the style's fx, or the user's custom fx for
+    // the 'custom' style (opts.customFx) so Custom sliders apply in stem mode.
+    function roleFx(baseFx, role, bpm) {
+      const fx = JSON.parse(JSON.stringify(baseFx));
       const beat = 60 / (bpm || 120);
       if (fx.echo.on) fx.echo.time = +(beat * 0.75).toFixed(3); // beat-synced echo
       if (role === 'vocal') {
@@ -182,6 +183,9 @@ RM.remix = (function () {
         return bpmP.then((bpm) => {
           prog('Stems तैयार हो रहे हैं…', 0.16);
           const rate = (styleId === 'custom' && opts.customTempo) ? opts.customTempo : style.rate;
+          // Custom style: honour the user's Custom-slider FX in stem mode too
+          // (app.js passes opts.customFx; falls back to the flat default).
+          const baseFx = (styleId === 'custom' && opts.customFx) ? opts.customFx : style.fx;
           const beat = 60 / bpm;
           const maxDur = Math.max.apply(null, rb.map((r) => r.buffer.duration));
           const D = maxDur / rate; // musical duration at style rate
@@ -202,7 +206,7 @@ RM.remix = (function () {
             src.buffer = r.buffer;
             src.playbackRate.value = rate; // BPM/beat sync via style rate
             const chain = RM.fx.makeChain(oc);
-            chain.applyPreset(roleFx(style, r.role, bpm));
+            chain.applyPreset(roleFx(baseFx, r.role, bpm));
             chains.push(chain);
             const g = oc.createGain(); // arrangement gain
             const lv = arrangeGains(r.role);
@@ -212,7 +216,11 @@ RM.remix = (function () {
               g.gain.setValueAtTime(Math.max(0.0001, lv[si - 1]), Math.max(0, t - xf));
               g.gain.linearRampToValueAtTime(Math.max(0.0001, lv[si]), t); // transition
             }
-            g.gain.setValueAtTime(Math.max(0.0001, lv[2]), Math.max(0, D - 3));
+            // Outro fade: must start at/after the last section event
+            // (t = 0.8*D = secs[2][0]); scheduling it earlier throws
+            // InvalidStateError on short mixes (D < 15s).
+            const outT = Math.max(secs[2][0], D - 3);
+            g.gain.setValueAtTime(Math.max(0.0001, lv[2]), outT);
             g.gain.linearRampToValueAtTime(0.0001, D); // outro fade
             src.connect(chain.input);
             chain.output.connect(g);
