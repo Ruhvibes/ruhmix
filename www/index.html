@@ -49,10 +49,20 @@
   <h2 data-i18n="import_title">Import Audio</h2>
   <div id="import-hint" class="hint" style="display:none"></div>
   <p class="muted">MP3 • WAV • M4A • FLAC — decoded with Web Audio</p>
-  <button class="btn primary big block" id="btn-pick">📁 <span data-i18n="pick_audio">Pick Audio</span></button>
-  <input type="file" id="file-input" accept="audio/*" multiple hidden>
-  <h3>Files</h3>
-  <div id="import-list"></div>
+  <div class="tabbar" id="import-tabs">
+    <button class="tabbtn active" id="tab-files">📁 Files</button>
+    <button class="tabbtn" id="tab-music">🎵 Music</button>
+  </div>
+  <div id="pane-files">
+    <button class="btn primary big block" id="btn-pick">📁 <span data-i18n="pick_audio">Pick Audio</span></button>
+    <input type="file" id="file-input" accept="audio/*" multiple hidden>
+    <h3>Imported</h3>
+    <div id="import-list"></div>
+  </div>
+  <div id="pane-music" hidden>
+    <input type="search" id="music-search" class="textin" placeholder="Search title or artist">
+    <div id="music-list"></div>
+  </div>
 </section>
 
 <!-- ======================= 3. EDITOR ======================= -->
@@ -473,6 +483,7 @@
 <script src="js/remix.js"></script>
 <script src="js/export.js"></script>
 <script src="js/projects.js"></script>
+<script src="js/import-hardening.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

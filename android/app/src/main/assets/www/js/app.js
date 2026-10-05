@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 8 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 9 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -398,23 +398,101 @@ RM.app = (function () {
   }
 
   function fetchFileUrl(url) {
-    // file:// URLs from the native cache: fetch() then XHR fallback
+    // file:// URLs from the native cache: fetch() then XHR fallback.
+    // XHR fallback hardened: correct 'arraybuffer' casing (capital-B 'arrayBuffer'
+    // is an invalid enum value and gets silently ignored -> string response),
+    // 30s timeout (hang = 'unreadable', never a silent stall), 0-byte -> empty buffer.
     return fetch(url).then((r) => {
       if (!r.ok) throw new Error('fetch failed: ' + r.status);
       return r.arrayBuffer();
     }).catch(() => new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('GET', url, true);
-      xhr.responseType = 'arrayBuffer';
-      xhr.onload = () => (xhr.status === 0 || xhr.status === 200) ? resolve(xhr.response) : reject(new Error('xhr ' + xhr.status));
-      xhr.onerror = () => reject(new Error('xhr error'));
-      xhr.send();
+      xhr.responseType = 'arraybuffer';
+      const timer = setTimeout(() => {
+        try { xhr.abort(); } catch (e) {}
+        reject(new Error('xhr timeout'));
+      }, 30000);
+      const settle = (fn, val) => { clearTimeout(timer); fn(val); };
+      xhr.onload = () => {
+        const good = xhr.status === 0 || xhr.status === 200;
+        const resp = xhr.response;
+        if (!good) { settle(reject, new Error('xhr ' + xhr.status)); return; }
+        if (resp instanceof ArrayBuffer) { settle(resolve, resp); return; }
+        if (resp == null) { settle(resolve, new ArrayBuffer(0)); return; } // 0-byte file
+        // Last resort: string response (wrong responseType) -> latin-1 bytes.
+        // Magic sniff will honestly reject it if the bytes got mangled.
+        try {
+          const s = String(resp);
+          const u8 = new Uint8Array(s.length);
+          for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i) & 0xFF;
+          settle(resolve, u8.buffer);
+        } catch (e) { settle(reject, e); }
+      };
+      xhr.onerror = () => settle(reject, new Error('xhr error'));
+      xhr.onabort = () => settle(reject, new Error('xhr aborted'));
+      try { xhr.send(); } catch (e) { settle(reject, e); }
     }));
   }
 
-  function decodeAndAdd(ab, name, size) {
+  /* ---------- hardened import error helpers ---------- */
+  function importErr(kind, name) {
+    if (window.RH && RH.classifyError) return RH.classifyError(kind, name);
+    return { title: 'Import failed', msg: 'Could not import "' + name + '". Try another file.' };
+  }
+  function importErrBody(c, name) {
+    return '<p>' + escapeHtml(c.msg) + '</p><p class="muted">' + escapeHtml(name) + '</p>';
+  }
+  function safeFileName(p) {
+    // Java worker: window.onAudioPicked ab object bhejta hai {ok:[...], failed:[...]};
+    // purana array format bhi supported. Naam me parens/Unicode/%20 toote nahi.
+    let n = String(p == null ? '' : p);
+    const i = Math.max(n.lastIndexOf('/'), n.lastIndexOf('\\'));
+    if (i >= 0) n = n.slice(i + 1);
+    try { n = decodeURIComponent(n); } catch (e) { /* keep raw */ }
+    return n || 'audio';
+  }
+
+  /* Staged decode fallback: direct -> strip-id3 -> frame-sync slice.
+     Har stage ka naam console me log hota hai (diagnostics). */
+  function tryDecodeStages(ab, name) {
+    const RHh = window.RH || {};
+    const candidates = [{ stage: 'direct', buf: ab }];
+    if (RHh.stripId3v2) {
+      try {
+        const stripped = RHh.stripId3v2(ab);
+        if (stripped !== ab && stripped && stripped.byteLength > 100) {
+          candidates.push({ stage: 'strip-id3', buf: stripped });
+        }
+      } catch (e) {}
+    }
+    if (RHh.findFirstMp3Frame) {
+      try {
+        const off = RHh.findFirstMp3Frame(ab);
+        if (off > 0) candidates.push({ stage: 'frame-sync', buf: ab.slice(off) });
+      } catch (e) {}
+    }
+    let p = Promise.reject(new Error('start'));
+    candidates.forEach((c) => {
+      p = p.catch(() => {
+        console.log('[import] decode stage: ' + c.stage + ' — ' + name);
+        return RM.audio.decodeArrayBuffer(c.buf);
+      });
+    });
+    return p;
+  }
+
+  function decodeAndAdd(ab, name, size, fileUrl) {
+    const RHh = window.RH || {};
+    // Stage 0: pre-decode sanity gate — fail -> classified dialog, Retry NAHI (sirf OK).
+    const pre = RHh.precheckAudio ? RHh.precheckAudio(ab, name) : { ok: true };
+    if (!pre.ok) {
+      console.log('[import] precheck failed (' + pre.kind + '): ' + name + ' — ' + (pre.detail || ''));
+      const c = importErr(pre.kind, name);
+      return dialog(c.title, importErrBody(c, name), 'OK', null).then(() => null);
+    }
     toast(('Decoding: ') + name);
-    return RM.audio.decodeArrayBuffer(ab).then((buf) => {
+    return tryDecodeStages(ab, name).then((buf) => {
       state.imports.unshift({ name, buffer: buf, size: size || ab.byteLength, type: '' });
       // Memory edge: har import poora decoded AudioBuffer pakadta hai
       // (10-min stereo ~100MB). List ko cap karo, warna 20-30 import = OOM.
@@ -427,31 +505,83 @@ RM.app = (function () {
       renderImportList();
       return buf;
     }).catch(() => {
-      const msg = 'Could not decode the audio file — the format may be unsupported on this device.';
-      return dialog('Decode failed',
-        `<p>${escapeHtml(msg)}</p><p class="muted">${escapeHtml(name)}</p>`,
+      const c = importErr('corrupt', name);
+      return dialog(c.title, importErrBody(c, name),
         '🔁 Retry',
         'Cancel').then((retry) => {
-          if (retry) return decodeAndAdd(ab, name, size);
-          return null;
+          if (!retry) return null;
+          // Retry: file DOBARA padho — purana (possibly corrupt) buffer reuse NAHI.
+          // fileUrl (native copy) ho to fresh bytes fetch karo; file-input fallback
+          // me same bytes se retry (wahan dobara padhna possible nahi).
+          if (fileUrl) {
+            console.log('[import] retry: re-reading bytes for ' + name);
+            let refetch = String(fileUrl);
+            if (/^https?:/i.test(refetch)) {
+              refetch += (refetch.indexOf('?') >= 0 ? '&' : '?') + 'cb=' + Date.now();
+            }
+            return fetchFileUrl(refetch)
+              .then((fresh) => decodeAndAdd(fresh, name, fresh.byteLength, fileUrl))
+              .catch(() => {
+                const u = importErr('unreadable', name);
+                return dialog(u.title, importErrBody(u, name), 'OK', null).then(() => null);
+              });
+          }
+          return decodeAndAdd(ab, name, size, fileUrl);
         });
     });
   }
 
-  // Called by the native shell: window.Android.pickAudio() result.
+  // Called by the native shell: window.Android.pickAudio() / importMusic() result.
+  // Dono formats: purana string array, aur naya {ok:[file://...], failed:[{name, reason}]}.
   function handleAudioPicked(paths) {
-    if (!paths) return;
-    const arr = Array.isArray(paths) ? paths : [paths];
-    if (!arr.length) { toast('Nothing selected'); return; }
-    toast(('Loading… (') + arr.length + ')');
-    let chain = Promise.resolve();
-    arr.forEach((p) => {
-      const name = String(p).split('/').pop() || 'audio';
-      chain = chain.then(() => fetchFileUrl(p)
-        .then((ab) => decodeAndAdd(ab, name, ab.byteLength))
-        .catch(() => toast(('Could not read: ') + name, 3000)));
+    if (paths == null) return;
+    let okList = [], failedList = [];
+    if (Array.isArray(paths)) {
+      okList = paths.slice();
+    } else if (typeof paths === 'object') {
+      if (Array.isArray(paths.ok)) okList = paths.ok.slice();
+      else if (paths.ok != null) okList = [paths.ok];
+      if (Array.isArray(paths.failed)) failedList = paths.failed.slice();
+      else if (paths.failed != null) failedList = [paths.failed];
+    } else {
+      okList = [paths];
+    }
+    failedList.forEach((f) => {
+      const fname = (f && f.name) ? safeFileName(f.name) : 'file';
+      const reason = (f && f.reason) ? String(f.reason) : 'Unknown error';
+      toast(('Could not read ') + fname + ': ' + reason, 3500);
     });
-    chain.then(() => { show('import'); });
+    if (!okList.length) {
+      if (!failedList.length) toast('Nothing selected');
+      return;
+    }
+    toast(('Loading… (') + okList.length + ')');
+    let chain = Promise.resolve();
+    okList.forEach((p) => {
+      const url = String(p);
+      const name = safeFileName(p);
+      chain = chain.then(() => fetchFileUrl(url)
+        .then((ab) => {
+          // Size + magic diagnostic — har import pe. 0 bytes = turant 'unreadable',
+          // misleading "Decode failed" KABHI nahi.
+          const bytes = ab ? ab.byteLength : 0;
+          console.log('[import]', name, bytes + ' bytes');
+          if (window.RH && RH.sniffAudioType) {
+            try { console.log('[import]', name, 'magic: ' + RH.sniffAudioType(ab)); } catch (e) {}
+          }
+          if (!bytes) {
+            const c = importErr('unreadable', name);
+            return dialog(c.title, importErrBody(c, name), 'OK', null).then(() => null);
+          }
+          return decodeAndAdd(ab, name, bytes, url);
+        })
+        .catch((err) => {
+          console.log('[import] fetch failed for ' + name + ':', err && err.message);
+          const c = importErr('unreadable', name);
+          return dialog(c.title, importErrBody(c, name), 'OK', null).then(() => null);
+        }));
+    });
+    chain.then(() => { musicPendingClear(); show('import'); });
   }
 
   function fmtTime(sec) {
@@ -495,6 +625,160 @@ RM.app = (function () {
   }
   function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  /* ================= music library (device MediaStore) =================
+     Bridge contract (Java side):
+       Android.listMusic()              -> window.onMusicListed(json)
+       Android.importMusic(uri)         -> window.onAudioPicked({ok:[...], failed:[...]})
+       Android.requestMusicPermission() -> (permission dialog) then re-list
+     onMusicListed payload (liberal parse): JSON string ya object —
+       {status:'ok', tracks:[{uri,title,artist,durationMs|duration}]} |
+       {status:'permission-denied'} | 'permission-denied' | {status:'error', message}
+     Bridge na ho to Music tab graceful hide hota hai. */
+  const music = { state: 'idle', tracks: [], query: '', pending: null, error: '' };
+  function initImportTabs() {
+    const tabF = $('tab-files'), tabM = $('tab-music');
+    if (!tabF || !tabM) return;
+    const nat = RM.audio.native;
+    const hasMusic = nat.method('listMusic');
+    tabM.style.display = hasMusic ? '' : 'none';
+    if (!hasMusic) return;
+    tabF.addEventListener('click', () => switchImportTab('files'));
+    tabM.addEventListener('click', () => switchImportTab('music'));
+    const sq = $('music-search');
+    if (sq) sq.addEventListener('input', () => { music.query = sq.value || ''; renderMusicList(); });
+  }
+  function switchImportTab(which) {
+    $('tab-files').classList.toggle('active', which === 'files');
+    $('tab-music').classList.toggle('active', which === 'music');
+    $('pane-files').hidden = which !== 'files';
+    $('pane-music').hidden = which !== 'music';
+    if (which === 'music' && music.state === 'idle') loadMusic();
+  }
+  function loadMusic() {
+    const nat = RM.audio.native;
+    if (!nat.method('listMusic')) return;
+    music.state = 'loading'; music.error = '';
+    renderMusicList();
+    try { nat.call('listMusic'); }
+    catch (e) { music.state = 'error'; music.error = 'Could not open the music library.'; renderMusicList(); return; }
+    // Safety: Java callback kabhi na aaye to spinner hamesha na ghume.
+    setTimeout(() => {
+      if (music.state === 'loading') {
+        music.state = 'error'; music.error = 'The music library did not respond. Please try again.';
+        renderMusicList();
+      }
+    }, 15000);
+  }
+  function handleMusicListed(payload) {
+    let data = payload;
+    if (typeof data === 'string') {
+      const t = data.trim();
+      if (t === 'permission-denied' || t === 'denied') { music.state = 'denied'; renderMusicList(); return; }
+      try { data = JSON.parse(t); }
+      catch (e) { music.state = 'error'; music.error = 'Could not read the music library.'; renderMusicList(); return; }
+    }
+    if (Array.isArray(data)) { music.state = 'ok'; music.tracks = data; renderMusicList(); return; }
+    if (data && typeof data === 'object') {
+      const st = String(data.status || '').toLowerCase();
+      if (st === 'permission-denied' || st === 'denied' || data.permissionDenied) {
+        music.state = 'denied';
+      } else if (st === 'ok' || Array.isArray(data.tracks)) {
+        music.state = 'ok'; music.tracks = Array.isArray(data.tracks) ? data.tracks : [];
+      } else {
+        music.state = 'error'; music.error = data.message || 'Could not read the music library.';
+      }
+      renderMusicList(); return;
+    }
+    music.state = 'error'; music.error = 'Could not read the music library.'; renderMusicList();
+  }
+  function fmtMusicDur(v) {
+    let ms = Number(v);
+    if (!isFinite(ms) || ms <= 0) return '—';
+    const sec = ms >= 10000 ? Math.round(ms / 1000) : Math.round(ms); // ms vs seconds heuristic
+    return fmtTime(sec);
+  }
+  function renderMusicList() {
+    const box = $('music-list');
+    if (!box) return;
+    box.innerHTML = '';
+    const sq = $('music-search');
+    if (sq) sq.style.display = (music.state === 'ok' && music.tracks.length) ? '' : 'none';
+    if (music.state === 'loading') {
+      box.innerHTML = '<div class="empty"><div class="spinner"></div><div>Loading your music…</div></div>';
+      return;
+    }
+    if (music.state === 'denied') {
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.innerHTML = '<div class="empty-icon">🔒</div><div><b>Permission needed</b></div>' +
+        '<div class="muted">RuhMix needs access to your music library to list your songs.</div>';
+      const b = document.createElement('button');
+      b.className = 'btn primary'; b.textContent = 'Grant Permission';
+      b.addEventListener('click', () => {
+        try { RM.audio.native.call('requestMusicPermission'); } catch (e) {}
+        setTimeout(loadMusic, 1000);
+      });
+      d.appendChild(b);
+      box.appendChild(d);
+      return;
+    }
+    if (music.state === 'error') {
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.innerHTML = '<div class="empty-icon">⚠️</div><div>' + escapeHtml(music.error || 'Could not read the music library.') + '</div>';
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = 'Retry';
+      b.addEventListener('click', loadMusic);
+      d.appendChild(b);
+      box.appendChild(d);
+      return;
+    }
+    if (music.state === 'ok' && !music.tracks.length) {
+      box.innerHTML = '<div class="empty"><div class="empty-icon">🎵</div><div>No music found on this device</div></div>';
+      return;
+    }
+    const q = (music.query || '').toLowerCase().trim();
+    const list = music.tracks.filter((t) => {
+      if (!q) return true;
+      return ((t.title || '') + ' ' + (t.artist || '')).toLowerCase().indexOf(q) >= 0;
+    });
+    if (!list.length) {
+      box.innerHTML = '<div class="empty"><div class="empty-icon">🔎</div><div>No songs match your search</div></div>';
+      return;
+    }
+    list.forEach((t) => {
+      const title = String(t.title || 'Unknown title');
+      const artist = String(t.artist || 'Unknown artist');
+      const dur = fmtMusicDur(t.durationMs != null ? t.durationMs : t.duration);
+      const d = document.createElement('div');
+      d.className = 'import-item music-item';
+      d.innerHTML = '<div class="ii-main"><div class="ii-name">' + escapeHtml(title) + '</div>' +
+        '<div class="ii-meta">' + escapeHtml(artist) + ' • ' + escapeHtml(dur) + '</div></div>';
+      if (music.pending === t.uri) d.classList.add('busy');
+      d.addEventListener('click', () => importMusicTrack(t, d));
+      box.appendChild(d);
+    });
+  }
+  function importMusicTrack(t, rowEl) {
+    const nat = RM.audio.native;
+    if (!nat.method('importMusic')) { toast('Music import is unavailable'); return; }
+    const title = String(t.title || 'song');
+    music.pending = t.uri;
+    if (rowEl) rowEl.classList.add('busy');
+    toast(('Loading: ') + title);
+    try { nat.call('importMusic', String(t.uri)); }
+    catch (e) { music.pending = null; if (rowEl) rowEl.classList.remove('busy'); toast('Could not start import'); return; }
+    // Safety: Java callback kabhi na aaye to row hamesha busy na rahe.
+    setTimeout(() => {
+      if (music.pending === t.uri) { music.pending = null; renderMusicList(); }
+    }, 30000);
+  }
+  function musicPendingClear() {
+    if (music.pending == null) return;
+    music.pending = null;
+    if (music.state === 'ok') renderMusicList();
   }
 
   /* ================= voice recorder (bridge) ================= */
@@ -638,7 +922,7 @@ RM.app = (function () {
     APP, state, $, toast, dialog, cleanErrMsg, t, setLang, setTheme, loadTheme,
     show, needAudio, ensureStudio, setWidth, applyFxToChain, defaultFx,
     newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
-    pickAudio, handleAudioPicked, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
+    pickAudio, handleAudioPicked, handleMusicListed, initImportTabs, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
     startRecording, stopRecording, recActive, handleRecordingStarted, handleRecordingStopped,
     handleRecordingError, updateRecUI,
     checkUpdate,
@@ -650,6 +934,7 @@ RM.app = (function () {
    window.Android.startRecording(name)-> onRecordingStarted(path)
    window.Android.stopRecording()    -> onRecordingStopped(path) / onRecordingError(msg) */
 window.onAudioPicked = function (paths) { RM.app.handleAudioPicked(paths); };
+window.onMusicListed = function (json) { RM.app.handleMusicListed(json); };
 window.onRecordingStarted = function (path) { RM.app.handleRecordingStarted(path); };
 window.onRecordingStopped = function (path) { RM.app.handleRecordingStopped(path); };
 window.onRecordingError = function (msg) { RM.app.handleRecordingError(msg); };
@@ -2283,6 +2568,7 @@ Object.assign(RM.app, (function () {
     initHome();
     // import
     $('btn-pick').addEventListener('click', A.pickAudio);
+    A.initImportTabs();
     $('file-input').addEventListener('change', (e) => {
       const files = Array.from(e.target.files || []);
       let ch = Promise.resolve();

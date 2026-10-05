@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ClipData;
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -13,6 +14,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.view.View;
@@ -45,8 +47,10 @@ import com.google.android.gms.ads.interstitial.InterstitialAd;
 import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -58,7 +62,17 @@ import java.io.OutputStream;
  *
  *   Android.pickAudio()                 — system audio picker (MP3/WAV/M4A/FLAC, multi-select);
  *                                         copies chosen files into the app cache and calls
- *                                         JS onAudioPicked(["file:///...", ...]).
+ *                                         JS onAudioPicked({ok:["file:///...", ...],
+ *                                         failed:[{name, reason}]}).
+ *   Android.listMusic()                 — lists up to 2000 on-device music tracks via
+ *                                         MediaStore (background thread); JS gets
+ *                                         onMusicListed({ok:true, tracks:[...]}) or
+ *                                         onMusicListed({ok:false, reason}).
+ *   Android.requestMusicPermission()    — asks for the audio-library permission (JS shows
+ *                                         the rationale); the list is retried if granted.
+ *   Android.importMusic(uriString)      — copies one MediaStore track into the app cache
+ *                                         via the hardened import pipeline; JS gets
+ *                                         onAudioPicked({ok:[...], failed:[...]}).
  *   Android.startRecording(fileName)    — starts the mic recorder, returns the output
  *                                         file path immediately ("file:///.../rec/name.3gp");
  *                                         JS is also notified via onRecordingStarted(path).
@@ -71,7 +85,12 @@ import java.io.OutputStream;
  *   Android.openUrl(url)                — opens a link in the system browser.
  *
  * JS callbacks the web app should implement (all optional):
- *   onAudioPicked(pathsArray)           — pathsArray is a JS array of file:// strings
+ *   onAudioPicked(result)               — result = {ok:["file:///...", ...],
+ *                                         failed:[{name, reason:"empty"|"unreadable"|
+ *                                         "unsupported"}]}
+ *   onMusicListed(result)               — result = {ok:true, tracks:[{title, artist,
+ *                                         album, durationMs, size, uri}]} or
+ *                                         {ok:false, reason:"permission-denied"|"error"}
  *   onRecordingStarted(path)
  *   onRecordingStopped(path, durationMs)
  *   onRecordingError(message)
@@ -83,6 +102,7 @@ public class MainActivity extends ComponentActivity {
 
     private static final int REQ_AUDIO_PERM = 1001;
     private static final int REQ_MIC_PERM = 1002;
+    private static final int REQ_MUSIC_PERM = 1003;
     private static final String FILEPROVIDER_AUTH = "com.ruhmix.app.fileprovider";
 
     private WebView webView;
@@ -258,6 +278,7 @@ public class MainActivity extends ComponentActivity {
     private boolean micPermDeniedBefore = false;
     private Runnable pendingAudioAction;
     private Runnable pendingMicAction;
+    private boolean pendingMusicList = false;
 
     // Recording state
     private MediaRecorder recorder;
@@ -269,7 +290,7 @@ public class MainActivity extends ComponentActivity {
                 if (result.getResultCode() == RESULT_OK && result.getData() != null) {
                     handlePickedAudio(result.getData());
                 } else {
-                    callJs("if(window.onAudioPicked){window.onAudioPicked([])}");
+                    callJs("if(window.onAudioPicked){window.onAudioPicked({ok:[],failed:[]})}");
                 }
             });
 
@@ -585,6 +606,23 @@ public class MainActivity extends ComponentActivity {
                         "अनुमति नहीं मिली \u2014 Settings > Apps > RuhMix में जाकर अनुमति दें \uD83D\uDE4F",
                         Toast.LENGTH_LONG).show();
             }
+        } else if (requestCode == REQ_MUSIC_PERM) {
+            boolean retry = pendingMusicList;
+            pendingMusicList = false;
+            if (granted) {
+                audioPermDeniedBefore = false;
+                if (retry) {
+                    try {
+                        new Thread(() -> queryMusicLibrary()).start();
+                    } catch (Exception e) {
+                        sendMusicListError("error");
+                    }
+                }
+            } else {
+                audioPermDeniedBefore = true;
+                // No dialogs or toasts here by design — JS shows the rationale.
+                sendMusicListError("permission-denied");
+            }
         }
     }
 
@@ -610,53 +648,172 @@ public class MainActivity extends ComponentActivity {
         try {
             audioPickerLauncher.launch(Intent.createChooser(intent, "Audio chunein"));
         } catch (Exception e) {
-            callJs("if(window.onAudioPicked){window.onAudioPicked([])}");
+            callJs("if(window.onAudioPicked){window.onAudioPicked({ok:[],failed:[]})}");
         }
     }
 
-    /** Copies every picked URI into the app cache and hands file:// paths back to JS. */
+    /**
+     * Copies every picked URI into the app cache and hands a structured result
+     * back to JS: window.onAudioPicked({ok:["file://..."], failed:[{name, reason}]}).
+     */
     private void handlePickedAudio(Intent data) {
         new Thread(() -> {
-            JSONArray arr = new JSONArray();
+            JSONArray ok = new JSONArray();
+            JSONArray failed = new JSONArray();
             try {
                 if (data.getClipData() != null) {
                     ClipData clip = data.getClipData();
                     for (int i = 0; i < clip.getItemCount(); i++) {
-                        String p = copyUriToCache(clip.getItemAt(i).getUri(), i);
-                        if (p != null) arr.put(p);
+                        reportImport(copyUriToCache(clip.getItemAt(i).getUri(), i), ok, failed);
                     }
                 } else if (data.getData() != null) {
-                    String p = copyUriToCache(data.getData(), 0);
-                    if (p != null) arr.put(p);
+                    reportImport(copyUriToCache(data.getData(), 0), ok, failed);
                 }
             } catch (Exception e) {
                 // fall through: hand back whatever was copied successfully
             }
-            final String json = arr.toString();
-            callJs("if(window.onAudioPicked){window.onAudioPicked(" + json + ")}");
+            sendImportResult(ok, failed);
         }).start();
     }
 
-    private String copyUriToCache(Uri uri, int index) {
-        if (uri == null) return null;
+    /** Structured outcome of one URI → cache copy. reason is null on success. */
+    private static class ImportResult {
+        final String name;
+        final String path;   // "file://..." on success, null on failure
+        final String reason; // null | "empty" | "unreadable" | "unsupported"
+
+        ImportResult(String name, String path, String reason) {
+            this.name = name;
+            this.path = path;
+            this.reason = reason;
+        }
+
+        boolean ok() {
+            return reason == null;
+        }
+    }
+
+    private void reportImport(ImportResult r, JSONArray ok, JSONArray failed) {
+        if (r == null) return;
+        if (r.ok()) {
+            ok.put(r.path);
+        } else {
+            try {
+                JSONObject o = new JSONObject();
+                o.put("name", r.name);
+                o.put("reason", r.reason);
+                failed.put(o);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void sendImportResult(JSONArray ok, JSONArray failed) {
+        String payload = jsSafeJson(
+                "{\"ok\":" + ok.toString() + ",\"failed\":" + failed.toString() + "}");
+        callJs("if(window.onAudioPicked){window.onAudioPicked(" + payload + ")}");
+    }
+
+    /** org.json output is valid JS except U+2028/U+2029 inside strings — escape those. */
+    private static String jsSafeJson(String json) {
+        return json.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+    }
+
+    /**
+     * Hardened copy of a content URI into the app cache.
+     *
+     * Root fixes for the "Decode failed on every song" bug:
+     *  - the read loop uses != -1 (read() may legally return 0; "> 0" truncated files),
+     *  - verifies the real byte count AND dst.length() (0 bytes -> "empty"),
+     *  - magic-byte check for MP3/WAV/M4A/FLAC/OGG/AAC (-> "unsupported"),
+     *  - failed copies are deleted and reported with a reason, never silently dropped.
+     */
+    private ImportResult copyUriToCache(Uri uri, int index) {
+        String fallback = "audio_" + index + ".mp3";
+        if (uri == null) return new ImportResult(fallback, null, "unreadable");
+        String name = queryDisplayName(uri);
+        if (name == null || name.trim().isEmpty()) name = fallback;
+        name = sanitizeFileName(name);
         try {
-            String name = queryDisplayName(uri);
-            if (name == null || name.isEmpty()) name = "audio_" + index + ".mp3";
-            name = name.replaceAll("[/\\\\]", "_");
             File dir = new File(getCacheDir(), "imports");
-            if (!dir.exists()) dir.mkdirs();
+            if (!dir.exists() && !dir.mkdirs()) {
+                return new ImportResult(name, null, "unreadable");
+            }
             File dst = uniqueFile(dir, name);
             ContentResolver cr = getContentResolver();
+            long bytes = 0;
             try (InputStream in = cr.openInputStream(uri);
                  OutputStream out = new FileOutputStream(dst)) {
-                if (in == null) return null;
+                if (in == null) {
+                    dst.delete();
+                    return new ImportResult(name, null, "unreadable");
+                }
                 byte[] buf = new byte[65536];
                 int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                // NOTE: InputStream.read() may legally return 0 — only -1 means EOF.
+                while ((n = in.read(buf)) != -1) {
+                    if (n > 0) {
+                        out.write(buf, 0, n);
+                        bytes += n;
+                    }
+                }
+                out.flush();
+            } catch (Exception e) {
+                dst.delete();
+                return new ImportResult(name, null, "unreadable");
             }
-            return "file://" + dst.getAbsolutePath();
+            if (bytes == 0 || dst.length() == 0) {
+                dst.delete();
+                return new ImportResult(name, null, "empty");
+            }
+            if (!isSupportedAudio(dst)) {
+                dst.delete();
+                return new ImportResult(name, null, "unsupported");
+            }
+            return new ImportResult(name, "file://" + dst.getAbsolutePath(), null);
         } catch (Exception e) {
-            return null;
+            return new ImportResult(name, null, "unreadable");
+        }
+    }
+
+    /** Strips path separators, reserved chars and control chars from a display name. */
+    private static String sanitizeFileName(String name) {
+        String s = name.replaceAll("[/\\\\:*?\"<>|]", "_")
+                .replaceAll("\\p{Cntrl}", "_")
+                .trim();
+        if (s.isEmpty()) s = "audio.mp3";
+        if (s.length() > 120) {
+            int dot = s.lastIndexOf('.');
+            String ext = (dot > 0 && dot > s.length() - 12) ? s.substring(dot) : "";
+            s = s.substring(0, Math.min(120 - ext.length(), s.length())) + ext;
+        }
+        return s;
+    }
+
+    /**
+     * Magic-byte sniff: MP3 (ID3 / MPEG frame sync), WAV (RIFF), FLAC (fLaC),
+     * M4A/MP4 (ftyp at offset 4), OGG (OggS), AAC-ADTS (frame sync).
+     */
+    private static boolean isSupportedAudio(File f) {
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] h = new byte[12];
+            int read = 0;
+            while (read < h.length) {
+                int n = in.read(h, read, h.length - read);
+                if (n == -1) break;
+                read += n;
+            }
+            if (read < 4) return false;
+            if (h[0] == 'I' && h[1] == 'D' && h[2] == '3') return true;               // MP3 w/ ID3
+            if ((h[0] & 0xFF) == 0xFF && (h[1] & 0xE0) == 0xE0) return true;           // MP3/AAC frame sync
+            if (h[0] == 'R' && h[1] == 'I' && h[2] == 'F' && h[3] == 'F') return true;  // WAV
+            if (h[0] == 'f' && h[1] == 'L' && h[2] == 'a' && h[3] == 'C') return true;   // FLAC
+            if (read >= 8 && h[4] == 'f' && h[5] == 't' && h[6] == 'y' && h[7] == 'p')
+                return true;                                                          // M4A/MP4
+            if (h[0] == 'O' && h[1] == 'g' && h[2] == 'g' && h[3] == 'S') return true;   // OGG
+            return false;
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -683,6 +840,78 @@ public class MainActivity extends ComponentActivity {
             f = new File(dir, base + "_" + (i++) + ext);
         }
         return f;
+    }
+
+    // ---------- Music library bridge (MediaStore) ----------
+
+    /** Queries MediaStore for on-device music and reports to JS via onMusicListed. */
+    private void queryMusicLibrary() {
+        try {
+            Uri base = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+            String[] projection = {
+                    MediaStore.Audio.Media._ID,
+                    MediaStore.Audio.Media.TITLE,
+                    MediaStore.Audio.Media.ARTIST,
+                    MediaStore.Audio.Media.ALBUM,
+                    MediaStore.Audio.Media.DURATION,
+                    MediaStore.Audio.Media.SIZE
+            };
+            JSONArray tracks = new JSONArray();
+            try (Cursor c = getContentResolver().query(
+                    base, projection,
+                    MediaStore.Audio.Media.IS_MUSIC + " != 0",
+                    null,
+                    MediaStore.Audio.Media.TITLE + " ASC")) {
+                if (c == null) {
+                    sendMusicListError("error");
+                    return;
+                }
+                int idCol = c.getColumnIndex(MediaStore.Audio.Media._ID);
+                int titleCol = c.getColumnIndex(MediaStore.Audio.Media.TITLE);
+                int artistCol = c.getColumnIndex(MediaStore.Audio.Media.ARTIST);
+                int albumCol = c.getColumnIndex(MediaStore.Audio.Media.ALBUM);
+                int durCol = c.getColumnIndex(MediaStore.Audio.Media.DURATION);
+                int sizeCol = c.getColumnIndex(MediaStore.Audio.Media.SIZE);
+                int count = 0;
+                while (c.moveToNext() && count < 2000) {
+                    try {
+                        JSONObject t = new JSONObject();
+                        t.put("title", colStr(c, titleCol));
+                        t.put("artist", colStr(c, artistCol));
+                        t.put("album", colStr(c, albumCol));
+                        t.put("durationMs", durCol >= 0 ? c.getLong(durCol) : 0);
+                        t.put("size", sizeCol >= 0 ? c.getLong(sizeCol) : 0);
+                        t.put("uri", ContentUris
+                                .withAppendedId(base, c.getLong(idCol)).toString());
+                        tracks.put(t);
+                        count++;
+                    } catch (Exception ignored) {
+                        // Skip a bad row, keep the rest.
+                    }
+                }
+            }
+            String payload = jsSafeJson("{\"ok\":true,\"tracks\":" + tracks.toString() + "}");
+            callJs("if(window.onMusicListed){window.onMusicListed(" + payload + ")}");
+        } catch (SecurityException se) {
+            sendMusicListError("permission-denied");
+        } catch (Exception e) {
+            sendMusicListError("error");
+        }
+    }
+
+    private static String colStr(Cursor c, int col) {
+        try {
+            if (col < 0) return "";
+            String v = c.getString(col);
+            return v == null ? "" : v;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void sendMusicListError(String reason) {
+        callJs("if(window.onMusicListed){window.onMusicListed({\"ok\":false,\"reason\":"
+                + jsString(reason) + "})}");
     }
 
     // ---------- Mic recording ----------
@@ -822,6 +1051,83 @@ public class MainActivity extends ComponentActivity {
         @JavascriptInterface
         public void pickAudio() {
             runOnUiThread(() -> ensureAudioPermission(() -> launchAudioPicker()));
+        }
+
+        /**
+         * Lists up to 2000 on-device music tracks (MediaStore) on a background thread.
+         * If the audio-library permission is missing it is requested; the list is
+         * retried after the grant, or onMusicListed({ok:false, reason:"permission-denied"})
+         * is delivered. No rationale UI here — JS shows that.
+         */
+        @JavascriptInterface
+        public void listMusic() {
+            try {
+                if (hasAudioReadPermission()) {
+                    new Thread(() -> queryMusicLibrary()).start();
+                } else {
+                    pendingMusicList = true;
+                    runOnUiThread(() -> {
+                        try {
+                            requestPermissions(new String[]{audioPermission()}, REQ_MUSIC_PERM);
+                        } catch (Exception e) {
+                            pendingMusicList = false;
+                            sendMusicListError("error");
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                sendMusicListError("error");
+            }
+        }
+
+        /**
+         * Asks for the audio-library permission on demand (JS shows the rationale).
+         * If already granted, the music list is returned right away.
+         */
+        @JavascriptInterface
+        public void requestMusicPermission() {
+            runOnUiThread(() -> {
+                try {
+                    if (hasAudioReadPermission()) {
+                        new Thread(() -> queryMusicLibrary()).start();
+                    } else {
+                        pendingMusicList = true;
+                        requestPermissions(new String[]{audioPermission()}, REQ_MUSIC_PERM);
+                    }
+                } catch (Exception e) {
+                    pendingMusicList = false;
+                    sendMusicListError("error");
+                }
+            });
+        }
+
+        /**
+         * Copies one MediaStore track (content:// URI string) into the app cache
+         * using the hardened import pipeline; JS gets
+         * onAudioPicked({ok:["file://..."], failed:[]}).
+         */
+        @JavascriptInterface
+        public void importMusic(final String uriString) {
+            new Thread(() -> {
+                JSONArray ok = new JSONArray();
+                JSONArray failed = new JSONArray();
+                try {
+                    Uri uri = (uriString == null || uriString.isEmpty())
+                            ? null : Uri.parse(uriString);
+                    reportImport(
+                            copyUriToCache(uri, (int) (System.currentTimeMillis() % 100000)),
+                            ok, failed);
+                } catch (Exception e) {
+                    try {
+                        JSONObject o = new JSONObject();
+                        o.put("name", "unknown");
+                        o.put("reason", "unreadable");
+                        failed.put(o);
+                    } catch (Exception ignored) {
+                    }
+                }
+                sendImportResult(ok, failed);
+            }).start();
         }
 
         /**

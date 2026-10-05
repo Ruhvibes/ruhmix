@@ -291,3 +291,23 @@ body.light #bottomnav { background: rgba(255, 255, 255, 0.96); }
 .setup-steps { margin: 8px 0 12px 20px; font-size: 14px; }
 .setup-steps li { margin: 6px 0; }
 .mono { font-family: monospace; word-break: break-all; }
+
+/* ======================= import tabs + music library ======================= */
+.tabbar { display: flex; gap: 8px; margin: 12px 0; }
+.tabbtn {
+  flex: 1; padding: 10px 12px; border-radius: 12px; min-height: 44px;
+  border: 1px solid var(--line); background: var(--card2); color: var(--txt);
+  font-size: 14px; font-weight: 700; cursor: pointer;
+}
+.tabbtn.active { background: var(--grad); border-color: transparent; color: #fff;
+  box-shadow: 0 2px 14px rgba(124, 92, 255, 0.4); }
+.spinner {
+  width: 34px; height: 34px; margin: 0 auto 10px; border-radius: 50%;
+  border: 3px solid var(--line); border-top-color: var(--blue);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#music-search { width: 100%; margin: 4px 0 10px; }
+.music-item { cursor: pointer; }
+.music-item:active { transform: scale(0.99); }
+.music-item.busy { opacity: 0.5; pointer-events: none; }
