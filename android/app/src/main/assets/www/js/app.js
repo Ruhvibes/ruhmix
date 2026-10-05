@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 4 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 5 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -200,9 +200,15 @@ RM.app = (function () {
       W.oR1.connect(W.merge2, 0, 1); W.oR2.connect(W.merge2, 0, 1);
       W.merge2.connect(W.out);
       state.width = W;
+      // makePlayer default me insert→panner→gain→master jodta hai. Studio me insert
+      // FX chain ka entry point hai — dry path yahan disconnect karte hain, warna
+      // signal DOUBLE (+6dB) ho jata hai: limiter hamesha engaged rehta (pumping)
+      // aur FX wet/dry balance galat ho jata hai. Pan/volume chain ke BAAD lagate
+      // hain taaki setPan/setVolume kaam karte rahein (panner→gain→master juda hai).
+      state.player.insert.disconnect();
       state.player.insert.connect(state.chain.input);
       state.chain.output.connect(W.in);
-      W.out.connect(RM.audio.masterIn());
+      W.out.connect(state.player.panner);
     }
     return state;
   }
@@ -210,6 +216,39 @@ RM.app = (function () {
     ensureStudio();
     const ctx = RM.audio.ensureCtx();
     state.width.wGain.gain.setTargetAtTime(clamp(w, 0, 2), ctx.currentTime, 0.02);
+  }
+  // Offline stereo-width M/S matrix — ensureStudio wale live matrix jaisa
+  // (width=1 → neutral). Export graph me lagta hai taaki "jo suna wahi export ho":
+  // pehle export me ye stage missing thi, wide mixes playback se +1.63dB RMS tak
+  // alag lagte the.
+  function widthMatrix(oc, widthVal) {
+    const W = {};
+    W.in = oc.createGain();
+    W.split = oc.createChannelSplitter(2);
+    W.midG = oc.createGain(); W.midG.gain.value = 0.5;
+    W.midG2 = oc.createGain(); W.midG2.gain.value = 0.5;
+    W.sideG = oc.createGain(); W.sideG.gain.value = 0.5;
+    W.sideG2 = oc.createGain(); W.sideG2.gain.value = -0.5;
+    W.merge = oc.createChannelMerger(2);
+    W.split2 = oc.createChannelSplitter(2);
+    W.wGain = oc.createGain(); W.wGain.gain.value = widthVal; // side pe width
+    W.oL1 = oc.createGain(); W.oL2 = oc.createGain();
+    W.oR1 = oc.createGain(); W.oR2 = oc.createGain(); W.oR2.gain.value = -1;
+    W.merge2 = oc.createChannelMerger(2);
+    W.out = oc.createGain();
+    W.in.connect(W.split);
+    W.split.connect(W.midG, 0); W.split.connect(W.midG2, 1);
+    W.midG.connect(W.merge, 0, 0); W.midG2.connect(W.merge, 0, 0);
+    W.split.connect(W.sideG, 0); W.split.connect(W.sideG2, 1);
+    W.sideG.connect(W.wGain); W.sideG2.connect(W.wGain);
+    W.wGain.connect(W.merge, 0, 1);
+    W.merge.connect(W.split2);
+    W.split2.connect(W.oL1, 0); W.split2.connect(W.oL2, 1);
+    W.oL1.connect(W.merge2, 0, 0); W.oL2.connect(W.merge2, 0, 0);
+    W.split2.connect(W.oR1, 0); W.split2.connect(W.oR2, 1);
+    W.oR1.connect(W.merge2, 0, 1); W.oR2.connect(W.merge2, 0, 1);
+    W.merge2.connect(W.out);
+    return W;
   }
   function applyFxToChain() {
     ensureStudio();
@@ -222,8 +261,10 @@ RM.app = (function () {
     state.project = RM.proj.create(name);
     state.buffer = null;
     state.viewBuffer = null;
+    state.viewGen++; // purane project ka koi in-flight render/peaks ab stale hai
     state.fileName = '';
     state.redoStack = [];
+    if (state.waveView) state.waveView.setBuffer(null, new Float32Array(0));
     RM.proj.markDirty();
     show('import');
   }
@@ -237,12 +278,19 @@ RM.app = (function () {
     state.project.audioRef = audioRef || { name: state.fileName, size: 0, type: '', lastModified: 0 };
     state.project.ops = [];
     state.redoStack = [];
+    if (state.waveView) state.waveView.setBuffer(null, new Float32Array(0));
     RM.proj.invalidateView(buffer);
     refreshView().then(() => {
       RM.proj.autosave(state.project);
       toast((lang === 'hi' ? 'लोड हो गया: ' : 'Loaded: ') + state.fileName);
       if (state.screen === 'import') show('editor');
       if (RM.app.updateEditorMeta) RM.app.updateEditorMeta();
+    }).catch(() => {
+      // applyOps reject ho sakta hai (bahut badi file -> createBuffer OOM).
+      // Bina catch ke unhandled rejection + "load ho gaya" ka jhootha bharosa.
+      toast(lang === 'hi'
+        ? 'ऑडियो तैयार नहीं हो पाया — फ़ाइल बहुत बड़ी हो सकती है'
+        : 'Could not prepare audio — the file may be too large', 3500);
     });
   }
 
@@ -264,7 +312,12 @@ RM.app = (function () {
       state.player.setPan(state.project.settings.pan || 0);
       if (wasPlaying) state.player.play(Math.min(pos, view.duration - 0.1));
       if (state.waveView) {
+        const vgen = gen;
         RM.wave.getPeaks(view, 1200).then((peaks) => {
+          // getPeaks async hai: tab tak tez undo/redo se NAYA view aa chuka
+          // ho sakta hai. Bina gen-check ke purani peaks naya view overwrite
+          // kar deti — waveform galat audio dikhata.
+          if (vgen !== state.viewGen) return;
           state.waveView.setBuffer(view, peaks);
           if (RM.app.updateTrimShade) RM.app.updateTrimShade();
         });
@@ -277,26 +330,51 @@ RM.app = (function () {
     state.project.ops.push(op);
     state.redoStack = [];
     RM.proj.autosave(state.project);
-    return refreshView();
+    return refreshView().catch(() => {
+      // Render fail ho gaya (op apply crash / OOM): op ko wapas lo.
+      // Root reason: ek fail hua op list me reh jaye to uske baad ki HAR
+      // render fail hogi — project permanently "poisoned". Rollback se
+      // project usable rehta hai aur user ko saaf message milta hai.
+      const i = state.project.ops.lastIndexOf(op);
+      if (i !== -1) state.project.ops.splice(i, 1);
+      RM.proj.autosave(state.project);
+      toast(lang === 'hi' ? 'Edit लागू नहीं हो पाया' : 'Could not apply edit', 3000);
+      return refreshView().catch(() => null);
+    });
   }
   function undoOp() {
     const op = state.project.ops.pop();
     if (!op) { toast(lang === 'hi' ? 'कुछ नहीं है' : 'Nothing to undo'); return; }
     state.redoStack.push(op);
     RM.proj.autosave(state.project);
-    refreshView();
+    refreshView().catch(() => {
+      toast(lang === 'hi' ? 'Edit लागू नहीं हो पाया' : 'Could not apply edit', 3000);
+    });
   }
   function redoOp() {
     const op = state.redoStack.pop();
     if (!op) { toast(lang === 'hi' ? 'कुछ नहीं है' : 'Nothing to redo'); return; }
     state.project.ops.push(op);
     RM.proj.autosave(state.project);
-    refreshView();
+    refreshView().catch(() => {
+      const i = state.project.ops.lastIndexOf(op);
+      if (i !== -1) state.project.ops.splice(i, 1);
+      RM.proj.autosave(state.project);
+      toast(lang === 'hi' ? 'Edit लागू नहीं हो पाया' : 'Could not apply edit', 3000);
+    });
   }
 
   function stopAll() {
+    // Project/audio switch ya naya load: jo bhi baj raha hai, sab band.
+    // Sirf studio player + mixer nahi — stem preview players, mastering
+    // preview aur stem-mix preview bhi, warna purana audio bajta rehta hai.
+    // (Metronome jaanboojhkar chalta rehta hai — wo independent practice
+    // tool hai, uska apna stop button hai. Recording bhi user-action hai.)
     try { if (state.player) state.player.stop(true); } catch (e) {}
     try { if (RM.app.stopMixer) RM.app.stopMixer(); } catch (e) {}
+    try { if (RM.app.stopStemPlayers) RM.app.stopStemPlayers(); } catch (e) {}
+    try { if (RM.app.stopMstPreview) RM.app.stopMstPreview(); } catch (e) {}
+    try { if (RM.remix && RM.remix.stemPipeline) RM.remix.stemPipeline.stopPreview(); } catch (e) {}
   }
 
   /* ================= import ================= */
@@ -330,6 +408,14 @@ RM.app = (function () {
     toast((lang === 'hi' ? 'डिकोड हो रहा है: ' : 'Decoding: ') + name);
     return RM.audio.decodeArrayBuffer(ab).then((buf) => {
       state.imports.unshift({ name, buffer: buf, size: size || ab.byteLength, type: '' });
+      // Memory edge: har import poora decoded AudioBuffer pakadta hai
+      // (10-min stereo ~100MB). List ko cap karo, warna 20-30 import = OOM.
+      const MAX_IMPORTS = 12;
+      if (state.imports.length > MAX_IMPORTS) {
+        const dropped = state.imports.splice(MAX_IMPORTS);
+        dropped.forEach((it) => RM.wave.dropPeaks(it.buffer));
+        toast(lang === 'hi' ? 'मेमोरी के लिए पुराने इम्पोर्ट हटाए गए' : 'Old imports removed to save memory', 2500);
+      }
       renderImportList();
       return buf;
     }).catch(() => {
@@ -406,17 +492,27 @@ RM.app = (function () {
   }
 
   /* ================= voice recorder (bridge) ================= */
-  const rec = { recording: false, startT: 0, timer: 0, path: null, fallback: null };
+  const rec = { recording: false, pending: false, startT: 0, timer: 0, path: null, fallback: null };
+  function recActive() { return rec.recording || rec.pending; }
   function startRecording() {
+    // Double-tap guard: native callback / getUserMedia resolve hone se pehle
+    // doosra tap do recorder shuru kar deta tha (browser me mic leak tak).
+    if (rec.recording || rec.pending) return;
     const nat = RM.audio.native;
     const name = 'ruhmix-rec-' + Date.now();
     if (nat.method('startRecording')) {
+      rec.pending = true;
       nat.call('startRecording', name);
+      // Safety: native callback kabhi na aaye to button hamesha ke liye dead na ho.
+      setTimeout(() => { if (rec.pending && !rec.recording) rec.pending = false; }, 10000);
       return;
     }
     // Browser fallback: MediaRecorder (honest label)
     if (navigator.mediaDevices && window.MediaRecorder) {
+      rec.pending = true;
       navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+        if (!rec.pending) { stream.getTracks().forEach((tr) => tr.stop()); return; } // beech me cancel hua
+        rec.pending = false;
         const mr = new MediaRecorder(stream);
         const chunks = [];
         mr.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
@@ -434,18 +530,20 @@ RM.app = (function () {
         rec.startT = Date.now();
         updateRecUI();
         toast(lang === 'hi' ? 'रिकॉर्डिंग शुरू (ब्राउज़र)' : 'Recording started (browser)');
-      }).catch(() => toast(lang === 'hi' ? 'माइक की अनुमति नहीं मिली' : 'Mic permission denied', 3000));
+      }).catch(() => { rec.pending = false; toast(lang === 'hi' ? 'माइक की अनुमति नहीं मिली' : 'Mic permission denied', 3000); });
       return;
     }
     toast(lang === 'hi' ? 'रिकॉर्डिंग इस डिवाइस पर उपलब्ध नहीं है' : 'Recording unavailable on this device', 3000);
   }
   function stopRecording() {
+    rec.pending = false;
     const nat = RM.audio.native;
     if (rec.fallback) { try { rec.fallback.stop(); } catch (e) {} rec.fallback = null; return; }
     if (nat.method('stopRecording')) { nat.call('stopRecording'); return; }
   }
   // Native callbacks (wired as globals below, per shell contract)
   function handleRecordingStarted(path) {
+    rec.pending = false;
     rec.recording = true;
     rec.startT = Date.now();
     rec.path = path;
@@ -453,6 +551,7 @@ RM.app = (function () {
     toast(lang === 'hi' ? 'रिकॉर्डिंग शुरू…' : 'Recording…');
   }
   function handleRecordingStopped(path) {
+    rec.pending = false;
     rec.recording = false;
     updateRecUI();
     const p = path || rec.path;
@@ -474,6 +573,7 @@ RM.app = (function () {
     });
   }
   function handleRecordingError(msg) {
+    rec.pending = false;
     rec.recording = false;
     updateRecUI();
     toast((lang === 'hi' ? 'रिकॉर्डिंग त्रुटि: ' : 'Recording error: ') + (msg || ''), 3500);
@@ -535,7 +635,7 @@ RM.app = (function () {
     show, needAudio, ensureStudio, setWidth, applyFxToChain, defaultFx,
     newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
     pickAudio, handleAudioPicked, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
-    startRecording, stopRecording, handleRecordingStarted, handleRecordingStopped,
+    startRecording, stopRecording, recActive, handleRecordingStarted, handleRecordingStopped,
     handleRecordingError, updateRecUI,
     checkUpdate,
   };
@@ -723,6 +823,7 @@ Object.assign(RM.app, (function () {
     });
     $('ed-split').addEventListener('click', () => {
       if (!A.needAudio()) return;
+      if (!A.state.viewBuffer) { A.toast(HI() ? 'ऑडियो तैयार हो रहा है…' : 'Audio is getting ready…'); return; }
       const p = A.state.player.position();
       const dur = A.state.viewBuffer.duration;
       if (dur - p < 0.1) { A.toast(HI() ? 'अंत के पास स्प्लिट नहीं हो सकता' : 'Cannot split near the end'); return; }
@@ -764,6 +865,7 @@ Object.assign(RM.app, (function () {
 
   function copyRange(a, b, done) {
     const src = A.state.viewBuffer;
+    if (!src) { A.toast(HI() ? 'ऑडियो तैयार हो रहा है…' : 'Audio is getting ready…'); return; }
     const sr = src.sampleRate;
     const aS = Math.round(a * sr), bS = Math.min(src.length, Math.round(b * sr));
     const len = Math.max(1, bS - aS);
@@ -807,6 +909,7 @@ Object.assign(RM.app, (function () {
   A.renderMarkers = renderMarkers;
 
   /* ================= auto remix ================= */
+  let remixBusy = false; // double-tap guard: heavy generate sirf ek baar
   function initRemix() {
     const grid = $('remix-grid');
     RM.remix.STYLES.forEach((s) => {
@@ -859,11 +962,22 @@ Object.assign(RM.app, (function () {
   }
   function generateRemix() {
     if (!A.needAudio()) return;
+    // Double-tap guard: BPM detect + stem pipeline dono heavy hain; do run
+    // parallel me status ladta aur CPU double hota.
+    if (remixBusy) { A.toast(HI() ? 'रीमिक्स बन रहा है — कृपया प्रतीक्षा करें' : 'Remix is being generated — please wait'); return; }
+    remixBusy = true;
+    const genBtn = $('remix-generate');
+    if (genBtn) genBtn.disabled = true;
+    const finishRemix = () => {
+      remixBusy = false;
+      const g = $('remix-generate');
+      if (g) g.disabled = false;
+    };
     const id = A.state.remix.style || 'commercial';
     const status = $('remix-status');
     // Part 2: jab 4 stems loaded hon -> stem-based pipeline; bina stems ke
     // purana preset-flow bilkul waisa hi rahe (koi regression nahi).
-    if (RM.stems.packAvailable()) { generateStemRemix(id, status); return; }
+    if (RM.stems.packAvailable()) { generateStemRemix(id, status, finishRemix); return; }
     status.textContent = HI() ? 'BPM पहचाना जा रहा है…' : 'Detecting BPM…';
     guarded(HI() ? 'ऑटो रीमिक्स' : 'Auto Remix', () => RM.audio.detectBPM(A.state.buffer, (p) => {
       status.textContent = (HI() ? 'BPM पहचाना जा रहा है… ' : 'Detecting BPM… ') + Math.round(p * 100) + '%';
@@ -887,6 +1001,7 @@ Object.assign(RM.app, (function () {
         (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '');
       A.toast(HI() ? 'रीमिक्स तैयार है' : 'Remix ready');
     })).then((r) => {
+      finishRemix();
       if (!r.ok) status.textContent = r.cancelled
         ? (HI() ? 'रद्द कर दिया गया' : 'Cancelled')
         : (HI() ? 'BPM पहचान नहीं हो पाई' : 'BPM detection failed');
@@ -894,7 +1009,7 @@ Object.assign(RM.app, (function () {
   }
 
   // Stem-based pipeline: 4 stems -> per-stem FX -> arrange -> mix -> master.
-  function generateStemRemix(id, status) {
+  function generateStemRemix(id, status, finishRemix) {
     const pack = RM.stems.getStemPack();
     const srcName = pack.source === 'ai' ? (HI() ? 'AI stems' : 'AI stems') : (HI() ? 'Spectral bands (DSP)' : 'Spectral bands (DSP)');
     A.stopAll();
@@ -923,6 +1038,7 @@ Object.assign(RM.app, (function () {
         A.toast(HI() ? 'स्टेम रीमिक्स तैयार है' : 'Stem remix ready');
       });
     }).then((r) => {
+      if (finishRemix) finishRemix();
       if (!r.ok) status.innerHTML = r.cancelled
         ? (HI() ? 'रद्द कर दिया गया' : 'Cancelled')
         : (HI() ? 'स्टेम रीमिक्स विफल रहा' : 'Stem remix failed');
@@ -1019,6 +1135,7 @@ Object.assign(RM.app, (function () {
 
   /* ================= stems UI ================= */
   let stemPlayers = [];
+  let stemBusy = false; // double-tap guard: separation heavy hai, ek hi run
   function initStems() {
     const grid = $('stems-grid');
     RM.stems.ENGINES.forEach((e) => {
@@ -1039,6 +1156,10 @@ Object.assign(RM.app, (function () {
   }
   function runStemEngine(id) {
     if (!A.needAudio()) return;
+    if (stemBusy) { A.toast(HI() ? 'सेपरेशन चल रहा है — कृपया प्रतीक्षा करें' : 'Separation is running — please wait'); return; }
+    stemBusy = true;
+    const runBtns = Array.from(document.querySelectorAll('#stems-grid [data-run]'));
+    runBtns.forEach((b) => { b.disabled = true; });
     const status = $('stems-status');
     const results = $('stems-results');
     results.innerHTML = '';
@@ -1052,6 +1173,8 @@ Object.assign(RM.app, (function () {
       if (bar) bar.style.width = Math.round(p * 100) + '%';
       if (lb) lb.textContent = (label || eng.name) + ' ' + Math.round(p * 100) + '%';
     })).then((r) => {
+      stemBusy = false;
+      runBtns.forEach((b) => { b.disabled = false; });
       if (!r.ok) {
         if (!r.cancelled) status.innerHTML = `<div class="err">${HI() ? 'विफल रहा' : 'Failed'}</div>`;
         return;
@@ -1243,7 +1366,7 @@ Object.assign(RM.app, (function () {
     document.querySelectorAll('#dlg-body .listbtn').forEach((b) => {
       b.addEventListener('click', () => {
         const o = opts[+b.dataset.i];
-        tr.buffer = o.buf; tr.name = o.label.slice(0, 28);
+        tr.buffer = o.buf; tr.name = Array.from(o.label).slice(0, 28).join('');
         if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
         $('dlg').classList.remove('show');
         refreshTrackUI();
@@ -1262,7 +1385,7 @@ Object.assign(RM.app, (function () {
     }
     if (!tr) tr = mixer.tracks.find((x) => !x.buffer) || mixer.tracks[0];
     tr.buffer = buffer;
-    tr.name = (name || 'Audio').slice(0, 28);
+    tr.name = Array.from(name || 'Audio').slice(0, 28).join('');
     if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
     refreshTrackUI();
     A.toast((HI() ? 'मिक्सर में भेजा गया: ' : 'Sent to mixer: ') + tr.name);
@@ -1441,6 +1564,10 @@ Object.assign(RM.app, (function () {
       mst.chain = RM.fx.makeMasterChain(ctx, A.state.mastering.settings);
       mst.bypass = ctx.createGain(); // processed path gain
       mst.direct = ctx.createGain(); // dry path gain
+      // Internal dry path (insert→panner→gain→master) disconnect — A/B ke liye
+      // mst.direct/mst.bypass gains hi kaafi hain; warna "before" mode me double-dry
+      // aur "after" mode me dry+processed ek saath bajta (doubling bug).
+      mst.player.insert.disconnect();
       mst.player.insert.connect(mst.chain.input);
       mst.chain.output.connect(mst.bypass);
       mst.bypass.connect(RM.audio.masterIn());
@@ -1458,6 +1585,11 @@ Object.assign(RM.app, (function () {
     mst.bypass.gain.setTargetAtTime(after ? 1 : 0, t, 0.02);
     mst.direct.gain.setTargetAtTime(after ? 0 : 1, t, 0.02);
   }
+  // Project switch / naya audio: mastering preview band karo (stopAll se call hota hai).
+  function stopMstPreview() {
+    try { if (mst.player) mst.player.stop(true); } catch (e) {}
+  }
+  A.stopMstPreview = stopMstPreview;
   function syncMstUI() {
     const s = A.state.mastering.settings;
     $('mst-eqb').value = s.eqB; $('mst-eqm').value = s.eqM; $('mst-eqt').value = s.eqT;
@@ -1533,6 +1665,25 @@ Object.assign(RM.app, (function () {
 
   /* ================= export screen ================= */
   const expToken = { cancelled: false };
+
+  // Export filename sanitize — unicode-safe, deterministic:
+  // - Hindi/regional naam bache rehte hain: \p{L} letters + \p{M} COMBINING
+  //   MARKS (Hindi matras! purana [^\w] "मेरा" -> "मर" kar deta tha) + \p{N}
+  // - "_" bhi rakho (Team 4 ke [^A-Za-z0-9._-] se align)
+  // - spaces -> '_' (native saveFile bhi spaces ko '_' karta hai, isliye
+  //   toast me jo naam dikhe wahi file save ho — Team 4 ka mismatch fix)
+  // - maujooda AUDIO extension hatao (".mp3") taaki "song.mp3.mp3" na bane;
+  //   sirf known audio ext — "my.song.v2" ka ".v2" extension nahi hai
+  // - Array.from slice: emoji surrogate-pair kabhi aadha na kate
+  function sanitizeFileBase(name) {
+    const raw = String(name || '').trim()
+      .replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|webm|3gp|3g2|wma|aiff|aif)$/i, '');
+    const cleaned = raw.replace(/[^\p{L}\p{M}\p{N}\-_ ]+/gu, '').trim().replace(/ +/g, '_');
+    const safe = Array.from(cleaned).slice(0, 40).join('').replace(/^_+|_+$/g, '');
+    return safe;
+  }
+  A.sanitizeFileBase = sanitizeFileBase;
+
   function refreshExportSource() {
     const box = $('exp-sources');
     if (!box) return;
@@ -1546,13 +1697,28 @@ Object.assign(RM.app, (function () {
       box.innerHTML = `<div class="empty">${HI() ? 'एक्सपोर्ट के लिए पहले ऑडियो लोड करें' : 'Load audio first to export'}</div>`;
       return;
     }
-    A.state.exportSource = A.state.exportSource || { idx: 0 };
+    // Stem row se "Export" dabane par exportSource {kind:'buffer', buffer, name}
+    // set hota hai — use radio me explicit option banao aur select karo.
+    // (Pehle radio hamesha index 0 check karta tha -> galat source export hota tha.)
+    const es = A.state.exportSource;
+    let checkedIdx = 0;
+    if (es && es.kind === 'buffer' && es.buffer) {
+      opts.unshift({ kind: 'explicit', label: (HI() ? '🎯 चुना हुआ: ' : '🎯 Selected: ') + es.name, get: () => ({ buffer: es.buffer, rate: 1, fx: A.defaultFx(), name: es.name }) });
+      checkedIdx = 0;
+    } else if (es && typeof es.idx === 'number' && es.idx >= 0 && es.idx < opts.length) {
+      checkedIdx = es.idx;
+    }
     opts.forEach((o, i) => {
       const l = document.createElement('label');
       l.className = 'radio-row';
-      l.innerHTML = `<input type="radio" name="expsrc" value="${i}" ${i === 0 ? 'checked' : ''}><span>${A.escapeHtml(o.label)}</span>`;
+      l.innerHTML = `<input type="radio" name="expsrc" value="${i}" ${i === checkedIdx ? 'checked' : ''}><span>${A.escapeHtml(o.label)}</span>`;
       box.appendChild(l);
     });
+    // User ki pasand yaad rakho taaki screen dobara khulne par wahi selected rahe.
+    box.onchange = () => {
+      const v = box.querySelector('input[name="expsrc"]:checked');
+      A.state.exportSource = { idx: v ? +v.value : 0 };
+    };
     A.state._exportOpts = opts;
   }
   A.refreshExportSource = refreshExportSource;
@@ -1610,7 +1776,7 @@ Object.assign(RM.app, (function () {
     const normalize = $('exp-normalize').checked;
     const ext = isMp3 ? 'mp3' : isFlac ? 'flac' : 'wav';
     const mime = isMp3 ? 'audio/mpeg' : isFlac ? 'audio/flac' : 'audio/wav';
-    const base = (src.name || 'ruhmix').replace(/[^\w\- ]+/g, '').trim().slice(0, 40);
+    const base = sanitizeFileBase(src.name);
     const fileName = base ? base + '.' + ext : RM.exp.defaultName(ext);
     expToken.cancelled = false;
     $('exp-start').disabled = true;
@@ -1624,15 +1790,32 @@ Object.assign(RM.app, (function () {
       if (expToken.cancelled) throw new Error('cancelled');
       setExpStage(label, frac);
     };
-    // 1. render
+    // 1. render — Promise.resolve().then() me lapeta: renderOffline/makeChain
+    // agar SYNCHRONOUSLY throw kare (bahut badi file -> OfflineAudioContext
+    // length limit) to bhi .catch tak pahunche aur Export button dobara
+    // enable ho. Bina iske button hamesha disabled rehta (dead UI).
     stage(HI() ? 'तैयार हो रहा है…' : 'Preparing…', 0.02);
     let chain;
-    RM.exp.renderOffline(src.buffer, (oc, srcNode) => {
+    // Echo tail: high feedback pe echo 2.5s se bahut lambi chalti hai (fb=0.85 →
+    // ~16s). Default tail use ki to tail kat jati hai — isliye echo settings se
+    // RT60 nikaal ke tail badha dete hain (max 20s, usse zyada render bekaar).
+    const fxp = src.fx || A.defaultFx();
+    let tailNeed = 2.5;
+    if (fxp.echo && fxp.echo.on && fxp.echo.fb > 0 && fxp.echo.fb < 1 && fxp.echo.time > 0) {
+      const rt60 = fxp.echo.time * 60 / (-20 * Math.log10(fxp.echo.fb));
+      tailNeed = Math.max(tailNeed, Math.min(rt60, 20));
+    }
+    Promise.resolve().then(() => RM.exp.renderOffline(src.buffer, (oc, srcNode) => {
       chain = RM.fx.makeChain(oc);
-      chain.applyPreset(src.fx || A.defaultFx());
+      chain.applyPreset(fxp);
       srcNode.connect(chain.input);
-      return chain.output;
-    }, { sampleRate: sr, rate: src.rate || 1 })
+      // Stereo width bhi export me: wahi width value jo user live sun raha hai
+      // (A.state.width.wGain). Bina iske wide mixes export me alag lagte the.
+      const wVal = (A.state.width && A.state.width.wGain) ? A.state.width.wGain.gain.value : 1;
+      const W = widthMatrix(oc, wVal);
+      chain.output.connect(W.in);
+      return W.out;
+    }, { sampleRate: sr, rate: src.rate || 1, tail: tailNeed }))
       .then((rendered) => {
         try { if (chain) chain.dispose(); } catch (e) {}
         stage(HI() ? 'रेंडर हो रहा है… कृपया प्रतीक्षा करें' : 'Rendering… please wait', 0.35);
@@ -1744,10 +1927,13 @@ Object.assign(RM.app, (function () {
   function openProject(p) {
     A.stopAll();
     A.state.project = p;
+    RM.proj.restoreLive(p); // saved FX/slowed/mastering/remix settings wapas live state me
     A.state.buffer = null;
     A.state.viewBuffer = null;
+    A.state.viewGen++; // purane project ka koi in-flight render/peaks ab stale hai
     A.state.redoStack = [];
     A.state.fileName = (p.audioRef && p.audioRef.name) || '';
+    if (A.state.waveView) A.state.waveView.setBuffer(null, new Float32Array(0));
     RM.proj.autosave(p);
     A.show('import');
     const hint = $('import-hint');
@@ -1998,8 +2184,10 @@ Object.assign(RM.app, (function () {
     A.show('home');
   }
   function recBusy() {
-    // part 1's rec object isn't exported; use the button state instead
-    return $('rec-btn').classList.contains('rec-on') ? (A.stopRecording(), true) : false;
+    // part 1 ka rec object exported nahi; recActive() source of truth hai
+    // (recording + native-callback/getUserMedia ka pending window dono).
+    if (A.recActive && A.recActive()) { A.stopRecording(); return true; }
+    return false;
   }
 
   return {

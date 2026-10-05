@@ -248,10 +248,19 @@ RM.stems = (function () {
     const N = 2048, HOP = 512, WIN = hannWindow(N);
     const ANA_SR = 22050;
     // 1) mono downmix + resample to 22050 (chunked)
+    // Anti-alias: 22050Hz downsample se pehle ~10kHz one-pole LP — bina iske
+    // 12-20kHz content 2-10kHz me fold hota hai (phantom tones, mask corrupt).
+    // NOTE: lpY chunk boundaries pe reset NAHI hota (warna phantom spikes).
     const mono = ctx.createBuffer(1, buffer.length, sr);
     const md = mono.getChannelData(0);
+    let lpY = 0;
+    const lpA = 1 - Math.exp(-2 * Math.PI * 10000 / sr);
     return RM.audio.runChunked(buffer.length, 1 << 18, (a, b) => {
-      for (let i = a; i < b; i++) md[i] = (ch0[i] + ch1[i]) * 0.5;
+      for (let i = a; i < b; i++) {
+        const m = (ch0[i] + ch1[i]) * 0.5;
+        lpY += lpA * (m - lpY);
+        md[i] = lpY;
+      }
     }, onProgress ? (p) => onProgress(p * 0.08, 'Downmix…') : null)
     .then(() => RM.audio.resampleBuffer(mono, ANA_SR))
     .then((low) => {

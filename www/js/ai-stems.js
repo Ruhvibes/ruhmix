@@ -585,6 +585,8 @@ RM.aiStems = (function () {
     } else {
       $('ais-save-proj').addEventListener('click', saveProject);
     }
+    // Error panel fixed bottom-nav ke peeche na chhupe
+    try { box.scrollIntoView({ block: 'center' }); } catch (e) {}
   }
 
   function saveProject() {
@@ -604,6 +606,18 @@ RM.aiStems = (function () {
     box.style.display = '';
     const indet = !(p >= 0);
     const pct = indet ? 0 : Math.max(0, Math.min(100, Math.round(p * 100)));
+    // In-place update jab panel pehle se bana ho — har tick me innerHTML
+    // dobara banane se cancel button replace hota rehta tha aur tez tap
+    // miss ho sakta tha.
+    const bar = box.querySelector('.pbar');
+    const status = box.querySelector('.status');
+    const cancelBtn = box.querySelector('#ais-cancel-up');
+    if (bar && status && !!cancelBtn === !!cancelable) {
+      bar.className = 'pbar' + (indet ? ' indet' : '');
+      bar.style.width = pct + '%';
+      status.textContent = label || '';
+      return;
+    }
     box.innerHTML = `
       <div class="panel">
         <div class="progress"><div class="pbar${indet ? ' indet' : ''}" style="width:${pct}%"></div></div>
@@ -611,7 +625,10 @@ RM.aiStems = (function () {
         ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('रद्द करें', 'Cancel')}</button>` : ''}
       </div>`;
     if (cancelable) {
-      $('ais-cancel-up').addEventListener('click', () => abortAll(false));
+      const btn = $('ais-cancel-up');
+      btn.addEventListener('click', () => abortAll(false));
+      // Fixed bottom-nav ke peeche dab sakta hai — viewport center me lao
+      try { btn.scrollIntoView({ block: 'center' }); } catch (e) {}
     }
   }
   function hideProgress() {
@@ -658,7 +675,8 @@ RM.aiStems = (function () {
       setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
       return;
     }
-    setCfg(url, key);
+    // NOTE: test se pehle save NAHI karte — galat URL/key save ho jata to
+    // AI screen setup ki jagah toote hue server pe khulti. Sirf safal test par save.
     setAiStatus('', T('जाँच हो रही है… (pehli baar GPU start hone me 30-60s lag sakta hai)', 'Checking… (first check may take 30-60s for GPU cold start)'));
     const ctrl = new AbortController();
     const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 90000);
@@ -671,6 +689,7 @@ RM.aiStems = (function () {
       if (!r.ok) throw new Error('http ' + r.status);
       return r.text(); // body shape is not critical; reachability + auth is
     }).then(() => {
+      setCfg(url, key); // safal test par hi save
       setAiStatus('ok', T('सर्वर ठीक है ✓', 'Server is reachable ✓'));
       if (res) res.innerHTML = `<div class="ok">${T('कनेक्शन सफल — AI Stem Separation taiyaar hai.',
         'Connection successful — AI Stem Separation is ready.')}</div>`;
@@ -705,9 +724,11 @@ RM.aiStems = (function () {
       setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
       return;
     }
-    RM.hfStems.setCfg(url, api);
+    // NOTE: test se pehle save NAHI karte — galat URL save ho jata to AI
+    // screen setup guide ki jagah toote hue Space pe khulti. Sirf safal test par save.
     setAiStatus('', T('जाँच हो रही है… (soya Space jagte me 1-2 min le sakta hai)', 'Checking… (a sleeping Space can take 1-2 min to wake)'));
     RM.hfStems.testSpace(url, api).then((r) => {
+      RM.hfStems.setCfg(url, api); // safal test par hi save
       setAiStatus('ok', T('Space mil gaya ✓ (API: /' + r.api + ')', 'Space reachable ✓ (API: /' + r.api + ')'));
       if (res) res.innerHTML = `<div class="ok">${T('कनेक्शन सफल — Hugging Face AI taiyaar hai. Outputs: ' + r.outputs + ' (Vocal + Instrumental).',
         'Connection successful — Hugging Face AI is ready. Outputs: ' + r.outputs + ' (Vocal + Instrumental).')}</div>`;

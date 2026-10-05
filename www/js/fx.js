@@ -32,8 +32,14 @@ RM.fx = (function () {
   };
 
   function driveCurve(amount) {
-    const k = 1 + amount * 40;
     const n = 256, curve = new Float32Array(n);
+    if (amount <= 0) {
+      // Transparent at 0: pehle tanh(kx)/tanh(k) with k=1 small-signal gain
+      // +2.37dB deta tha aur THD add karta tha — default chain hamesha colored thi.
+      for (let i = 0; i < n; i++) curve[i] = (i / (n - 1)) * 2 - 1;
+      return curve;
+    }
+    const k = 1 + amount * 40;
     for (let i = 0; i < n; i++) {
       const x = (i / (n - 1)) * 2 - 1;
       curve[i] = Math.tanh(k * x) / Math.tanh(k);
@@ -78,6 +84,7 @@ RM.fx = (function () {
 
     // lowpass filter
     N.filter = ctx.createBiquadFilter(); N.filter.type = 'lowpass'; N.filter.frequency.value = 19000;
+    N.filter.Q.value = 0.707; // Butterworth: Q=1 (default) 15.5kHz pe +0.73dB bump deta tha "flat" chain me
 
     // soft drive
     N.drive = ctx.createWaveShaper(); N.drive.curve = driveCurve(0); N.drive.oversample = '2x';
@@ -108,13 +115,18 @@ RM.fx = (function () {
 
     // compressor + brickwall limiter (safety: stacked EQ boosts of +15dB/band
     // plus wet FX sends can otherwise push peaks past 0dBFS — a soft 4:1
-    // limiter still lets overshoot through; 20:1 with zero knee cannot)
+    // limiter still lets overshoot through; 20:1 with zero knee cannot, in
+    // steady state). NOTE (measured 2026-10): the DynamicsCompressor alone
+    // still overshoots ~+0.7 dB on attack transients and lifts sub-threshold
+    // audio +0.85 dB in Chrome, so the safety clipper below is the TRUE
+    // ceiling: chain.output can never exceed 0 dBFS, even with outGain at max.
     N.comp = ctx.createDynamicsCompressor();
     N.limiter = ctx.createDynamicsCompressor();
     N.limiter.threshold.value = -1.5; N.limiter.knee.value = 0;
     N.limiter.ratio.value = 20; N.limiter.attack.value = 0.002; N.limiter.release.value = 0.15;
 
     N.output = G(1);
+    N.clip = RM.audio.createSafetyClipper(ctx); // absolute final node
 
     // Static wiring — final topology (documented):
     //   input -> eq3 -> eq10 -> filter -> drive -+-> chorusDry -> comp
@@ -139,11 +151,12 @@ RM.fx = (function () {
     N.rvSend.connect(N.rvHP); N.rvHP.connect(N.convolver);
     N.convolver.connect(N.rvWet); N.rvWet.connect(N.comp);      // reverb return
     N.comp.connect(N.limiter); N.limiter.connect(N.output);
+    N.output.connect(N.clip); // clipper is the chain's output: 0 dBFS ceiling
 
     const t = (param, v, tc) => param.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
 
     const api = {
-      input: N.input, output: N.output, nodes: N,
+      input: N.input, output: N.clip, nodes: N,
       set(name, value) {
         const v = +value;
         switch (name) {
@@ -223,11 +236,13 @@ RM.fx = (function () {
     N.limiter.threshold.value = -1.5; N.limiter.knee.value = 0;
     N.limiter.ratio.value = 20; N.limiter.attack.value = 0.002; N.limiter.release.value = 0.15;
     N.out = ctx.createGain();
+    N.clip = RM.audio.createSafetyClipper(ctx); // absolute final node: 0 dBFS ceiling
     N.input.connect(N.eqB); N.eqB.connect(N.eqM); N.eqM.connect(N.eqT);
     N.eqT.connect(N.comp); N.comp.connect(N.limiter); N.limiter.connect(N.out);
+    N.out.connect(N.clip);
     const t = (p, v, tc) => p.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
     const api = {
-      input: N.input, output: N.out,
+      input: N.input, output: N.clip,
       apply(st) {
         t(N.eqB.gain, st.eqB || 0); t(N.eqM.gain, st.eqM || 0); t(N.eqT.gain, st.eqT || 0);
         t(N.comp.threshold, st.thr != null ? st.thr : -14);

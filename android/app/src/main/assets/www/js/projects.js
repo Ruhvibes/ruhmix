@@ -78,28 +78,95 @@ RM.proj = (function () {
   }
   function save(p) {
     p.updatedAt = Date.now();
+    snapshotLive(p);
     const arr = list().filter((x) => x.id !== p.id);
     arr.unshift(p);
     persistAll(arr.slice(0, 30)); // cap library at 30 projects
     autosave(p);
   }
   function remove(id) {
+    clearTimeout(_asTimer); // pending autosave me deleted project wapas na aaye
     persistAll(list().filter((x) => x.id !== id));
     try {
       const a = loadAutosave();
       if (a && a.id === id) localStorage.removeItem(LS_AUTOSAVE);
+    } catch (e) {}
+    // Khula hua project delete ho to uska dangling reference todo — nayi
+    // blank identity (nayi id) de do taaki agli autosave/save use "zinda"
+    // karke library me wapas na le aaye. Naam/audioRef bache rehte hain.
+    try {
+      const app = window.RM && RM.app;
+      if (app && app.state && app.state.project && app.state.project.id === id) {
+        const fresh = create();
+        fresh.name = app.state.project.name;
+        fresh.audioRef = app.state.project.audioRef || null;
+        app.state.project = fresh;
+      }
     } catch (e) {}
   }
   function get(id) { return list().find((x) => x.id === id) || null; }
 
   /* ---------- autosave + crash recovery ---------- */
   let _asTimer = 0;
+
+  // Live studio state (FX chain, slowed+reverb, mastering, remix style) app
+  // ke state me rehta hai — project.settings ke andar snapshot karo taaki
+  // save ke baad wapas mil sake. Pehle ye fields hamesha null rehte the
+  // (koi inhe likhta hi nahi tha) — ab save/autosave dono me capture hote hain.
+  function snapshotLive(p) {
+    try {
+      const app = window.RM && RM.app;
+      if (!app || !app.state || !p) return;
+      const s = app.state;
+      p.settings = p.settings || blankSettings();
+      if (s.fx) p.settings.fx = JSON.parse(JSON.stringify(s.fx));
+      if (s.slowed) p.settings.slowed = Object.assign({}, s.slowed);
+      if (s.mastering) {
+        p.settings.mastering = {
+          preset: s.mastering.preset || 'clean',
+          ab: s.mastering.ab || 'after',
+          settings: s.mastering.settings ? Object.assign({}, s.mastering.settings) : null,
+        };
+      }
+      if (s.remix) p.settings.remixStyle = s.remix.style || null;
+    } catch (e) {}
+  }
+
+  // App team ke liye: openProject() me `RM.proj.restoreLive(p)` call karein
+  // taaki project khulne par FX chain / slowed / mastering / remix style
+  // wapas lag jayein. Sirf app.state copy hota hai — audio chain agle
+  // ensureStudio()/play par khud apply ho jata hai.
+  function restoreLive(p) {
+    try {
+      const app = window.RM && RM.app;
+      if (!app || !app.state || !p || !p.settings) return false;
+      const s = p.settings, changed = { fx: false, slowed: false, mastering: false, remix: false };
+      if (s.fx) { app.state.fx = JSON.parse(JSON.stringify(s.fx)); changed.fx = true; }
+      if (s.slowed) { app.state.slowed = Object.assign({}, s.slowed); changed.slowed = true; }
+      if (s.mastering) {
+        app.state.mastering = {
+          preset: s.mastering.preset || 'clean',
+          ab: s.mastering.ab || 'after',
+          settings: s.mastering.settings ? Object.assign({}, s.mastering.settings) : null,
+        };
+        changed.mastering = true;
+      }
+      if (typeof s.remixStyle !== 'undefined') {
+        app.state.remix = app.state.remix || {};
+        app.state.remix.style = s.remixStyle || null;
+        changed.remix = true;
+      }
+      return changed;
+    } catch (e) { return false; }
+  }
+
   function autosave(p) {
     if (!p) return;
     clearTimeout(_asTimer);
     _asTimer = setTimeout(() => {
       try {
         p.updatedAt = Date.now();
+        snapshotLive(p);
         localStorage.setItem(LS_AUTOSAVE, serialize(p));
         localStorage.setItem(LS_CLEAN, '0');
       } catch (e) {}
@@ -115,7 +182,16 @@ RM.proj = (function () {
   function markDirty() { try { localStorage.setItem(LS_CLEAN, '0'); } catch (e) {} }
   function needsRecovery() {
     try {
-      return !!localStorage.getItem(LS_AUTOSAVE) && localStorage.getItem(LS_CLEAN) !== '1';
+      const raw = localStorage.getItem(LS_AUTOSAVE);
+      if (!raw || localStorage.getItem(LS_CLEAN) === '1') return false;
+      if (!deserialize(raw)) {
+        // Bhrasht (corrupt) autosave — chup-chaap hata do, warna recovery
+        // har launch me "atka" rahega: needsRecovery() true deta rahega
+        // lekin banner kabhi nahi aayega (loadAutosave null deta hai).
+        try { localStorage.removeItem(LS_AUTOSAVE); } catch (e2) {}
+        return false;
+      }
+      return true;
     } catch (e) { return false; }
   }
   function discardAutosave() { try { localStorage.removeItem(LS_AUTOSAVE); } catch (e) {} }
@@ -196,32 +272,38 @@ RM.proj = (function () {
     });
 
     return Promise.all(copyJobs).then(() => {
-      // Stage 3: sample ops (fade/gain/reverse), chunked
+      // Stage 3: sample ops (fade/gain/reverse), chunked — SEQUENTIAL thunks.
+      // Zaroori hai: saare jobs ek hi `view` buffer mutate karte hain aur
+      // runChunked chunks ke beech yield karta hai; parallel chalane se
+      // fade vs reverse jaisi non-commuting ops galat order me lagti.
+      // (Pehle yahan Promises push hote the aur runSeq unhe call karta tha —
+      //  `jobs[di++]()` → TypeError, saare sample ops toote hue the.)
       const jobs = [];
       for (const op of ops) {
         if (op.t === 'fadein' || op.t === 'fadeout') {
           const fl = Math.min(view.length, Math.max(1, Math.round((op.dur || 1) * sr)));
-          jobs.push(RM.audio.runChunked(view.length, 1 << 18, (a, b) => {
+          const tt = op.t;
+          jobs.push((onP) => RM.audio.runChunked(view.length, 1 << 18, (a, b) => {
             for (let c = 0; c < nCh; c++) {
               const d = view.getChannelData(c);
               for (let i = a; i < b; i++) {
                 let g = 1;
-                if (op.t === 'fadein' && i < fl) g = i / fl;
-                if (op.t === 'fadeout' && i >= view.length - fl) g = (view.length - 1 - i) / fl;
+                if (tt === 'fadein' && i < fl) g = i / fl;
+                if (tt === 'fadeout' && i >= view.length - fl) g = (view.length - 1 - i) / fl;
                 d[i] *= g;
               }
             }
-          }));
+          }, onP));
         } else if (op.t === 'gain') {
           const g = Math.pow(10, (op.db || 0) / 20);
-          jobs.push(RM.audio.runChunked(view.length, 1 << 18, (a, b) => {
+          jobs.push((onP) => RM.audio.runChunked(view.length, 1 << 18, (a, b) => {
             for (let c = 0; c < nCh; c++) {
               const d = view.getChannelData(c);
               for (let i = a; i < b; i++) d[i] *= g;
             }
-          }));
+          }, onP));
         } else if (op.t === 'reverse') {
-          jobs.push(RM.audio.runChunked(Math.ceil(view.length / 2), 1 << 17, (a, b) => {
+          jobs.push((onP) => RM.audio.runChunked(Math.ceil(view.length / 2), 1 << 17, (a, b) => {
             for (let c = 0; c < nCh; c++) {
               const d = view.getChannelData(c);
               for (let i = a; i < b; i++) {
@@ -229,7 +311,7 @@ RM.proj = (function () {
                 if (i < j) { const t = d[i]; d[i] = d[j]; d[j] = t; }
               }
             }
-          }));
+          }, onP));
         }
       }
       const prog2 = onProgress ? (p) => onProgress(0.7 + p * 0.3, 'Finalizing…') : null;
@@ -240,10 +322,10 @@ RM.proj = (function () {
           if (onProgress) onProgress(1, 'Done');
           return view;
         }
-        // attach progress only to last job for simplicity
-        return jobs[di++]().then(runSeq);
+        const idx = di++;
+        // progress sirf aakhri job par (pehle jaisa irada tha)
+        return jobs[idx](idx === jobs.length - 1 ? prog2 : null).then(runSeq);
       };
-      void prog2;
       return runSeq();
     });
   }
@@ -255,6 +337,7 @@ RM.proj = (function () {
     serialize, deserialize,
     autosave, loadAutosave, markCleanExit, markDirty,
     needsRecovery, discardAutosave,
+    snapshotLive, restoreLive,
     applyOps, invalidateView,
     setClipboard, getClipboard, clearClipboard,
     blankSettings,

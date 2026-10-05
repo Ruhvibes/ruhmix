@@ -28,11 +28,21 @@ RM.audio = (function () {
     return ctx;
   }
 
-  // Master chain: everything flows master -> analyser -> limiter -> destination.
-  // The limiter is a true brickwall (20:1, zero knee): with stacked EQ boosts
-  // (+15dB/band), wet FX sends and multi-track mixer sums, a soft limiter can
-  // still let peaks past 0dBFS (digital clipping at the DAC). The brickwall
-  // is transparent at normal levels and only engages on would-be overs.
+  // Master chain: everything flows master -> analyser -> limiter -> clipper
+  // -> destination. The limiter is a hard-knee brickwall-style compressor
+  // (20:1, zero knee): with stacked EQ boosts (+15dB/band), wet FX sends and
+  // multi-track mixer sums, a soft limiter can still let peaks past 0dBFS
+  // (digital clipping at the DAC).
+  // The clipper is the TRUE ceiling and is load-bearing, not decoration.
+  // MEASURED (Chrome 154, OfflineAudioContext, 2026-10): a
+  // DynamicsCompressor alone is NOT a true brickwall, even at 20:1/zero
+  // knee — it lifts everything below threshold by +0.85 dB (sine AND
+  // music-like signals) and lets attack transients overshoot (+18 dB in ->
+  // +0.71 dBFS out). A knee sweep (0..30) proved no knee setting fixes both
+  // at once (soft knees that remove the lift let +14 dB through instead).
+  // The WaveShaper clipper below leaves audio under ±0.98 untouched (float
+  // rounding only, ≤1e-6, inaudible) and clamps the absolute ceiling to
+  // 0.9952 (-0.04 dBFS) no matter what feeds it.
   // Never wire sources directly to destination.
   function buildMaster() {
     master = ctx.createGain();
@@ -46,9 +56,11 @@ RM.audio = (function () {
     limiter.ratio.value = 20;
     limiter.attack.value = 0.002;
     limiter.release.value = 0.15;
+    const clipper = createSafetyClipper(ctx);
     master.connect(analyser);
     analyser.connect(limiter);
-    limiter.connect(ctx.destination);
+    limiter.connect(clipper);
+    clipper.connect(ctx.destination);
   }
 
   function masterIn() { ensureCtx(); return master; }
@@ -60,6 +72,29 @@ RM.audio = (function () {
   }
   function getAnalyser() { ensureCtx(); return analyser; }
   function sampleRate() { ensureCtx(); return ctx.sampleRate; }
+
+  /* ---------- safety clipper (the true ceiling) ---------- */
+  // Identity for |x| <= 0.98, smooth tanh ceiling above it. Max output is
+  // 0.98 + 0.02*tanh(1) = 0.9952 (-0.04 dBFS); WaveShaper clamps inputs
+  // beyond ±1 to the endpoint values, so the absolute ceiling holds no
+  // matter how hot the input is. Derivative is continuous at ±0.98
+  // (tanh'(0) = 1), so the transition is click-free.
+  function safetyClipperCurve() {
+    const n = 1024, curve = new Float32Array(n), T = 0.98, R = 1 - T;
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * 2 - 1;
+      const ax = Math.abs(x);
+      curve[i] = ax <= T ? x : Math.sign(x) * (T + R * Math.tanh((ax - T) / R));
+    }
+    return curve;
+  }
+  // Works with any BaseAudioContext (realtime or OfflineAudioContext).
+  function createSafetyClipper(c) {
+    const w = c.createWaveShaper();
+    w.curve = safetyClipperCurve();
+    w.oversample = 'none';
+    return w;
+  }
 
   /* ---------- chunked processing ---------- */
   // Runs fn(start, end) over [0, total) in slices of chunkSize, yielding to
@@ -225,11 +260,15 @@ RM.audio = (function () {
     for (let c = 0; c < buf.numberOfChannels; c++) {
       const src = buf.getChannelData(c), dst = out.getChannelData(c);
       jobs.push(runChunked(newLen, 1 << 18, (a, b) => {
+        // Cubic Hermite interpolation (linear se behtar): linear me 44.1k->48k pe
+        // -3.44dB @15kHz dulling aur imaging artifacts the (HPSS return path live hai).
         for (let i = a; i < b; i++) {
           const p = i * ratio;
           const i0 = Math.floor(p), f = p - i0;
-          const s0 = src[i0] || 0, s1 = src[Math.min(buf.length - 1, i0 + 1)] || 0;
-          dst[i] = s0 + (s1 - s0) * f;
+          const s0 = src[Math.max(0, i0 - 1)] || 0, s1 = src[i0] || 0;
+          const s2 = src[Math.min(buf.length - 1, i0 + 1)] || 0, s3 = src[Math.min(buf.length - 1, i0 + 2)] || 0;
+          const c1 = 0.5 * (s2 - s0), c2 = s0 - 2.5 * s1 + 2 * s2 - 0.5 * s3, c3 = 0.5 * (s3 - s0) + 1.5 * (s1 - s2);
+          dst[i] = ((c3 * f + c2) * f + c1) * f + s1;
         }
       }));
     }
@@ -408,6 +447,7 @@ RM.audio = (function () {
     runChunked, buildImpulse, computePeaks, detectBPM,
     decodeArrayBuffer, encodeWavBuffer, floatToInt16, resampleBuffer,
     arrayBufferToBase64, normalizeBuffer,
+    createSafetyClipper,
     makePlayer, native,
   };
 })();

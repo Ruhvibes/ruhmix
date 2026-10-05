@@ -132,12 +132,14 @@ RM.hfStems = (function () {
           reject({ kind: 'asleep' });
         } else if (xhr.status === 429) {
           reject({ kind: 'quota' });
+        } else if (xhr.status >= 500) {
+          reject({ kind: 'server', status: xhr.status });
         } else {
           reject({ kind: 'connect', status: xhr.status });
         }
       };
       xhr.onerror = () => { st.xhr = null; reject({ kind: 'connect' }); };
-      xhr.ontimeout = () => { st.xhr = null; reject({ kind: 'asleep' }); };
+      xhr.ontimeout = () => { st.xhr = null; reject({ kind: 'timeout' }); };
       xhr.onabort = () => { st.xhr = null; reject({ kind: 'cancel' }); };
       const fd = new FormData();
       fd.append('files', blob, filename);
@@ -261,12 +263,20 @@ RM.hfStems = (function () {
     catch (e) { throw { kind: 'connect' }; }
     if (!r.ok) throw { kind: 'connect', status: r.status };
     const ab = await r.arrayBuffer();
-    return new Promise((res, rej) => {
-      try {
-        const p = ctx.decodeAudioData(ab.slice(0), res, rej);
-        if (p && typeof p.then === 'function') p.then(res, rej);
-      } catch (e) { rej(e); }
-    });
+    if (!ab || ab.byteLength === 0) throw { kind: 'empty' }; // 0-byte stem
+    let buf;
+    try {
+      buf = await new Promise((res, rej) => {
+        try {
+          const p = ctx.decodeAudioData(ab.slice(0), res, rej);
+          if (p && typeof p.then === 'function') p.then(res, rej);
+        } catch (e) { rej(e); }
+      });
+    } catch (e) {
+      throw { kind: 'decode' }; // corrupt audio bytes
+    }
+    if (!buf || !buf.length) throw { kind: 'empty' };
+    return buf;
   }
 
   /* ================= entry / render ================= */
@@ -436,8 +446,14 @@ RM.hfStems = (function () {
       }
       finishHf(stems);
     } catch (e) {
-      if ((e && e.kind === 'cancel') || !st.running) return; // user ne cancel kiya
-      if (!autoRetried && e && (e.kind === 'asleep' || e.kind === 'connect')) {
+      // NOTE: abortAll() hamesha sabse pehle st.running=false karta hai —
+      // isliye !st.running ka matlab pakka USER-cancel hai. startCall() ka
+      // timeout-abort bhi AbortError deta hai ({kind:'cancel'}), lekin us
+      // waqt st.running=true rehta hai: use 'timeout' me badlo, warna
+      // progress spinner hamesha ke liye atka reh jayega.
+      if (!st.running) return; // user ne cancel kiya
+      if (e && e.kind === 'cancel') e = { kind: 'timeout' }; // /call step ka timeout-abort
+      if (!autoRetried && e && (e.kind === 'asleep' || e.kind === 'connect' || e.kind === 'server')) {
         // 1 auto-retry — space jag raha ho to dusri baar lag jata hai.
         // Cancel button rakha hai taaki 5 s wait me user atka na rahe.
         showProgress(-1, T('🔁 Dobara koshish ho rahi hai…', '🔁 Retrying…'), true);
@@ -459,8 +475,20 @@ RM.hfStems = (function () {
                'The free daily limit seems over (~6-10 songs/day). Try again tomorrow or duplicate your own Space.');
     }
     if (kind === 'timeout') {
-      return T('5 minute me jawab nahi aaya (timeout). Chhota gaana try karein ya dobara koshish karein.',
-               'No response in 5 minutes (timeout). Try a shorter song or try again.');
+      return T('Jawab aane me bahut samay laga (timeout). Chhota gaana try karein ya dobara koshish karein.',
+               'The response took too long (timeout). Try a shorter song or try again.');
+    }
+    if (kind === 'server') {
+      return T('Server me error aaya' + (e && e.status ? ' (HTTP ' + e.status + ')' : '') + '. Thodi der rukkar dobara koshish karein.',
+               'The server returned an error' + (e && e.status ? ' (HTTP ' + e.status + ')' : '') + '. Please wait a bit and try again.');
+    }
+    if (kind === 'empty') {
+      return T('Server ne khaali stem bheja (0 second ka audio). Dobara koshish karein ya chhota gaana try karein.',
+               'The server returned an empty stem (0 seconds of audio). Try again or use a shorter song.');
+    }
+    if (kind === 'decode') {
+      return T('Stem ka audio samajh nahi aaya (decode fail ho gaya). Dobara koshish karein.',
+               'Could not decode the stem audio. Please try again.');
     }
     if (kind === 'connect') {
       return T('Server se connect nahi ho pa raha. Internet aur Space URL check karein.',
@@ -546,7 +574,8 @@ RM.hfStems = (function () {
     box.style.display = '';
     const retryBtn = `<button class="btn primary" id="ais-retry">${T('🔁 Dobara koshish karein', '🔁 Try again')}</button>`;
     const cancelBtn = `<button class="btn ghost" id="ais-cancel">${T('रद्द करें', 'Cancel')}</button>`;
-    const dspBtn = (kind === 'connect' || kind === 'asleep' || kind === 'quota' || kind === 'timeout')
+    const dspBtn = (kind === 'connect' || kind === 'asleep' || kind === 'quota' || kind === 'timeout' ||
+      kind === 'server' || kind === 'empty' || kind === 'decode')
       ? `<button class="btn" id="ais-go-dsp2">✂️ ${T('DSP Beta try karein (turant)', 'Try DSP Beta (instant)')}</button>`
       : '';
     box.innerHTML = `
@@ -558,6 +587,8 @@ RM.hfStems = (function () {
     $('ais-cancel').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; renderMainHf(); });
     const dsp = $('ais-go-dsp2');
     if (dsp) dsp.addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; A.show('stems'); });
+    // Error panel fixed bottom-nav ke peeche na chhupe — user ko dikhai de
+    try { box.scrollIntoView({ block: 'center' }); } catch (e) {}
   }
 
   /* ================= progress / abort ================= */
@@ -567,6 +598,18 @@ RM.hfStems = (function () {
     box.style.display = '';
     const indet = !(p >= 0);
     const pct = indet ? 0 : Math.max(0, Math.min(100, Math.round(p * 100)));
+    // In-place update jab panel pehle se bana ho — har tick me innerHTML
+    // dobara banane se cancel button replace hota rehta tha aur tez tap
+    // miss ho sakta tha (button gayab → dobara bana → tap beech me).
+    const bar = box.querySelector('.pbar');
+    const status = box.querySelector('.status');
+    const cancelBtn = box.querySelector('#ais-cancel-up');
+    if (bar && status && !!cancelBtn === !!cancelable) {
+      bar.className = 'pbar' + (indet ? ' indet' : '');
+      bar.style.width = pct + '%';
+      status.textContent = label || '';
+      return;
+    }
     box.innerHTML = `
       <div class="panel">
         <div class="progress"><div class="pbar${indet ? ' indet' : ''}" style="width:${pct}%"></div></div>
@@ -574,7 +617,11 @@ RM.hfStems = (function () {
         ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('रद्द करें', 'Cancel')}</button>` : ''}
       </div>`;
     if (cancelable) {
-      $('ais-cancel-up').addEventListener('click', () => abortAll(false));
+      const btn = $('ais-cancel-up');
+      btn.addEventListener('click', () => abortAll(false));
+      // Fixed bottom-nav (#bottomnav, z-index 50) ke peeche dab sakta hai —
+      // pehli baar dikhe to viewport center me lao taaki tap ho sake.
+      try { btn.scrollIntoView({ block: 'center' }); } catch (e) {}
     }
   }
   function hideProgress() {
