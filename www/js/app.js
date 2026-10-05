@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 6 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 8 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -349,7 +349,9 @@ RM.app = (function () {
     });
   }
   function undoOp() {
-    const op = state.project.ops.pop();
+    // No project yet (no audio loaded): friendly toast, never a crash.
+    const ops = state.project && state.project.ops;
+    const op = ops && ops.pop();
     if (!op) { toast('Nothing to undo'); return; }
     state.redoStack.push(op);
     RM.proj.autosave(state.project);
@@ -761,9 +763,12 @@ Object.assign(RM.app, (function () {
       }
     });
     $('ed-stop').addEventListener('click', () => {
-      A.state.player.stop();
-      A.state.player.offset = 0;
-      A.state.waveView.setPlayhead(0);
+      // No player yet (no audio loaded): graceful no-op, never a crash.
+      if (A.state.player) {
+        A.state.player.stop();
+        A.state.player.offset = 0;
+      }
+      if (A.state.waveView) A.state.waveView.setPlayhead(0);
       $('ed-play').textContent = '▶ ' + A.t('play');
     });
     A.state.player && (A.state.player.onended = () => {
@@ -789,56 +794,91 @@ Object.assign(RM.app, (function () {
       RM.proj.autosave(A.state.project);
     });
     $('ed-loop').addEventListener('click', (e) => {
+      // No project yet (no audio loaded): friendly prompt, never a crash.
+      if (!A.needAudio()) return;
+      A.ensureStudio();
       const s = A.state.project.settings;
       s.loop = !s.loop;
       const p = A.state.player;
-      p.loop = s.loop;
-      if (s.loop && A.state.viewBuffer) { p.loopStart = 0; p.loopEnd = A.state.viewBuffer.duration; }
+      // setLoop applies to the live source too, so toggling mid-playback
+      // takes effect immediately (no restart needed).
+      if (s.loop && A.state.viewBuffer) p.setLoop(true, 0, A.state.viewBuffer.duration);
+      else p.setLoop(s.loop);
       e.target.classList.toggle('on', s.loop);
       RM.proj.autosave(A.state.project);
     });
 
-    // ops
-    $('ed-trim').addEventListener('click', () => {
+    // ops — har op guardOp me: button op render hone tak disabled rehta hai,
+    // taaki double-click/rapid-click se duplicate op ya overlapping render na ho.
+    $('ed-trim').addEventListener('click', () => guardOp('ed-trim', async () => {
       if (!A.needAudio()) return;
       const r = selRange();
       if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
-      A.pushOp({ t: 'trim', a: r.a, b: r.b }).then(updateEditorMeta);
-    });
-    $('ed-cut').addEventListener('click', () => {
+      await A.pushOp({ t: 'trim', a: r.a, b: r.b });
+      updateEditorMeta();
+    }));
+    $('ed-cut').addEventListener('click', () => guardOp('ed-cut', async () => {
       if (!A.needAudio()) return;
       const r = selRange();
       if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
-      A.pushOp({ t: 'cut', a: r.a, b: r.b }).then(updateEditorMeta);
-    });
-    $('ed-copy').addEventListener('click', () => {
+      const ok = await copyRange(r.a, r.b, null, true);
+      if (!ok) return;
+      await A.pushOp({ t: 'cut', a: r.a, b: r.b });
+      A.toast('Cut — selection is in the clipboard');
+      updateEditorMeta();
+    }));
+    $('ed-delete').addEventListener('click', () => guardOp('ed-delete', async () => {
       if (!A.needAudio()) return;
       const r = selRange();
       if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
-      copyRange(r.a, r.b);
-    });
-    $('ed-paste').addEventListener('click', () => {
+      await A.pushOp({ t: 'cut', a: r.a, b: r.b });
+      updateEditorMeta();
+    }));
+    $('ed-copy').addEventListener('click', () => guardOp('ed-copy', async () => {
+      if (!A.needAudio()) return;
+      const r = selRange();
+      if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
+      await copyRange(r.a, r.b);
+    }));
+    $('ed-paste').addEventListener('click', () => guardOp('ed-paste', async () => {
       if (!A.needAudio()) return;
       if (!RM.proj.getClipboard()) { A.toast('Clipboard is empty'); return; }
       const at = A.state.player.position();
-      A.pushOp({ t: 'paste', at }).then(updateEditorMeta);
-    });
-    $('ed-split').addEventListener('click', () => {
+      await A.pushOp({ t: 'paste', at });
+      updateEditorMeta();
+    }));
+    $('ed-split').addEventListener('click', () => guardOp('ed-split', async () => {
       if (!A.needAudio()) return;
       if (!A.state.viewBuffer) { A.toast('Preparing audio…'); return; }
       const p = A.state.player.position();
       const dur = A.state.viewBuffer.duration;
       if (dur - p < 0.1) { A.toast('Cannot split near the end'); return; }
-      copyRange(p, dur, () => A.pushOp({ t: 'cut', a: p, b: dur }).then(() => {
-        A.toast('Split complete — the tail section is in the clipboard');
-        updateEditorMeta();
-      }));
-    });
-    $('ed-fadein').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'fadein', dur: 2 }).then(updateEditorMeta); });
-    $('ed-fadeout').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'fadeout', dur: 3 }).then(updateEditorMeta); });
-    $('ed-gain-up').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'gain', db: 3 }).then(updateEditorMeta); });
-    $('ed-gain-dn').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'gain', db: -3 }).then(updateEditorMeta); });
-    $('ed-reverse').addEventListener('click', () => { if (A.needAudio()) A.pushOp({ t: 'reverse' }).then(updateEditorMeta); });
+      const ok = await copyRange(p, dur, null, true);
+      if (!ok) return;
+      await A.pushOp({ t: 'cut', a: p, b: dur });
+      A.toast('Split complete — the tail section is in the clipboard');
+      updateEditorMeta();
+    }));
+    $('ed-duplicate').addEventListener('click', () => guardOp('ed-duplicate', async () => {
+      if (!A.needAudio()) return;
+      if (!A.state.viewBuffer) { A.toast('Preparing audio…'); return; }
+      const dur = A.state.viewBuffer.duration;
+      if (!(dur > 0.05)) { A.toast('Nothing to duplicate'); return; }
+      const ok = await copyRange(0, dur, null, true);
+      if (!ok) return;
+      await A.pushOp({ t: 'paste', at: dur });
+      A.toast('Duplicated');
+      updateEditorMeta();
+    }));
+    $('ed-fadein').addEventListener('click', () => askFade('fadein'));
+    $('ed-fadeout').addEventListener('click', () => askFade('fadeout'));
+    $('ed-gain-up').addEventListener('click', () => askGain(1));
+    $('ed-gain-dn').addEventListener('click', () => askGain(-1));
+    $('ed-reverse').addEventListener('click', () => guardOp('ed-reverse', async () => {
+      if (!A.needAudio()) return;
+      await A.pushOp({ t: 'reverse' });
+      updateEditorMeta();
+    }));
     $('ed-undo').addEventListener('click', () => { A.undoOp(); setTimeout(updateEditorMeta, 300); });
     $('ed-redo').addEventListener('click', () => { A.redoOp(); setTimeout(updateEditorMeta, 300); });
 
@@ -865,23 +905,83 @@ Object.assign(RM.app, (function () {
     }, 120);
   }
 
-  function copyRange(a, b, done) {
+  // Rapid-click guard: jab tak ek op ka async kaam (copy/render) chal raha hai,
+  // button disabled rehta hai — ek click = max ek op, overlapping render nahi.
+  // Sath me 700ms ka double-tap window: tez op (chhota buffer) microtask me
+  // pura ho jata hai — disabled hatne ke baad aane wale turant-dusre click ko
+  // bhi ignore karna padta hai, warna 5 tez click = 5 op ban jate hain.
+  const opBusyUntil = {};
+  function guardOp(id, fn) {
+    const b = $(id);
+    const now = Date.now();
+    if (b && b.disabled) return;
+    if (opBusyUntil[id] && now - opBusyUntil[id] < 700) return;
+    opBusyUntil[id] = now;
+    if (b) b.disabled = true;
+    const done = () => { if (b) b.disabled = false; };
+    let r;
+    try { r = fn(); } catch (e) { done(); throw e; }
+    if (r && typeof r.then === 'function') r.then(done, done);
+    else done();
+  }
+
+  // Fade In/Out: duration dialog -> {t:'fadein'|'fadeout', dur}
+  function askFade(kind) {
+    if (!A.needAudio()) return;
+    const isIn = kind === 'fadein';
+    const def = isIn ? 2 : 3;
+    A.dialog(isIn ? 'Fade In' : 'Fade Out',
+      '<p>Fade duration (seconds):</p>' +
+      '<input id="dlg-num" type="number" class="numin" style="width:7em" value="' + def + '" min="0.1" max="60" step="0.1">',
+      'Apply', 'Cancel').then((ok) => {
+      if (!ok) return;
+      let d = parseFloat(($('dlg-num') || {}).value);
+      if (!Number.isFinite(d)) d = def;
+      d = Math.min(60, Math.max(0.1, d)); // sane range
+      guardOp(isIn ? 'ed-fadein' : 'ed-fadeout', async () => {
+        await A.pushOp({ t: kind, dur: +d.toFixed(2) });
+        updateEditorMeta();
+      });
+    });
+  }
+
+  // Gain: dB dialog -> {t:'gain', db} (sign button ka default hota hai, user badal sakta hai)
+  function askGain(sign) {
+    if (!A.needAudio()) return;
+    A.dialog('Gain',
+      '<p>Gain (dB, −24 to +24):</p>' +
+      '<input id="dlg-num" type="number" class="numin" style="width:7em" value="' + (sign * 3) + '" min="-24" max="24" step="0.5">',
+      'Apply', 'Cancel').then((ok) => {
+      if (!ok) return;
+      let db = parseFloat(($('dlg-num') || {}).value);
+      if (!Number.isFinite(db)) db = sign * 3;
+      db = Math.min(24, Math.max(-24, db)); // sane range
+      if (Math.abs(db) < 0.01) { A.toast('Gain is 0 dB — nothing to do'); return; }
+      guardOp(sign > 0 ? 'ed-gain-up' : 'ed-gain-dn', async () => {
+        await A.pushOp({ t: 'gain', db: +db.toFixed(2) });
+        updateEditorMeta();
+      });
+    });
+  }
+
+  function copyRange(a, b, done, quiet) {
     const src = A.state.viewBuffer;
-    if (!src) { A.toast('Preparing audio…'); return; }
+    if (!src) { A.toast('Preparing audio…'); return Promise.resolve(false); }
     const sr = src.sampleRate;
     const aS = Math.round(a * sr), bS = Math.min(src.length, Math.round(b * sr));
     const len = Math.max(1, bS - aS);
     const ctx = RM.audio.ensureCtx();
     const cb = ctx.createBuffer(src.numberOfChannels, len, sr);
-    RM.audio.runChunked(len, 1 << 18, (x, y) => {
+    return RM.audio.runChunked(len, 1 << 18, (x, y) => {
       for (let c = 0; c < cb.numberOfChannels; c++) {
         const s = src.getChannelData(c), d = cb.getChannelData(c);
         for (let i = x; i < y; i++) d[i] = s[aS + i] || 0;
       }
     }).then(() => {
       RM.proj.setClipboard(cb);
-      A.toast('Copied');
+      if (!quiet) A.toast('Copied');
       if (done) done();
+      return true;
     });
   }
 

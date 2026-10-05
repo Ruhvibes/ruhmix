@@ -325,7 +325,7 @@ RM.audio = (function () {
       buffer: null, src: null, env: null, panner: null, gain: null,
       playing: false, startCtxTime: 0, offset: 0, rate: 1,
       loop: false, loopStart: 0, loopEnd: 0,
-      onended: null, _token: 0, _vol: 1,
+      onended: null, _token: 0, _vol: 1, _pan: 0,
       insert: null, // connect this into your chain
     };
     p.panner = ctx.createStereoPanner();
@@ -334,13 +334,27 @@ RM.audio = (function () {
     p.insert.connect(p.panner);
     p.panner.connect(p.gain);
     p.gain.connect(master);
-    p.load = (buffer) => { p.stop(true); p.buffer = buffer; p.offset = 0; };
+    p.load = (buffer) => {
+      p.stop(true); p.buffer = buffer; p.offset = 0;
+      // Loop-range refresh: if loop is ON and a new (shorter/longer) buffer
+      // arrives, the old loopEnd goes stale — the audio wraps at the buffer
+      // duration but position() keeps counting to the old loopEnd (playhead
+      // drift). Loop always covers the whole buffer (no custom range in the
+      // UI), so sync the range on load.
+      if (p.loop && buffer) { p.loopStart = 0; p.loopEnd = buffer.duration; }
+    };
     p.play = (fromSec) => {
       if (!p.buffer) return false;
       p.stop(true);
       p.src = ctx.createBufferSource();
       p.src.buffer = p.buffer;
       p.src.playbackRate.value = p.rate;
+      // Re-apply stored live params: a renderer's setTargetAtTime automation
+      // can be dropped when no source is active (e.g. slider moved long after
+      // stop). Re-applying here is click-free — the env node is at 0 and
+      // ramps up over FADE_TC, so the direct assignment is inaudible.
+      p.gain.gain.value = p._vol;
+      p.panner.pan.value = p._pan;
       const t0 = clamp(fromSec != null ? fromSec : p.offset, 0, p.buffer.duration);
       const token = ++p._token;
       p.src._token = token;
@@ -426,7 +440,26 @@ RM.audio = (function () {
       p._vol = clamp(v, 0, 1.5);
       p.gain.gain.setTargetAtTime(p._vol, ctx.currentTime, 0.01);
     };
-    p.setPan = (pan) => { p.panner.pan.setTargetAtTime(clamp(pan, -1, 1), ctx.currentTime, 0.01); };
+    p.setPan = (pan) => {
+      p._pan = clamp(pan, -1, 1);
+      p.panner.pan.setTargetAtTime(p._pan, ctx.currentTime, 0.01);
+    };
+    // Live loop toggle: works mid-playback too (AudioBufferSourceNode.loop /
+    // loopStart / loopEnd may be changed at any time). Just flipping p.loop
+    // leaves a playing source unlooped until the next play() — this applies
+    // it to the live source immediately.
+    p.setLoop = (on, start, end) => {
+      p.loop = !!on;
+      if (start != null) p.loopStart = Math.max(0, start);
+      if (end != null) p.loopEnd = Math.max(0, end);
+      if (p.src) {
+        p.src.loop = p.loop;
+        if (p.loop && p.loopEnd > p.loopStart) {
+          p.src.loopStart = p.loopStart;
+          p.src.loopEnd = p.loopEnd;
+        }
+      }
+    };
     p.dispose = () => {
       p.stop(true);
       [p.insert, p.panner, p.gain].forEach(n => { try { n.disconnect(); } catch (e) {} });
