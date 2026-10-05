@@ -386,12 +386,13 @@ RM.stems = (function () {
   const results = []; // last extraction: [{name, buffer, engine}]
 
   /* ---- stem pack registry ----
-     A "stem pack" is 2–4 audio roles that Auto Remix can consume as
+     A "stem pack" is 2–6 audio roles that Auto Remix can consume as
      separate tracks. 4-role: AI/cloud separation ('vocal', 'drums',
-     'bass', 'other') ya DSP spectral bands ('low','lowmid','presence','air')
-     — labelled honestly, never passed off as instrument isolation.
-     2-role: Hugging Face free AI (Vocals + Instrumental) — Round-6 me
-     support add hua taaki free AI flow bhi stem pipeline use kare.
+     'bass', 'other'); 6-role: htdemucs_6s via the user's own HF Space
+     (adds 'guitar', 'piano'); DSP spectral bands ('low','lowmid',
+     'presence','air') — labelled honestly, never passed off as
+     instrument isolation.
+     2-role: Hugging Face free AI (Vocals + Instrumental).
      A future cloud/AI module registers its stems via setStemPack(). */
   let stemPack = null; // {source:'ai'|'hf'|'dsp-spectral', createdAt, roles:[{role,label,buffer}]}
   function setStemPack(pack) {

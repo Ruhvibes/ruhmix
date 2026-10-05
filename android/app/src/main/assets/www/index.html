@@ -39,9 +39,19 @@
     <button class="btn pick-music" id="home-pick-music"><span class="pm-title">🎵 Pick Music</span><span class="pm-sub">Choose from your music library</span></button>
     <input id="home-search" class="textin" data-i18n-ph="search" placeholder="Search…" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">
   </div>
+  <div class="sec-head">
+    <h3>🎵 Free Music</h3>
+  </div>
+  <p class="muted small fm-sub">6 original tracks — more coming soon. Tap a track to open it in the Editor.</p>
+  <div id="free-music" class="fm-grid"></div>
   <div class="card-grid" id="home-grid"></div>
   <h3 data-i18n="recent">Recent Projects</h3>
   <div id="home-recent"></div>
+  <div class="sec-head">
+    <h3 data-i18n="recent_files">Recent Files</h3>
+    <button class="btn small ghost" id="recent-files-clear">Clear</button>
+  </div>
+  <div id="recent-files"></div>
   <div class="foot-note">RuhMix 1.0 • <span data-i18n="by">By Hasnain Khan</span></div>
 </section>
 
@@ -179,7 +189,7 @@
   <!-- AI (neural, server) — the ONLY flow allowed to say "AI" -->
   <div class="engine-card ai-card">
     <div class="ec-name">🧠 AI Stem Separation <span class="beta">AI • SERVER</span></div>
-    <div class="ec-desc">Choose a backend: ✂️ DSP Beta (instant, no server) • 🤗 Hugging Face (FREE AI, 2 stems: Vocal + Instrumental) • ☁️ Modal (card required).</div>
+    <div class="ec-desc">Choose a backend: ✂️ DSP Beta (instant, no server) • 🤗 Hugging Face (FREE AI, 2 stems: Vocal + Instrumental) • 🤗 HF 4/6-Stem (your own Space: 4 or 6 stems) • ☁️ Modal (card required, 4 stems).</div>
     <button class="btn primary block" id="btn-ai-stem">Separate with AI</button>
   </div>
   <!-- DSP engines: Beta (DSP) — neural AI nahi -->
@@ -191,13 +201,14 @@
   <div id="stems-results"></div>
 </section>
 
-<!-- ======================= 6b. AI STEMS (DSP Beta • Hugging Face • Modal) ======================= -->
+<!-- ======================= 6b. AI STEMS (DSP Beta • HF 2-stem • HF 4/6-Stem • Modal) ======================= -->
 <section class="screen" id="screen-aistem">
   <h2>🧠 AI Stem Separation</h2>
-  <p class="muted">✂️ DSP Beta • 🤗 Hugging Face (FREE) • ☁️ Modal</p>
+  <p class="muted">✂️ DSP Beta • 🤗 Hugging Face (2 stems, FREE) • 🤗 HF 4/6-Stem (your Space) • ☁️ Modal</p>
   <div id="aistem-backend" style="margin-bottom:10px"></div>
   <div id="aistem-setup" style="display:none"></div>
   <div id="aistem-main" style="display:none"></div>
+  <div id="aistem-dsp" style="margin-top:14px"></div>
 </section>
 
 <!-- ======================= 7. MIXER ======================= -->
@@ -399,6 +410,18 @@
       <div class="row"><label>API Name <input type="text" id="ai-hf-api" class="textin" placeholder="inference" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
       <p class="muted small">💡 Find the name via "View API" on the Space page (default: inference).</p>
     </div>
+    <div id="ai-hf46-fields" style="display:none">
+      <p class="muted small">🤗 <b>HF 4/6-Stem — your own Space</b> (FREE AI, no ads). No reliable public 4/6-stem Space exists, so paste <b>your own</b> duplicated/deployed Demucs Space URL here.</p>
+      <div class="row"><label>Space URL <input type="text" id="ai-hf46-url" class="textin" placeholder="https://username-demucs-6s.hf.space" inputmode="url" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
+      <div class="row"><label>API Name <input type="text" id="ai-hf46-api" class="textin" placeholder="inference" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
+      <p class="muted small">💡 Find the name via "View API" on the Space page (default: inference).</p>
+      <div class="row"><label>Model (stems to expect)
+        <select id="ai-hf46-model" class="textin" lang="en">
+          <option value="htdemucs">htdemucs — 4 stems (Vocals, Drums, Bass, Other)</option>
+          <option value="htdemucs_6s">htdemucs_6s — 6 stems (+ Piano, Guitar)</option>
+        </select></label></div>
+      <div class="honest">🐢 <b>6-Stem is slower</b> and uses more of your free GPU quota (daily limit ~6-10 songs). 🏁 <b>6 is the maximum</b> for standard open models — the 6-stem model is experimental, expect more bleed on guitar/piano.</div>
+    </div>
     <div id="ai-modal-fields" style="display:none">
       <p class="muted small">☁️ <b>Modal — requires a card</b> (future). Paste the URL you get after deploying Modal here. The key stays on this device only — it is never uploaded.</p>
       <div class="row"><label>Modal Endpoint URL <input type="text" id="ai-url" class="textin" placeholder="https://xxx--ruhmix-stems-web.modal.run" inputmode="url" autocomplete="off" lang="en" autocapitalize="off" spellcheck="false"></label></div>
@@ -421,6 +444,7 @@
     <div class="about-row"><span class="k">Package</span><span class="v mono">com.ruhmix.app</span></div>
     <div class="about-row"><span class="k">Audio engine</span><span class="v">On-device Web Audio</span></div>
     <div class="about-row"><span class="k">Privacy</span><span class="v">Your files stay on your device</span></div>
+    <button class="btn ghost block" id="set-replay-intro" style="margin-top:10px">▶ Replay Intro</button>
   </div>
 </section>
 
@@ -459,12 +483,16 @@
 <script src="js/stems.js"></script>
 <script src="js/ads.js"></script>
 <script src="js/hf-stems.js"></script>
+<script src="js/stem-deck.js"></script>
+<script src="js/hf46-stems.js"></script>
 <script src="js/ai-stems.js"></script>
 <script src="js/remix.js"></script>
 <script src="js/export.js"></script>
 <script src="js/projects.js"></script>
 <script src="js/import-hardening.js"></script>
+<script src="js/onboarding.js"></script>
 <script src="js/app.js"></script>
+<script src="js/recent.js"></script>
 <script src="js/ux-flow.js"></script>
 </body>
 </html>

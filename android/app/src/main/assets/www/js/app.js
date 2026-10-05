@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 10 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 13 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -20,6 +20,7 @@ RM.app = (function () {
       audio_editor: 'Audio Editor', stems: 'Stem Separator', recorder: 'Voice Recorder',
       ai_stems: 'AI Stem Separator',
       equalizer: 'Equalizer', mastering: 'Mastering', recent: 'Recent Projects',
+      recent_files: 'Recent Files',
       search: 'Search…', import_title: 'Import Audio', pick_audio: 'Pick Audio',
       editor_title: 'Audio Editor', play: 'Play', pause: 'Pause', stop: 'Stop',
       settings_title: 'Settings', export_title: 'Export', projects_title: 'Projects',
@@ -138,8 +139,9 @@ RM.app = (function () {
 
   /* ================= navigation ================= */
   const SCREENS = ['home','import','editor','remix','slowed','stems','aistem','mixer','fx','master','record','export','projects','settings','more'];
-  function show(name) {
+  function show(name, fromPop) {
     if (!SCREENS.includes(name)) name = 'home';
+    const prev = state.screen;
     state.screen = name;
     SCREENS.forEach((s) => {
       const el = $('screen-' + s);
@@ -151,8 +153,41 @@ RM.app = (function () {
     const sc = $('screen-' + name);
     if (sc) sc.scrollTop = 0;
     window.scrollTo(0, 0);
+    // Back-stack: har screen change ko history me push karo taaki Android
+    // back button screens me wapas navigate kare (sirf Home root pe exit
+    // dialog aata hai — Java onBackPressed: canGoBack() false tabhi).
+    // popstate se aayi navigation dobara push nahi hoti (loop se bacho).
+    if (!fromPop && prev !== name) pushNavState(name);
     if (name === 'editor' && state.waveView) state.waveView.invalidate();
     try { if (RM.app.onShow) RM.app.onShow(name); } catch (e) {}
+  }
+
+  function pushNavState(name) {
+    try {
+      const st = history.state;
+      if (st && st.screen === name) return; // duplicate push nahi
+      const base = String(location.href).split('#')[0];
+      history.pushState({ screen: name }, '', base + '#' + name);
+    } catch (e) { /* file:// ya purana WebView: history na mile to back=exit dialog (pehle jaisa) */ }
+  }
+
+  // Android back (WebView.goBack) -> popstate: dialog khula ho to pehle use
+  // band karo, warna pichhli screen dikhao. History position hamesha sync rehti hai.
+  function onPopState(e) {
+    const dlgEl = $('dlg');
+    if (dlgEl && dlgEl.classList.contains('show')) {
+      // Dialog ke upar back: history wapas lao + cancel available ho to use dabao
+      // (confirmation-only dialog "must be answered" — wahi rehta hai).
+      try {
+        const base = String(location.href).split('#')[0];
+        history.pushState({ screen: state.screen }, '', base + '#' + state.screen);
+      } catch (err) {}
+      const c = $('dlg-cancel');
+      if (c && c.style.display !== 'none') { try { c.click(); } catch (err) {} }
+      return;
+    }
+    const s = e && e.state && e.state.screen;
+    show(SCREENS.includes(s) ? s : 'home', true);
   }
 
   function needAudio() {
@@ -493,6 +528,11 @@ RM.app = (function () {
     toast(('Decoding: ') + name);
     return tryDecodeStages(ab, name).then((buf) => {
       state.imports.unshift({ name, buffer: buf, size: size || ab.byteLength, type: '' });
+      // Recent files quick access: successful imports with a cached file path
+      // get a quick-open entry on Home (no picker needed next time).
+      try {
+        if (fileUrl && window.RM && RM.recent) RM.recent.track(name, fileUrl, buf.duration, size || ab.byteLength);
+      } catch (e) {}
       // Memory edge: har import poora decoded AudioBuffer pakadta hai
       // (10-min stereo ~100MB). List ko cap karo, warna 20-30 import = OOM.
       const MAX_IMPORTS = 12;
@@ -920,9 +960,10 @@ RM.app = (function () {
   // ---- placeholder: part 2/3 continue below ----
   return {
     APP, state, $, toast, dialog, cleanErrMsg, t, setLang, setTheme, loadTheme,
-    show, needAudio, ensureStudio, setWidth, applyFxToChain, defaultFx,
+    show, needAudio, ensureStudio, setWidth, widthMatrix, applyFxToChain, defaultFx,
+    onPopState, pushNavState,
     newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
-    pickAudio, handleAudioPicked, handleMusicListed, initImportTabs, switchImportTab, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
+    pickAudio, handleAudioPicked, handleMusicListed, initImportTabs, switchImportTab, decodeAndAdd, fetchFileUrl, renderImportList, fmtTime, fmtSize, escapeHtml, tryDecodeStages,
     startRecording, stopRecording, recActive, handleRecordingStarted, handleRecordingStopped,
     handleRecordingError, updateRecUI,
     checkUpdate,
@@ -1019,7 +1060,14 @@ Object.assign(RM.app, (function () {
     if (!el) return;
     if (!A.state.buffer) { el.textContent = 'No audio'; return; }
     const p = A.state.project;
-    el.textContent = `${A.state.fileName} • ${A.fmtTime(A.state.buffer.duration)} • ${A.state.buffer.sampleRate} Hz • ${p.ops.length} edits`;
+    const base = `${A.state.fileName} • ${A.fmtTime(A.state.buffer.duration)} • ${A.state.buffer.sampleRate} Hz • ${p.ops.length} edits`;
+    const isFreeMusic = p && p.audioRef && p.audioRef.type === 'freemusic';
+    if (isFreeMusic && A.MUSIC_LICENSE) {
+      el.innerHTML = A.escapeHtml(base) + '<br><span class="fm-free">' +
+        A.escapeHtml(A.MUSIC_LICENSE) + '</span>';
+    } else {
+      el.textContent = base;
+    }
   }
   A.updateEditorMeta = updateEditorMeta;
 
@@ -1564,6 +1612,21 @@ Object.assign(RM.app, (function () {
   function stopStemPlayers() {
     stemPlayers.forEach((p) => { try { p.stop(true); p.dispose(); } catch (e) {} });
     stemPlayers = [];
+    try { if (RM.stemDeck) RM.stemDeck.stopAllDecks(); } catch (e) {}
+  }
+  // Stem role for the shared deck, per DSP engine output name.
+  function dspRole(engineId, name) {
+    const low = String(name || '').toLowerCase();
+    if (engineId === 'vocalcut') return low.indexOf('center') !== -1 ? 'vocal' : 'other';
+    if (engineId === 'hpss') return (low.indexOf('drum') !== -1 || low.indexOf('percussive') !== -1) ? 'drums' : 'other';
+    if (engineId === 'bass') return low.indexOf('bass') !== -1 ? 'bass' : 'other';
+    if (engineId === 'spectral') {
+      if (low.indexOf('low-mid') !== -1) return 'lowmid';
+      if (low.indexOf('presence') !== -1) return 'presence';
+      if (low.indexOf('air') !== -1) return 'air';
+      return 'low';
+    }
+    return 'other';
   }
   function runStemEngine(id) {
     if (!A.needAudio()) return;
@@ -1593,7 +1656,18 @@ Object.assign(RM.app, (function () {
       const stems = r.result;
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       status.innerHTML = `<div class="ok">${'Done'} (${secs}s) — ${stems.length} stems</div><div class="honest">${A.escapeHtml(eng.note)}</div>`;
-      stems.forEach((s, i) => addStemRow(s, i));
+      const deckBox = document.createElement('div');
+      results.appendChild(deckBox);
+      try {
+        RM.stemDeck.render(deckBox, stems.map((s) => ({
+          name: s.name, buffer: s.buffer, role: dspRole(id, s.name), badge: 'DSP',
+        })), {
+          title: '✂️ ' + eng.name + ' — ' + stems.length + ' outputs',
+          experimental: true,
+        });
+      } catch (e) {
+        deckBox.innerHTML = '<div class="err">Could not display the stems.</div>';
+      }
       // 4-band spectral split -> honestly-labelled 4-role pack for Auto Remix testing
       if (id === 'spectral' && stems.length === 4) {
         const b = document.createElement('button');
@@ -1626,44 +1700,9 @@ Object.assign(RM.app, (function () {
       A.toast('Stems ready');
     });
   }
-  function addStemRow(s, i) {
-    const box = $('stems-results');
-    const d = document.createElement('div');
-    d.className = 'stem-row';
-    d.innerHTML = `
-      <div class="sr-main">
-        <div class="sr-name">${A.escapeHtml(s.name)}</div>
-        <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
-      </div>
-      <button class="btn small" data-a="play">▶</button>
-      <button class="btn small ghost" data-a="mix">${'Mixer'}</button>
-      <button class="btn small ghost" data-a="exp">${'Export'}</button>`;
-    let player = null;
-    const btn = d.querySelector('[data-a="play"]');
-    btn.addEventListener('click', () => {
-      if (player && player.playing) { player.pause(); btn.textContent = '▶'; return; }
-      A.stopAll(); stopStemPlayers();
-      RM.audio.ensureCtx();
-      player = RM.audio.makePlayer();
-      stemPlayers.push(player);
-      player.load(s.buffer);
-      player.play(0);
-      btn.textContent = '⏸';
-      player.onended = () => { btn.textContent = '▶'; };
-    });
-    d.querySelector('[data-a="mix"]').addEventListener('click', () => {
-      if (A.sendToMixer(s.buffer, s.name)) A.show('mixer');
-    });
-    d.querySelector('[data-a="exp"]').addEventListener('click', () => {
-      A.state.exportSource = { kind: 'buffer', buffer: s.buffer, name: s.name };
-      A.show('export');
-      A.refreshExportSource();
-    });
-    box.appendChild(d);
-  }
 
   return {
-    initEditor, initRemix, initSlowed, initStems,
+    initEditor, initRemix, initSlowed, initStems, runStemEngine,
     updateEditorMeta, renderMarkers, updateTrimShade, stopStemPlayers,
     SLOWED_PRESETS,
     guarded, friendlyErr, flatFx,
@@ -1784,10 +1823,11 @@ Object.assign(RM.app, (function () {
   }
   // Stems/other screens use this to drop a buffer into the mixer.
   // AI stems auto-route to their matching slot (Vocal→0, Drums→1,
-  // Bass→2, Other→3); anything else goes to the first free track.
+  // Bass→2, Other→3, Guitar→4, Piano→5); anything else goes to the
+  // first free track.
   function sendToMixer(buffer, name) {
     const low = String(name || '').toLowerCase();
-    const SLOT = [['vocal', 0], ['drum', 1], ['bass', 2], ['other', 3]];
+    const SLOT = [['vocal', 0], ['drum', 1], ['bass', 2], ['other', 3], ['guitar', 4], ['piano', 5]];
     let tr = null;
     for (const [kw, idx] of SLOT) {
       if (low.indexOf(kw) !== -1 && mixer.tracks[idx]) { tr = mixer.tracks[idx]; break; }
@@ -2255,7 +2295,7 @@ Object.assign(RM.app, (function () {
       // Stereo width bhi export me: wahi width value jo user live sun raha hai
       // (A.state.width.wGain). Bina iske wide mixes export me alag lagte the.
       const wVal = (A.state.width && A.state.width.wGain) ? A.state.width.wGain.gain.value : 1;
-      const W = widthMatrix(oc, wVal);
+      const W = A.widthMatrix(oc, wVal);
       chain.output.connect(W.in);
       // Round-6 (W6 P2): export me project volume/pan bhi lagao — jo sunte ho
       // wahi export ho (playback me panner+gain hain, export me the hi nahi).
@@ -2461,6 +2501,10 @@ Object.assign(RM.app, (function () {
         });
     });
     $('set-check-update').addEventListener('click', () => A.checkUpdate(true));
+    const replay = $('set-replay-intro');
+    if (replay) replay.addEventListener('click', () => {
+      try { RM.onboard.replayIntro(); } catch (e) {}
+    });
     updateStorageInfo();
   }
   function updateStorageInfo() {
@@ -2499,6 +2543,98 @@ Object.assign(RM.app, (function () {
     $('more-update').addEventListener('click', () => A.checkUpdate(true));
   }
 
+  /* ================= free music library ================= */
+  // Bundled copyright-free music library (www/music/*.mp3, rendered offline
+  // by tools/gen-free-music.py — 100% original synthesis, no samples, no
+  // copyrighted melodies). Tap a card -> same hardened decode path as a
+  // normal import -> straight into the Editor. ▶ previews in place.
+  const MUSIC_TRACKS = [
+    { id: 'pop',   name: 'Pop',   file: 'pop.mp3',   icon: '🎵', bpm: 120, dur: '0:32', tag: 'Upbeat' },
+    { id: 'lofi',  name: 'Lofi',  file: 'lofi.mp3',  icon: '🎧', bpm: 80,  dur: '0:37', tag: 'Chill' },
+    { id: 'edm',   name: 'EDM',   file: 'edm.mp3',   icon: '⚡', bpm: 128, dur: '0:31', tag: 'Energetic' },
+    { id: 'trap',  name: 'Trap',  file: 'trap.mp3',  icon: '🪤', bpm: 140, dur: '0:35', tag: 'Dark' },
+    { id: 'sufi',  name: 'Sufi',  file: 'sufi.mp3',  icon: '🪕', bpm: 85,  dur: '0:35', tag: 'Emotional' },
+    { id: 'piano', name: 'Piano', file: 'piano.mp3', icon: '🎹', bpm: 75,  dur: '0:34', tag: 'Emotional' },
+  ];
+  const MUSIC_LICENSE = '© Original — Free to use in your projects';
+  const fmCache = {};   // id -> decoded AudioBuffer (reused by preview + load)
+  const fmPrev = { id: null, src: null, btn: null };
+  function fmSetBtn(btn, playing) {
+    if (!btn) return;
+    btn.classList.toggle('playing', !!playing);
+    btn.textContent = playing ? '⏸' : '▶';
+  }
+  function stopFmPreview() {
+    if (fmPrev.src) { try { fmPrev.src.onended = null; fmPrev.src.stop(); } catch (e) {} }
+    fmSetBtn(fmPrev.btn, false);
+    fmPrev.id = null; fmPrev.src = null; fmPrev.btn = null;
+    A.fmPreviewId = null;
+  }
+  function fmBuffer(d) {
+    if (fmCache[d.id]) return Promise.resolve(fmCache[d.id]);
+    // Same hardened path as a normal import: fetch bytes -> staged decode.
+    return A.fetchFileUrl('music/' + d.file).then((ab) => {
+      if (!ab || ab.byteLength < 100) throw new Error('empty music file');
+      return A.tryDecodeStages(ab, d.file);
+    }).then((buf) => { fmCache[d.id] = buf; return buf; });
+  }
+  function toggleFmPreview(d, btn, ev) {
+    if (ev) ev.stopPropagation();
+    if (fmPrev.id === d.id) { stopFmPreview(); return; }
+    stopFmPreview();
+    fmBuffer(d).then((buf) => {
+      const ctx = RM.audio.ensureCtx();
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const g = ctx.createGain(); g.gain.value = 0.9;
+      src.connect(g); g.connect(RM.audio.masterIn());
+      src.onended = () => { if (fmPrev.id === d.id) stopFmPreview(); };
+      fmPrev.id = d.id; fmPrev.src = src; fmPrev.btn = btn;
+      A.fmPreviewId = d.id;
+      fmSetBtn(btn, true);
+      try { src.start(); } catch (e) { stopFmPreview(); }
+    }).catch(() => A.toast('Preview failed'));
+  }
+  function loadFreeTrack(d, cardEl) {
+    stopFmPreview();
+    if (cardEl) cardEl.classList.add('loading');
+    A.toast('Loading ' + d.name + '…');
+    fmBuffer(d).then((buf) => {
+      A.loadAudioBuffer(buf, d.name + '.mp3', { name: d.file, size: 0, type: 'freemusic' });
+      if (cardEl) cardEl.classList.remove('loading');
+      A.show('editor');
+    }).catch((e) => {
+      if (cardEl) cardEl.classList.remove('loading');
+      console.log('[freemusic] load failed: ' + d.file, e);
+      A.dialog('Could not load track',
+        '<p>The track could not be loaded. Please try again.</p>', 'OK', null);
+    });
+  }
+  function renderFreeMusic() {
+    const box = $('free-music');
+    if (!box) return;
+    box.innerHTML = '';
+    MUSIC_TRACKS.forEach((d) => {
+      const b = document.createElement('div');
+      b.className = 'fm-card';
+      b.setAttribute('role', 'button');
+      b.setAttribute('tabindex', '0');
+      b.dataset.label = (d.name + ' free music ' + d.tag).toLowerCase();
+      b.innerHTML = '<div class="fm-top"><div class="fm-icon">' + d.icon + '</div>' +
+        '<button class="fm-play" aria-label="Preview ' + A.escapeHtml(d.name) + '">▶</button></div>' +
+        '<div class="fm-name">' + A.escapeHtml(d.name) + '</div>' +
+        '<div class="fm-tag">' + A.escapeHtml(d.tag) + '</div>' +
+        '<div class="fm-meta">' + d.bpm + ' BPM • ' + d.dur + '</div>' +
+        '<div class="fm-free">© Free to use</div>';
+      b.querySelector('.fm-play').addEventListener('click', (ev) => toggleFmPreview(d, ev.currentTarget, ev));
+      b.addEventListener('click', () => loadFreeTrack(d, b));
+      b.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); loadFreeTrack(d, b); }
+      });
+      box.appendChild(b);
+    });
+  }
+
   /* ================= home ================= */
   const HOME_CARDS = [
     ['import', '🆕', 'new_project'],
@@ -2532,12 +2668,14 @@ Object.assign(RM.app, (function () {
     });
     $('home-search').addEventListener('input', (e) => {
       const q = e.target.value.trim().toLowerCase();
-      document.querySelectorAll('#home-grid .home-card').forEach((c) => {
+      document.querySelectorAll('#home-grid .home-card, #free-music .fm-card').forEach((c) => {
         c.style.display = !q || (c.dataset.label || '').includes(q) ? '' : 'none';
       });
     });
     $('home-new').addEventListener('click', () => A.newProject());
+    renderFreeMusic();
     renderHomeRecent();
+    try { if (window.RM && RM.recent) RM.recent.init(); } catch (e) {}
   }
   function renderHomeRecent() {
     const box = $('home-recent');
@@ -2564,7 +2702,7 @@ Object.assign(RM.app, (function () {
       if (name === 'export') refreshExportSource();
       if (name === 'projects') renderProjects();
       if (name === 'settings') updateStorageInfo();
-      if (name === 'home') renderHomeRecent();
+      if (name === 'home') { renderHomeRecent(); try { if (window.RM && RM.recent) RM.recent.render(); } catch (e) {} }
       if (name === 'remix') A.updateRemixStemBadge();
     };    A.loadTheme();
     A.setLang('en');
@@ -2626,7 +2764,13 @@ Object.assign(RM.app, (function () {
     window.addEventListener('pagehide', () => RM.proj.markCleanExit());
     // ensure audio on first touch (mobile autoplay policy)
     document.addEventListener('pointerdown', () => { try { RM.audio.ensureCtx(); } catch (e) {} }, { once: true });
+    // nav back-stack: root entry Home ho taaki back Home pe aakar ruke
+    // (uske baad canGoBack()=false -> Java exit dialog "Exit RuhMix?").
+    try { history.replaceState({ screen: 'home' }, '', String(location.href).split('#')[0] + '#home'); } catch (e) {}
+    window.addEventListener('popstate', (e) => A.onPopState(e));
     A.show('home');
+    // first-run onboarding + "What's New" on version upgrade (onboarding.js)
+    try { if (window.RM && RM.onboard) RM.onboard.init({ versionCode: A.APP.versionCode }); } catch (e) {}
   }
   function recBusy() {
     // part 1 ka rec object exported nahi; recActive() source of truth hai
@@ -2639,6 +2783,7 @@ Object.assign(RM.app, (function () {
     initMixer, initFxRack, initMastering, initBeat, initExport, initProjects,
     initSettings, initMore, initHome, init,
     refreshExportSource, renderProjects, openProject, sendToMixer, updateStorageInfo,
+    loadFreeTrack, renderFreeMusic, toggleFmPreview, stopFmPreview, MUSIC_TRACKS, MUSIC_LICENSE,
     getMixerTracks: () => mixer.tracks,
   };
   })());

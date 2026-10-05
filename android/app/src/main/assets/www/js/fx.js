@@ -59,8 +59,16 @@ RM.fx = (function () {
   function makeSpatial(ctx) {
     const N = {};
     const G = (v) => { const g = ctx.createGain(); g.gain.value = v; return g; };
-    // dezipper: har param change setTargetAtTime se (tc default 0.03)
-    const t = (param, v, tc) => param.setTargetAtTime(v, ctx.currentTime, tc == null ? 0.03 : tc);
+    // dezipper: har param change setTargetAtTime se (tc default 0.03).
+    // tc === 0 matlab FRESH chain (abhi kuch render/play nahi hua): seedha
+    // .value jump — setTargetAtTime yahan export ke pehle second me fade-in
+    // jaisa artifact dega (construction ke no-op events bhi cancel).
+    const t = (param, v, tc) => {
+      if (tc === 0) {
+        try { param.cancelScheduledValues(0); } catch (e) {}
+        param.value = v;
+      } else param.setTargetAtTime(v, ctx.currentTime, tc == null ? 0.03 : tc);
+    };
 
     N.input = G(1);
     N.dry = G(1);
@@ -126,11 +134,13 @@ RM.fx = (function () {
       input: N.input, output: N.output, nodes: N,
       // Mode badlo -> us mode ke default speed/depth, glide ke saath.
       // (Preset restore iske baad setSpeed/setDepth call karta hai.)
-      setMode(mode) {
+      // immediate=true: fresh chain (export/offline) — glide nahi, seedha
+      // jump, warna render ke pehle ~1s me effect fade-in hota hai.
+      setMode(mode, immediate) {
         st.mode = SPATIAL_MODES[mode] ? mode : 'off';
         const m = SPATIAL_MODES[st.mode];
         st.speed = m.speed; st.depth = 1;
-        apply(0.3);
+        apply(immediate ? 0 : 0.3);
       },
       // Outer true-bypass support: jab makeChain spatial ko bypass karta hai
       // (mode 'off'), iska internal convolver (1.0s IR) silence pe bhi FFT
@@ -142,8 +152,8 @@ RM.fx = (function () {
         if (starved) { try { N.pan.disconnect(N.rvSend); } catch (e) {} }
         else { try { N.pan.connect(N.rvSend); } catch (e) {} }
       },
-      setSpeed(hz) { st.speed = clamp(+hz || 0.12, 0.05, 1); apply(0.03); },
-      setDepth(d) { st.depth = clamp(+d || 0, 0, 1); apply(0.03); },
+      setSpeed(hz, immediate) { st.speed = clamp(+hz || 0.12, 0.05, 1); apply(immediate ? 0 : 0.03); },
+      setDepth(d, immediate) { st.depth = clamp(+d || 0, 0, 1); apply(immediate ? 0 : 0.03); },
       getSettings() { return { mode: st.mode, speed: +st.speed.toFixed(3), depth: +st.depth.toFixed(3) }; },
       dispose() {
         try { N.lfo.stop(); } catch (e) {}
@@ -326,7 +336,23 @@ RM.fx = (function () {
     // Default: bypassed + starved (mode 'off')
     N.spatial.setConvolverStarved(true);
 
-    const t = (param, v, tc) => param.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
+    // Round-11: fresh chain (abhi construct hui hai, kuch render/play nahi
+    // hua) pe pehla applyPreset/set SEEDHA values lagata hai — glide nahi.
+    // Wajah (measured): constructor ka api.set('compOn', true) threshold ko
+    // setTargetAtTime(-18, t=0) se glide karta tha; usi t=0 pe applyPreset ka
+    // compOff (target 0) ya koi aur preset value glide hota tha. Glide
+    // intrinsic default (-24dB) se shuru hota hai, jo compressing territory
+    // se guzarta hai -> HAR offline render/export ke pehle ~50-100ms me
+    // partial-compression fade-in artifact. Fresh chain pe direct assignment
+    // me ye artifact zero hai; live slider changes (fresh=false) ab bhi
+    // click-free glide karte hain.
+    let fresh = true;
+    const t = (param, v, tc) => {
+      if (fresh) {
+        try { param.cancelScheduledValues(0); } catch (e) {}
+        param.value = v;
+      } else param.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
+    };
 
     const api = {
       input: N.input, output: N.clip, nodes: N,
@@ -380,16 +406,17 @@ RM.fx = (function () {
           case 'spatialMode': { // string! v (number) nahi
             const m = String(value);
             const gen = ++spatialGen;
-            N.spatial.setMode(m);
+            N.spatial.setMode(m, fresh);
             if (m === 'off') {
               // Pehle wet gains glide se 0 pe (tc 0.3, click-free), phir
               // physical bypass — turant disconnect wet tail kaat ke click dega.
+              // (fresh chain pe setMode immediate tha, isliye yahan koi tail nahi.)
               setTimeout(() => { if (gen === spatialGen) setSpatialBypass(true); }, 400);
             } else setSpatialBypass(false);
             break;
           }
-          case 'spatialSpeed': N.spatial.setSpeed(v); break;
-          case 'spatialDepth': N.spatial.setDepth(v); break;
+          case 'spatialSpeed': N.spatial.setSpeed(v, fresh); break;
+          case 'spatialDepth': N.spatial.setDepth(v, fresh); break;
         }
       },
       applyPreset(p) { // p: {eq3:[b,m,t], eq10:[..], filter, drive, chorus:{on,rate,depth}, echo:{on,time,fb,wet}, reverb:{on,room,wet}, comp:{on,thr,ratio,atk,rel}, out}
@@ -432,6 +459,7 @@ RM.fx = (function () {
           if (p.spatial.speed != null) api.set('spatialSpeed', p.spatial.speed);
           if (p.spatial.depth != null) api.set('spatialDepth', p.spatial.depth);
         }
+        fresh = false; // pehla (pre-render) preset lag gaya: ab se live changes glide karenge
       },
       getSpatial() { return N.spatial.getSettings(); },
       getBypass() { return { reverb: reverbBypassed, spatial: spatialBypassed }; },
@@ -468,7 +496,17 @@ RM.fx = (function () {
     N.input.connect(N.eqB); N.eqB.connect(N.eqM); N.eqM.connect(N.eqT);
     N.eqT.connect(N.comp); N.comp.connect(N.limiter); N.limiter.connect(N.out);
     N.out.connect(N.clip);
-    const t = (p, v, tc) => p.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
+    // Round-11: fresh chain pe pehla apply() seedha values lagata hai (koi
+    // glide nahi) — warna har offline render ke shuru me params intrinsic
+    // defaults se glide hote (comp threshold -24dB se), jo pehle ~50-100ms
+    // me partial-compression fade-in deta hai. Live apply() ab bhi glide karta hai.
+    let freshM = true;
+    const t = (p, v, tc) => {
+      if (freshM) {
+        try { p.cancelScheduledValues(0); } catch (e) {}
+        p.value = v;
+      } else p.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
+    };
     const api = {
       input: N.input, output: N.clip,
       apply(st) {
@@ -479,6 +517,7 @@ RM.fx = (function () {
         t(N.comp.attack, st.atk || 0.008);
         t(N.comp.release, st.rel || 0.25);
         t(N.out.gain, st.makeup || 1);
+        freshM = false; // pehla (pre-render) apply ho gaya: ab se live changes glide karenge
       },
       dispose() { Object.keys(N).forEach(k => { try { N[k].disconnect(); } catch (e) {} }); },
     };

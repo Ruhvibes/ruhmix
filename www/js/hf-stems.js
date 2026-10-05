@@ -574,57 +574,32 @@ RM.hfStems = (function () {
 
   function renderResultsHf(stems) {
     const box = $('ais-results');
-    box.innerHTML = `
-      <div class="ok" style="margin:8px 0">✓ ${T('', 'HF stems are ready')} — ${stems.length}</div>
-      <div class="honest">🤗 ${T('', 'These are 2 stems — Vocal + Instrumental (the HF Space output).')}</div>
-      <button class="btn primary block" id="ais-to-mixer">${T('', 'Load all HF stems into the Mixer')}</button>
-      <div id="ais-rows"></div>`;
-    $('ais-to-mixer').addEventListener('click', () => {
-      stems.forEach((s) => A.sendToMixer(s.buffer, s.name));
-      A.show('mixer');
-    });
-    const rows = $('ais-rows');
-    stems.forEach((s) => rows.appendChild(hfStemRow(s)));
+    box.innerHTML = '';
+    const deckBox = document.createElement('div');
+    box.appendChild(deckBox);
+    try {
+      RM.stemDeck.render(deckBox, stems.map((s, i) => ({
+        name: s.name,
+        buffer: s.buffer,
+        role: i === 0 ? 'vocal' : 'other',
+        badge: 'HF',
+      })), {
+        title: '✓ HF stems are ready — ' + stems.length,
+        honest: '🤗 These are 2 stems — Vocal + Instrumental (everything this HF Space outputs). No 4-stem claim: this backend cannot separate drums, bass or other.',
+      });
+    } catch (e) {
+      deckBox.innerHTML = '<div class="err">Could not display the stems.</div>';
+    }
+    const ok = document.createElement('div');
+    ok.className = 'ok';
+    ok.style.margin = '8px 0';
+    ok.textContent = '✓ HF stems are ready — ' + stems.length;
+    box.insertBefore(ok, deckBox);
   }
 
   function stopHfPlayers() {
     st.players.forEach((p) => { try { p.stop(true); p.dispose(); } catch (e) {} });
     st.players = [];
-  }
-
-  function hfStemRow(s) {
-    const d = document.createElement('div');
-    d.className = 'stem-row';
-    d.innerHTML = `
-      <div class="sr-main">
-        <div class="sr-name">${A.escapeHtml(s.name)} <span class="beta">HF</span></div>
-        <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
-      </div>
-      <button class="btn small" data-a="play">▶</button>
-      <button class="btn small ghost" data-a="mix">${T('', 'Mixer')}</button>
-      <button class="btn small ghost" data-a="exp">${T('', 'Export')}</button>`;
-    let player = null;
-    const btn = d.querySelector('[data-a="play"]');
-    btn.addEventListener('click', () => {
-      if (player && player.playing) { player.pause(); btn.textContent = '▶'; return; }
-      A.stopAll(); stopHfPlayers();
-      RM.audio.ensureCtx();
-      player = RM.audio.makePlayer();
-      st.players.push(player);
-      player.load(s.buffer);
-      player.play(0);
-      btn.textContent = '⏸';
-      player.onended = () => { btn.textContent = '▶'; };
-    });
-    d.querySelector('[data-a="mix"]').addEventListener('click', () => {
-      if (A.sendToMixer(s.buffer, s.name)) A.show('mixer');
-    });
-    d.querySelector('[data-a="exp"]').addEventListener('click', () => {
-      A.state.exportSource = { kind: 'buffer', buffer: s.buffer, name: s.name };
-      A.show('export');
-      A.refreshExportSource();
-    });
-    return d;
   }
 
   /* ================= failure panel ================= */
@@ -748,5 +723,8 @@ RM.hfStems = (function () {
 
   return {
     getCfg, setCfg, renderInto, abortAll, testSpace, DEFAULT_API,
+    // Pure, stateless helpers reused by the HF 4/6-Stem backend
+    // (hf46-stems.js). Stateful upload/SSE live here only.
+    internals: { startCall, parseSSE, outputUrl, fetchStemBuffer, errToMessage },
   };
 })();

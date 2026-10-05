@@ -969,7 +969,7 @@ public class MainActivity extends ComponentActivity {
     private void downloadApkViaManager(String url) {
         try {
             if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) {
-                Toast.makeText(this, "Download link sahi nahi hai", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "The download link is not valid", Toast.LENGTH_LONG).show();
                 return;
             }
             DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
@@ -978,7 +978,7 @@ public class MainActivity extends ComponentActivity {
                 if (dm != null) {
                     DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
                     req.setTitle("RuhMix Update");
-                    req.setDescription("Naya version download ho raha hai\u2026");
+                    req.setDescription("Downloading the new version\u2026");
                     req.setNotificationVisibility(
                             DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                     req.setDestinationInExternalPublicDir(
@@ -993,11 +993,11 @@ public class MainActivity extends ComponentActivity {
             }
             if (dlId != -1) {
                 Toast.makeText(this,
-                        "\u2B07 Download shuru ho gaya \u2014 notification me dekho",
+                        "\u2B07 Download started \u2014 watch the notification",
                         Toast.LENGTH_LONG).show();
             } else {
                 openExternalUrl(url);
-                Toast.makeText(this, "Browser me download khul raha hai\u2026",
+                Toast.makeText(this, "Opening download in browser\u2026",
                         Toast.LENGTH_LONG).show();
             }
         } catch (Exception e) {

@@ -36,16 +36,16 @@ RM.aiStems = (function () {
   const T = (hi, en) => en; // English-only build
 
   const LS_KEY = 'rmx_ai_server';
-  const LS_BACKEND = 'rmx_ai_backend'; // 'dsp' | 'hf' | 'modal' — DEFAULT 'dsp'
+  const LS_BACKEND = 'rmx_ai_backend'; // 'dsp' | 'hf' | 'hf46' | 'modal' — DEFAULT 'dsp'
   function getBackend() {
     try {
       const b = localStorage.getItem(LS_BACKEND);
-      if (b === 'hf' || b === 'modal' || b === 'dsp') return b;
+      if (b === 'hf' || b === 'hf46' || b === 'modal' || b === 'dsp') return b;
     } catch (e) {}
     return 'dsp';
   }
   function setBackend(b) {
-    if (b !== 'hf' && b !== 'modal' && b !== 'dsp') return;
+    if (b !== 'hf' && b !== 'hf46' && b !== 'modal' && b !== 'dsp') return;
     try { localStorage.setItem(LS_BACKEND, b); } catch (e) {}
   }
   const STEMS = [
@@ -133,10 +133,16 @@ RM.aiStems = (function () {
     if (!setup || !main) return;
     abortAll(true); // stop anything from a previous visit
     if (RM.hfStems) RM.hfStems.abortAll(true);
+    if (RM.hf46Stems) RM.hf46Stems.abortAll(true);
     renderBackendPicker();
+    renderDspSection(); // DSP Beta tools live on this screen too (experimental)
     const be = getBackend();
     if (be === 'hf' && RM.hfStems) {
       RM.hfStems.renderInto(setup, main);
+      return;
+    }
+    if (be === 'hf46' && RM.hf46Stems) {
+      RM.hf46Stems.renderInto(setup, main);
       return;
     }
     if (be === 'dsp') {
@@ -154,12 +160,13 @@ RM.aiStems = (function () {
     }
   }
 
-  /* ================= backend selector (3 options) ================= */
+  /* ================= backend selector (4 options) ================= */
   function backendDefs() {
     return [
-      { id: 'dsp',   icon: '✂️', label: T('', 'DSP Beta'),       sub: T('', 'Instant — no server needed') },
-      { id: 'hf',    icon: '🤗', label: T('', 'Hugging Face'), sub: T('', 'FREE AI') },
-      { id: 'modal', icon: '☁️', label: T('', 'Modal'),             sub: T('', 'Card required') },
+      { id: 'dsp',   icon: '✂️', label: T('', 'DSP Beta'),       sub: T('', 'Instant — experimental') },
+      { id: 'hf',    icon: '🤗', label: T('', 'Hugging Face'), sub: T('', 'FREE AI — 2 stems') },
+      { id: 'hf46',  icon: '🤗', label: T('', 'HF 4/6-Stem'),  sub: T('', 'Your Space — 4 or 6 stems') },
+      { id: 'modal', icon: '☁️', label: T('', 'Modal'),             sub: T('', 'Card required — 4 stems') },
     ];
   }
   function renderBackendPicker() {
@@ -171,9 +178,41 @@ RM.aiStems = (function () {
     backendDefs().forEach((d) => {
       const b = document.createElement('button');
       b.className = 'btn small' + (d.id === cur ? ' primary' : '');
-      b.innerHTML = `${d.icon} ${A.escapeHtml(d.label)}<br><span class="muted" style="font-size:11px">${A.escapeHtml(d.sub)}</span>`;
+      // .btn is inline-flex: stack label above sub-label so they never collide on one row
+      b.style.cssText = 'flex-direction:column;align-items:flex-start;text-align:left;line-height:1.35;gap:2px';
+      b.innerHTML = `<span>${d.icon} ${A.escapeHtml(d.label)}</span><span class="muted" style="font-size:11px">${A.escapeHtml(d.sub)}</span>`;
       b.addEventListener('click', () => { setBackend(d.id); render(); });
       row.appendChild(b);
+    });
+  }
+
+  /* ============ DSP Beta tools section (on THIS screen, experimental) ============
+     The 4 on-device DSP tools live here as a clearly-labelled section.
+     "Run" jumps to the Stem Separator screen and auto-starts the engine —
+     no logic is duplicated. */
+  function renderDspSection() {
+    const box = $('aistem-dsp');
+    if (!box) return;
+    box.innerHTML = `
+      <div class="panel">
+        <h4>✂️ DSP Beta Tools <span class="beta">BETA</span></h4>
+        <p class="muted small">Instant, on-device, no server — but <b>experimental</b>.</p>
+        <div id="aistem-dsp-grid"></div>
+      </div>`;
+    const grid = $('aistem-dsp-grid');
+    RM.stems.ENGINES.forEach((e) => {
+      const d = document.createElement('div');
+      d.className = 'engine-card dsp-tool-card';
+      d.innerHTML = `
+        <div class="ec-name">${A.escapeHtml(e.name)} <span class="beta">BETA</span></div>
+        <div class="ec-desc">${A.escapeHtml(e.desc)}</div>
+        <div class="honest">⚗️ <b>Experimental (DSP) — not neural AI.</b> ${A.escapeHtml(e.note)}</div>
+        <button class="btn small block" data-run="${e.id}">Run ${A.escapeHtml(e.name)}</button>`;
+      d.querySelector('[data-run]').addEventListener('click', () => {
+        A.show('stems');
+        try { if (A.runStemEngine) A.runStemEngine(e.id); } catch (err) {}
+      });
+      grid.appendChild(d);
     });
   }
 
@@ -495,58 +534,42 @@ RM.aiStems = (function () {
 
   function renderResults(stems) {
     const box = $('ais-results');
-    box.innerHTML = `
-      <div class="ok" style="margin:8px 0">✓ ${T('', 'AI stems are ready')} — ${stems.length}</div>
-      <button class="btn primary block" id="ais-to-mixer">${T('', 'Load all AI stems into the Mixer')}</button>
-      <button class="btn block" id="ais-to-remix" style="margin-top:8px">⚡ ${T('', 'Use in Auto Remix (4-stem pipeline)')}</button>
-      <div id="ais-rows"></div>`;
-    $('ais-to-mixer').addEventListener('click', () => {
-      stems.forEach((s) => A.sendToMixer(s.buffer, s.name));
-      A.show('mixer');
-    });
-    $('ais-to-remix').addEventListener('click', () => A.show('remix'));
-    const rows = $('ais-rows');
-    stems.forEach((s) => rows.appendChild(aiStemRow(s)));
+    box.innerHTML = '';
+    const ok = document.createElement('div');
+    ok.className = 'ok';
+    ok.style.margin = '8px 0';
+    ok.textContent = '✓ ' + T('', 'AI stems are ready') + ' — ' + stems.length;
+    box.appendChild(ok);
+    const deckBox = document.createElement('div');
+    box.appendChild(deckBox);
+    const roleOf = (nm) => {
+      const low = String(nm || '').toLowerCase();
+      if (low.indexOf('vocal') !== -1) return 'vocal';
+      if (low.indexOf('drum') !== -1) return 'drums';
+      if (low.indexOf('bass') !== -1) return 'bass';
+      return 'other';
+    };
+    try {
+      RM.stemDeck.render(deckBox, stems.map((s) => ({
+        name: s.name, buffer: s.buffer, role: roleOf(s.name), badge: 'AI',
+      })), {
+        title: '🧠 4 neural AI stems — play, mix, or export each one',
+        honest: '🧠 REAL neural AI separation (Demucs on your Modal server): Vocals, Drums, Bass, Other.',
+      });
+    } catch (e) {
+      deckBox.innerHTML = '<div class="err">Could not display the stems.</div>';
+    }
+    const remixBtn = document.createElement('button');
+    remixBtn.className = 'btn block';
+    remixBtn.style.marginTop = '8px';
+    remixBtn.textContent = '⚡ ' + T('', 'Use in Auto Remix (4-stem pipeline)');
+    remixBtn.addEventListener('click', () => A.show('remix'));
+    box.appendChild(remixBtn);
   }
 
   function stopAiPlayers() {
     st.players.forEach((p) => { try { p.stop(true); p.dispose(); } catch (e) {} });
     st.players = [];
-  }
-
-  function aiStemRow(s) {
-    const d = document.createElement('div');
-    d.className = 'stem-row';
-    d.innerHTML = `
-      <div class="sr-main">
-        <div class="sr-name">${A.escapeHtml(s.name)} <span class="beta">AI</span></div>
-        <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
-      </div>
-      <button class="btn small" data-a="play">▶</button>
-      <button class="btn small ghost" data-a="mix">${T('', 'Mixer')}</button>
-      <button class="btn small ghost" data-a="exp">${T('', 'Export')}</button>`;
-    let player = null;
-    const btn = d.querySelector('[data-a="play"]');
-    btn.addEventListener('click', () => {
-      if (player && player.playing) { player.pause(); btn.textContent = '▶'; return; }
-      A.stopAll(); stopAiPlayers();
-      RM.audio.ensureCtx();
-      player = RM.audio.makePlayer();
-      st.players.push(player);
-      player.load(s.buffer);
-      player.play(0);
-      btn.textContent = '⏸';
-      player.onended = () => { btn.textContent = '▶'; };
-    });
-    d.querySelector('[data-a="mix"]').addEventListener('click', () => {
-      if (A.sendToMixer(s.buffer, s.name)) A.show('mixer');
-    });
-    d.querySelector('[data-a="exp"]').addEventListener('click', () => {
-      A.state.exportSource = { kind: 'buffer', buffer: s.buffer, name: s.name };
-      A.show('export');
-      A.refreshExportSource();
-    });
-    return d;
   }
 
   /* ================= failure panel (never a generic crash) ================= */
@@ -653,6 +676,7 @@ RM.aiStems = (function () {
   function testConnection() {
     const be = getBackend();
     if (be === 'hf') { testHfConnection(); return; }
+    if (be === 'hf46') { testHf46Connection(); return; }
     if (be === 'dsp') {
       setAiStatus('', T('', '✂️ DSP Beta — no test needed'));
       const res = $('ai-test-result');
@@ -741,11 +765,60 @@ RM.aiStems = (function () {
     });
   }
 
+  /* HF 4/6-Stem test: endpoint verify + model saved. The model choice tells
+     the app how many stems to expect and how to label them. */
+  function testHf46Connection() {
+    if (!RM.hfStems || !RM.hf46Stems) return;
+    const urlEl = $('ai-hf46-url'), apiEl = $('ai-hf46-api'), modelEl = $('ai-hf46-model');
+    if (!urlEl || !apiEl || !modelEl) return;
+    const url = urlEl.value.trim().replace(/\/+$/, '');
+    const api = (apiEl.value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
+    const model = RM.hf46Stems.MODELS[modelEl.value] ? modelEl.value : 'htdemucs';
+    const res = $('ai-test-result');
+    if (res) res.innerHTML = '';
+    if (!url) { setAiStatus('err', T('', 'Enter the Space URL first')); return; }
+    if (!/^https?:\/\//i.test(url)) {
+      setAiStatus('err', T('', 'The URL must start with http(s)://'));
+      return;
+    }
+    setAiStatus('', T('', 'Checking… (a sleeping Space can take 1-2 min to wake)'));
+    RM.hfStems.testSpace(url, api).then((r) => {
+      RM.hf46Stems.setCfg(url, api, model); // safal test par hi save
+      const n = RM.hf46Stems.MODELS[model].order.length;
+      setAiStatus('ok', T('', 'Space reachable ✓ (API: /' + r.api + ', ' + n + ' stems)'));
+      if (res) res.innerHTML = `<div class="ok">${T('', 'Connection successful — expecting ' + n + ' stems (' + model + ').')}</div>`;
+    }).catch((e) => {
+      const kind = e && e.kind;
+      if (kind === 'asleep') {
+        setAiStatus('err', T('', 'Space is waking up — retry in 1-2 min'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'The Space is waking up. Wait 1-2 minutes and press "Test Connection" again.')}</div>`;
+      } else if (kind === 'badapi') {
+        const names = (e.found && e.found.length ? e.found.join(', ') : '—');
+        setAiStatus('err', T('', 'Wrong API name'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'This API name was not found on the Space. Check the correct name via "View API" on the Space page. Found: ' + names)}</div>`;
+      } else {
+        setAiStatus('err', T('', 'Cannot reach the Space'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'Cannot reach the Space. Check the URL and your internet connection.')}</div>`;
+      }
+    });
+  }
+
   function refreshSettingsInputs() {
     const be = getBackend();
-    const hfF = $('ai-hf-fields'), moF = $('ai-modal-fields');
+    const hfF = $('ai-hf-fields'), moF = $('ai-modal-fields'), h46F = $('ai-hf46-fields');
     if (hfF) hfF.style.display = be === 'hf' ? '' : 'none';
     if (moF) moF.style.display = be === 'modal' ? '' : 'none';
+    if (h46F) h46F.style.display = be === 'hf46' ? '' : 'none';
+    if (be === 'hf46') {
+      const urlIn = $('ai-hf46-url'), apiIn = $('ai-hf46-api'), modelIn = $('ai-hf46-model');
+      if (!urlIn || !apiIn || !modelIn || !RM.hf46Stems) return;
+      const cfg = RM.hf46Stems.getCfg();
+      urlIn.value = cfg ? cfg.url : '';
+      apiIn.value = cfg ? cfg.apiName : RM.hfStems.DEFAULT_API;
+      modelIn.value = cfg ? cfg.model : 'htdemucs';
+      setAiStatus('', cfg ? T('', 'Saved — test the connection') : T('', 'Not set'));
+      return;
+    }
     if (be === 'hf') {
       const urlIn = $('ai-hf-url'), apiIn = $('ai-hf-api');
       if (!urlIn || !apiIn || !RM.hfStems) return;
@@ -779,7 +852,9 @@ RM.aiStems = (function () {
     backendDefs().forEach((d) => {
       const b = document.createElement('button');
       b.className = 'btn small' + (d.id === cur ? ' primary' : '');
-      b.innerHTML = `${d.icon} ${A.escapeHtml(d.label)}<br><span class="muted" style="font-size:11px">${A.escapeHtml(d.sub)}</span>`;
+      // .btn is inline-flex: stack label above sub-label so they never collide on one row
+      b.style.cssText = 'flex-direction:column;align-items:flex-start;text-align:left;line-height:1.35;gap:2px';
+      b.innerHTML = `<span>${d.icon} ${A.escapeHtml(d.label)}</span><span class="muted" style="font-size:11px">${A.escapeHtml(d.sub)}</span>`;
       b.addEventListener('click', () => {
         setBackend(d.id);
         renderSettingsBackendPicker();
@@ -791,6 +866,21 @@ RM.aiStems = (function () {
 
   function saveSettings() {
     const be = getBackend();
+    if (be === 'hf46') {
+      if (!RM.hfStems || !RM.hf46Stems) return;
+      const url = $('ai-hf46-url').value.trim().replace(/\/+$/, '');
+      const api = ($('ai-hf46-api').value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
+      const model = $('ai-hf46-model').value;
+      if (!url) { setAiStatus('err', T('', 'Enter the Space URL first')); return; }
+      if (!/^https?:\/\//i.test(url)) {
+        setAiStatus('err', T('', 'The URL must start with http(s)://'));
+        return;
+      }
+      RM.hf46Stems.setCfg(url, api, model);
+      setAiStatus('', T('', 'Saved ✓'));
+      A.toast(T('', 'HF 4/6-Stem settings saved'));
+      return;
+    }
     if (be === 'hf') {
       if (!RM.hfStems) return;
       const url = $('ai-hf-url').value.trim().replace(/\/+$/, '');

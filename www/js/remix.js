@@ -237,7 +237,7 @@ RM.remix = (function () {
             prog('Mastering…', 0.95);
             chains.forEach((c) => { try { c.dispose(); } catch (e) {} });
             try { master.dispose(); } catch (e) {}
-            prog('Ho gaya ✓', 1);
+            prog('Done ✓', 1);
             return { buffer: rendered, bpm, rate, styleId: style.id, styleName: style.name };
           });
         });

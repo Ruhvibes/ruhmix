@@ -47,6 +47,15 @@ const approx = (v, want, tol = 0.02) => Math.abs(v - want) <= tol;
     await page.goto(PAGE_URL, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction(() => window.RM && RM.app && RM.app.state, { timeout: 30000 });
 
+    // First-run onboarding overlay (ob-ov) swallows real mouse clicks — dismiss it.
+    await page.evaluate(() => {
+      const sk = document.getElementById('ob-skip');
+      if (sk && document.getElementById('ob-ov') && document.getElementById('ob-ov').classList.contains('show')) sk.click();
+      const wn = document.getElementById('wn-gotit');
+      if (wn && document.getElementById('ob-ov') && document.getElementById('ob-ov').classList.contains('show')) wn.click();
+    });
+    await new Promise((r) => setTimeout(r, 300));
+
     // ---- fixture: 10s stereo test tone, loaded as a real project ----
     await page.evaluate(() => RM.app.show('editor'));
     await page.evaluate(() => {
