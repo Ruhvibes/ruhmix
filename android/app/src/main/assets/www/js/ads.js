@@ -4,9 +4,12 @@
    AdMob (rewarded video + interstitial) — native bridge ke through.
 
    HASNAIN — AD UNIT IDs:
-     Rewarded ID neeche real hai (tumhara AdMob). Interstitial abhi Google ka
-     PUBLIC TEST ID hai — jab tumhara interstitial unit ban jaye to uska ID
-     `interstitial` me daal dena. Format: ca-app-pub-XXXXXXXXXXXXXXXX/YYYYYYYYYY
+     Teenon IDs neeche real hain (tumhara AdMob):
+       App ID (AndroidManifest): ca-app-pub-1457912071506893~1344547777
+       Rewarded:                ca-app-pub-1457912071506893/7359291783
+       Interstitial:            ca-app-pub-1457912071506893/7618222790
+     NOTE: naye ad units ko live ads dikhane me ~1 ghanta lag sakta hai —
+     tab tak test ads ya blank dikhe to ghabrana mat.
 
    Rules (Hasnain ke faisle):
      * Rewarded (30-sec video): AI Stem Separation se PEHLE — "1 ad dekho,
@@ -23,11 +26,11 @@ window.RM = window.RM || {};
 
 RM.ads = (function () {
   const ADMOB_CONFIG = {
-    // Rewarded = Hasnain ka REAL AdMob unit (AI Stem Separation se pehle).
+    // Teenon IDs Hasnain ke REAL AdMob units hain.
+    // NOTE: naye ad units ko live ads dikhane me ~1 ghanta lag sakta hai —
+    // tab tak test ads ya blank dikhe to ghabrana mat.
     rewarded: 'ca-app-pub-1457912071506893/7359291783',
-    // Interstitial abhi TEST ID hai (earning nahi hogi) — Hasnain ka real
-    // interstitial unit bante hi yahan replace karna hai.
-    interstitial: 'ca-app-pub-3940256099942544/1033173712',  // TEST interstitial
+    interstitial: 'ca-app-pub-1457912071506893/7618222790',
   };
 
   const LS_EXPORTS = 'rmx_ad_exports';      // successful export count
