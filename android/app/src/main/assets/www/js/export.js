@@ -64,7 +64,7 @@ RM.exp = (function () {
   // MP3 encode with progress + cancel token {cancelled:false}.
   function encodeMp3(int16, kbps, sampleRate, onProgress, token) {
     return new Promise((resolve, reject) => {
-      if (!lameAvailable()) { reject(new Error('MP3 encoder load nahi hua.')); return; }
+      if (!lameAvailable()) { reject(new Error('MP3 encoder failed to load.')); return; }
       let enc;
       try { enc = new lamejs.Mp3Encoder(2, sampleRate, kbps); }
       catch (e) { reject(e); return; }
@@ -361,7 +361,7 @@ RM.exp = (function () {
     return new Promise((resolve, reject) => {
       try {
         const total = int16.left.length;
-        if (!total) { reject(new Error('Encode ke liye audio khaali hai.')); return; }
+        if (!total) { reject(new Error('No audio to encode.')); return; }
         const channels = int16.right ? 2 : 1;
         const md5 = md5Create();
         // pass 1: MD5 over interleaved LE signed samples (RFC 9639 §8.2)

@@ -32,8 +32,8 @@ RM.aiStems = (function () {
   // NOTE: this file loads BEFORE app.js, so RM.app is bound lazily in init().
   let A = null;
   let $ = null;
-  const HI = () => { try { return (localStorage.getItem('ruhmix.lang') || 'hi') === 'hi'; } catch (e) { return true; } };
-  const T = (hi, en) => (HI() ? hi : en);
+  const HI = () => false; // English-only build: language locked to English
+  const T = (hi, en) => en; // English-only build
 
   const LS_KEY = 'rmx_ai_server';
   const LS_BACKEND = 'rmx_ai_backend'; // 'dsp' | 'hf' | 'modal' — DEFAULT 'dsp'
@@ -57,7 +57,7 @@ RM.aiStems = (function () {
   // Consent text shown verbatim before the first upload. The server is the
   // USER's own Modal deployment (setup guide: "Apna AI server chalayein"),
   // so the text says "aapke apne" — not "hamare".
-  const CONSENT_TEXT = 'Aapka audio aapke apne cloud server (Modal, GPU) par process hoga. Processing khatm hote hi aapki file turant delete ho jayegi — koi copy save nahi hoti. Is seva ka kharcha ads se nikalta hai: separation se pehle ek chhota ad dekhna hoga (1 ad = 1 gaana).';
+  const CONSENT_TEXT = 'Your audio will be processed on your own cloud server (Modal, GPU). As soon as processing finishes, your file is deleted immediately — no copy is saved. This service is funded by ads: you will watch one short ad before each separation (1 ad = 1 song).';
 
   const st = {
     song: null,          // {label, buffer}
@@ -157,16 +157,16 @@ RM.aiStems = (function () {
   /* ================= backend selector (3 options) ================= */
   function backendDefs() {
     return [
-      { id: 'dsp',   icon: '✂️', label: T('DSP Beta', 'DSP Beta'),       sub: T('turant, bina server', 'instant, no server') },
-      { id: 'hf',    icon: '🤗', label: T('Hugging Face', 'Hugging Face'), sub: T('FREE AI', 'FREE AI') },
-      { id: 'modal', icon: '☁️', label: T('Modal', 'Modal'),             sub: T('card chahiye', 'needs card') },
+      { id: 'dsp',   icon: '✂️', label: T('', 'DSP Beta'),       sub: T('', 'Instant — no server needed') },
+      { id: 'hf',    icon: '🤗', label: T('', 'Hugging Face'), sub: T('', 'FREE AI') },
+      { id: 'modal', icon: '☁️', label: T('', 'Modal'),             sub: T('', 'Card required') },
     ];
   }
   function renderBackendPicker() {
     const box = $('aistem-backend');
     if (!box) return;
     const cur = getBackend();
-    box.innerHTML = `<div class="muted small" style="margin-bottom:4px">${T('Backend chunein:', 'Choose backend:')}</div><div class="btn-row" id="aib-row"></div>`;
+    box.innerHTML = `<div class="muted small" style="margin-bottom:4px">${T('', 'Choose backend:')}</div><div class="btn-row" id="aib-row"></div>`;
     const row = $('aib-row');
     backendDefs().forEach((d) => {
       const b = document.createElement('button');
@@ -181,10 +181,9 @@ RM.aiStems = (function () {
   function renderDspChoice() {
     $('aistem-setup').innerHTML = `
       <div class="panel">
-        <h4>✂️ DSP Beta — bina server, turant</h4>
-        <p class="muted small">${T('Ye on-device DSP technique hai — neural AI nahi. Natijon me bleed ho sakta hai. Koi upload, koi server, koi ad nahi.',
-               'This is an on-device DSP technique — not neural AI. Results may have bleed. No upload, no server, no ad.')}</p>
-        <button class="btn primary big block" id="ais-go-dsp-main">${T('DSP Stem Separation kholein', 'Open DSP Stem Separation')}</button>
+        <h4>✂️ DSP Beta — instant, no server</h4>
+        <p class="muted small">${T('', 'This is an on-device DSP technique — not neural AI. Results may have bleed. No upload, no server, no ad.')}</p>
+        <button class="btn primary big block" id="ais-go-dsp-main">${T('', 'Open DSP Stem Separation')}</button>
       </div>`;
     $('ais-go-dsp-main').addEventListener('click', () => A.show('stems'));
   }
@@ -194,16 +193,14 @@ RM.aiStems = (function () {
     $('aistem-setup').innerHTML = `
       <div class="panel">
         <h4>☁️ Modal — AI Stem Separation</h4>
-        <p class="muted small">⚠️ ${T('Is backend ke liye card chahiye (Modal account). Bina card ke Hugging Face wala FREE option use karein.',
-               'This backend needs a card (Modal account). Without a card, use the FREE Hugging Face option.')}</p>
-        <p>${T('AI Stem Separation ke liye server setup zaroori hai. Ye feature neural AI model se kaam karta hai, jo server par chalta hai — bina server ke ye kaam nahi karega.',
-               'AI Stem Separation needs a server setup. This feature uses a neural AI model that runs on the server — it will not work without one.')}</p>
+        <p class="muted small">⚠️ ${T('', 'This backend needs a card (Modal account). Without a card, use the FREE Hugging Face option.')}</p>
+        <p>${T('', 'AI Stem Separation needs a server setup. This feature uses a neural AI model that runs on the server — it will not work without one.')}</p>
         <ol class="setup-steps">
-          <li>${T('अपना AI सर्वर चलाएँ (neural model वाला)।', 'Run your AI server (the one with the neural model).')}</li>
-          <li>${T('सर्वर का URL और API Key कॉपी करें।', 'Copy the server URL and API Key.')}</li>
-          <li>${T('Settings → AI Server में डालें और कनेक्शन जाँचें।', 'Paste them in Settings → AI Server and test the connection.')}</li>
+          <li>${T('', 'Run your AI server (the one with the neural model).')}</li>
+          <li>${T('', 'Copy the server URL and API Key.')}</li>
+          <li>${T('', 'Paste them in Settings → AI Server and test the connection.')}</li>
         </ol>
-        <button class="btn primary big block" id="ais-go-settings">${T('Settings kholein', 'Open Settings')}</button>
+        <button class="btn primary big block" id="ais-go-settings">${T('', 'Open Settings')}</button>
       </div>`;
     $('ais-go-settings').addEventListener('click', () => A.show('settings'));
   }
@@ -212,7 +209,7 @@ RM.aiStems = (function () {
   function songOptions() {
     const opts = [];
     const vb = A.state.viewBuffer || A.state.buffer;
-    if (vb) opts.push({ label: A.state.fileName || T('वर्तमान प्रोजेक्ट', 'Current project'), buffer: vb });
+    if (vb) opts.push({ label: A.state.fileName || T('', 'Current project'), buffer: vb });
     (A.state.imports || []).forEach((it) => {
       if (it && it.buffer) opts.push({ label: it.name, buffer: it.buffer });
     });
@@ -226,18 +223,17 @@ RM.aiStems = (function () {
     st.results = [];
     box.innerHTML = `
       <div class="panel">
-        <h4>${T('गाना चुनें', 'Select song')}</h4>
+        <h4>${T('', 'Select song')}</h4>
         <div id="ais-songs"></div>
-        <div class="honest">🧠 ${T('Ye REAL neural AI separation hai — aapka audio server par process hoga.',
-               'This is REAL neural AI separation — your audio will be processed on the server.')}</div>
-        <button class="btn primary big block" id="ais-start">${T('AI Se Stem Alag Karein', 'Separate Stems with AI')}</button>
+        <div class="honest">🧠 ${T('', 'This is REAL neural AI separation — your audio will be processed on the server.')}</div>
+        <button class="btn primary big block" id="ais-start">${T('', 'Separate Stems with AI')}</button>
       </div>
       <div id="ais-progress" style="display:none"></div>
       <div id="ais-fail" style="display:none"></div>
       <div id="ais-results"></div>`;
     const list = $('ais-songs');
     if (!opts.length) {
-      list.innerHTML = `<div class="empty">${T('कोई ऑडियो नहीं मिला — पहले इम्पोर्ट करें।', 'No audio found — import first.')}</div>`;
+      list.innerHTML = `<div class="empty"><div class="empty-icon">🎵</div>${T('', 'No audio found — import first.')}</div>`;
       $('ais-start').disabled = true;
     }
     opts.forEach((o, i) => {
@@ -255,14 +251,14 @@ RM.aiStems = (function () {
 
   function startFlow() {
     if (st.running) return;
-    if (!st.song || !st.song.buffer) { A.toast(T('Pehle gaana chunein', 'Select a song first')); return; }
+    if (!st.song || !st.song.buffer) { A.toast(T('', 'Select a song first')); return; }
     const cfg = getCfg();
     if (!cfg) { render(); return; }
     if (st.consentGiven) { gateWithAd(cfg); return; }
-    A.dialog('🧠 ' + T('AI Stem Separation', 'AI Stem Separation'),
+    A.dialog('🧠 ' + T('', 'AI Stem Separation'),
       `<p>${A.escapeHtml(CONSENT_TEXT)}</p>` +
       `<p class="muted small">Server: <span class="mono">${A.escapeHtml(cfg.url)}</span></p>`,
-      T('सहमत', 'Sahmat'), T('रद्द करें', 'Radd karein')).then((ok) => {
+      T('', 'I Agree'), T('', 'Decline')).then((ok) => {
       if (!ok) return;
       st.consentGiven = true;
       gateWithAd(cfg);
@@ -271,10 +267,14 @@ RM.aiStems = (function () {
 
   /* ============ rewarded ad gate: 1 ad dekho, 1 gaana separate karo ============ */
   let adGateToken = 0;
+  let adGating = false; // Round-6 (W2): double-tap race — gate pending ho to dobara ad mat kholo
   function gateWithAd(cfg) {
+    if (adGating) return; // ad gate already pending
+    adGating = true;
     const myToken = ++adGateToken;
-    showProgress(0, T('🎬 Ad load ho raha hai…', '🎬 Loading ad…'), true);
+    showProgress(0, T('', '🎬 Loading ad…'), true);
     RM.ads.showRewarded().then((earned) => {
+      adGating = false; // gate resolved (myToken check se pehle)
       if (myToken !== adGateToken) return; // user ne cancel kiya tha
       if (earned) {
         uploadAndProcess(cfg);
@@ -288,9 +288,9 @@ RM.aiStems = (function () {
             <div class="panel">
               <div class="err" style="margin-bottom:8px">⚠ ${A.escapeHtml(RM.ads.rewardedSkippedMessage())}</div>
               <div class="btn-row">
-                <button class="btn primary" id="ais-retry">${T('🔁 Dobara koshish karein', '🔁 Try again')}</button>
-                <button class="btn" id="ais-go-dsp3">${T('Beta (DSP) try karein', 'Try Beta (DSP)')}</button>
-                <button class="btn ghost" id="ais-cancel">${T('रद्द करें', 'Cancel')}</button>
+                <button class="btn primary" id="ais-retry">${T('', '🔁 Try again')}</button>
+                <button class="btn" id="ais-go-dsp3">${T('', 'Try Beta (DSP)')}</button>
+                <button class="btn ghost" id="ais-cancel">${T('', 'Cancel')}</button>
               </div>
             </div>`;
           $('ais-retry').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; gateWithAd(cfg); });
@@ -298,7 +298,7 @@ RM.aiStems = (function () {
           const dsp = $('ais-go-dsp3');
           if (dsp) dsp.addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; A.show('stems'); });
         } else {
-          A.toast(T('Ad nahi chal saka — dobara koshish karein', 'Ad could not play — please try again'));
+          A.toast(T('', 'Ad could not play — please try again'));
         }
       }
     });
@@ -316,21 +316,21 @@ RM.aiStems = (function () {
     for (let i = n - 22; i >= Math.max(0, n - 66000); i--) {
       if (dv.getUint32(i, true) === SIG_EOCD) { eocd = i; break; }
     }
-    if (eocd < 0) throw new Error('ZIP EOCD nahi mila');
+    if (eocd < 0) throw new Error('ZIP end marker not found');
     const count = dv.getUint16(eocd + 10, true);
     let cOff = dv.getUint32(eocd + 16, true);
     const out = [];
     const dec = new TextDecoder();
     for (let k = 0; k < count; k++) {
-      if (dv.getUint32(cOff, true) !== SIG_CDIR) throw new Error('ZIP central dir kharab hai');
+      if (dv.getUint32(cOff, true) !== SIG_CDIR) throw new Error('ZIP central directory is corrupt');
       const method = dv.getUint16(cOff + 10, true);
       const nameLen = dv.getUint16(cOff + 28, true);
       const extraLen = dv.getUint16(cOff + 30, true);
       const commentLen = dv.getUint16(cOff + 32, true);
       const localOff = dv.getUint32(cOff + 42, true);
       const name = dec.decode(u8.subarray(cOff + 46, cOff + 46 + nameLen));
-      if (method !== 0) throw new Error('ZIP me compressed entry (support nahi)');
-      if (dv.getUint32(localOff, true) !== SIG_LOCAL) throw new Error('ZIP local header kharab hai');
+      if (method !== 0) throw new Error('ZIP compressed entry is not supported');
+      if (dv.getUint32(localOff, true) !== SIG_LOCAL) throw new Error('ZIP local header is corrupt');
       const lNameLen = dv.getUint16(localOff + 26, true);
       const lExtraLen = dv.getUint16(localOff + 28, true);
       const dataStart = localOff + 30 + lNameLen + lExtraLen;
@@ -352,10 +352,10 @@ RM.aiStems = (function () {
     try {
       blob = bufferToWavBlob(st.song.buffer);
     } catch (e) {
-      return fail(T('Audio taiyaar nahi ho saka: ', 'Could not prepare audio: ') + (e && e.message ? e.message : e), 'process');
+      return fail(T('', 'Could not prepare audio: ') + A.cleanErrMsg(e && e.message ? e.message : e), 'process');
     }
     if (st.song.buffer.duration > 600) {
-      A.toast(T('Badi file hai — upload me samay lag sakta hai', 'Large file — upload may take a while'));
+      A.toast(T('', 'Large file — upload may take a while'));
     }
     st.running = true;
     const xhr = new XMLHttpRequest();
@@ -367,7 +367,7 @@ RM.aiStems = (function () {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && e.total > 0) {
         const p = e.loaded / e.total;
-        showProgress(p, T('Upload ho raha hai', 'Uploading') + ' ' + Math.round(p * 100) + '%', true);
+        showProgress(p, T('', 'Uploading') + ' ' + Math.round(p * 100) + '%', true);
       }
     };
     xhr.onload = () => {
@@ -375,23 +375,20 @@ RM.aiStems = (function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         handleZipResponse(cfg, xhr.response);
       } else if (xhr.status === 401 || xhr.status === 403) {
-        fail(T('Processing failed — API Key galat hai ya authorized nahi. Settings me key check karein.',
-               'Processing failed — the API key is wrong or unauthorized. Check the key in Settings.'), 'process');
+        fail(T('', 'Processing failed — the API key is wrong or unauthorized. Check the key in Settings.'), 'process');
       } else if (xhr.status === 413) {
-        fail(T('Processing failed — file bahut badi hai (max 200 MB).', 'Processing failed — file too large (max 200 MB).'), 'process');
+        fail(T('', 'Processing failed — file too large (max 200 MB).'), 'process');
       } else {
-        fail(T('Processing failed — server error ', 'Processing failed — server error ') + xhr.status + '.', 'process');
+        fail(T('', 'Processing failed — server error ') + xhr.status + '.', 'process');
       }
     };
     xhr.onerror = () => {
       st.xhr = null;
-      fail(T('Server se connect nahi ho pa raha. Internet ya server URL check karein.',
-             'Cannot connect to the server. Check your internet connection or the server URL.'), 'connect');
+      fail(T('', 'Cannot connect to the server. Check your internet connection or the server URL.'), 'connect');
     };
     xhr.ontimeout = () => {
       st.xhr = null;
-      fail(T('Server ne bahut samay liya (timeout). Chhota gaana try karein ya dobara koshish karein.',
-             'The server took too long (timeout). Try a shorter song or try again.'), 'connect');
+      fail(T('', 'The server took too long (timeout). Try a shorter song or try again.'), 'connect');
     };
     xhr.onabort = () => { st.xhr = null; st.running = false; hideProgress(); };
     const fd = new FormData();
@@ -401,11 +398,11 @@ RM.aiStems = (function () {
       if (!st.running) return;
       startProcessingAnim();
     };
-    showProgress(0, T('Upload ho raha hai…', 'Uploading…'), true);
+    showProgress(0, T('', 'Uploading…'), true);
     try { xhr.send(fd); }
     catch (e) {
       st.xhr = null;
-      fail(T('Server se connect nahi ho pa raha.', 'Cannot connect to the server.'), 'connect');
+      fail(T('', 'Cannot connect to the server.'), 'connect');
     }
   }
 
@@ -414,9 +411,9 @@ RM.aiStems = (function () {
   function startProcessingAnim() {
     stopProcessingAnim();
     const msgs = [
-      T('🧠 Server par AI process ho raha hai…', '🧠 AI processing on server…'),
-      T('🧠 Stems alag ho rahe hain… (1-3 min lag sakta hai)', '🧠 Separating stems… (may take 1-3 min)'),
-      T('🧠 GPU kaam kar raha hai, kripya intezaar karein…', '🧠 GPU is working, please wait…'),
+      T('', '🧠 AI processing on server…'),
+      T('', '🧠 Separating stems… (may take 1-3 min)'),
+      T('', '🧠 GPU is working, please wait…'),
     ];
     let i = 0, dots = 0;
     const tick = () => {
@@ -439,7 +436,7 @@ RM.aiStems = (function () {
     try {
       entries = parseStoredZip(ab);
     } catch (e) {
-      return fail(T('Processing failed — server ka jawab samajh nahi aaya.', 'Processing failed — could not read the server response.'), 'process');
+      return fail(T('', 'Processing failed — could not read the server response.'), 'process');
     }
     const ctx = RM.audio.ensureCtx();
     const out = [];
@@ -451,9 +448,9 @@ RM.aiStems = (function () {
       const entry = entries.find((e) => e.name.toLowerCase() === sm.id + '.wav');
       if (!entry) {
         stopProcessingAnim();
-        return fail(T('Processing failed — stem nahi mila: ', 'Processing failed — stem missing: ') + sm.name, 'process');
+        return fail(T('', 'Processing failed — stem missing: ') + sm.name, 'process');
       }
-      showProgress(-1, T('Stem taiyaar ho raha hai', 'Preparing stem') + ` ${i + 1}/${STEMS.length} (${sm.name})…`, true);
+      showProgress(-1, T('', 'Preparing stem') + ` ${i + 1}/${STEMS.length} (${sm.name})…`, true);
       new Promise((res, rej) => {
         try {
           const p = ctx.decodeAudioData(entry.data.slice(0), res, rej);
@@ -465,7 +462,7 @@ RM.aiStems = (function () {
         step();
       }).catch(() => {
         stopProcessingAnim();
-        fail(T('Processing failed — stem decode nahi ho saka: ', 'Processing failed — could not decode stem: ') + sm.name, 'process');
+        fail(T('', 'Processing failed — could not decode stem: ') + sm.name, 'process');
       });
     };
     step();
@@ -493,15 +490,15 @@ RM.aiStems = (function () {
     } catch (e) { /* pack stays unavailable; classic preset flow continues */ }
     hideProgress();
     renderResults(stems);
-    A.toast(T('AI Stems taiyaar hain ✓', 'AI stems are ready ✓'));
+    A.toast(T('', 'AI stems are ready ✓'));
   }
 
   function renderResults(stems) {
     const box = $('ais-results');
     box.innerHTML = `
-      <div class="ok" style="margin:8px 0">✓ ${T('AI Stems taiyaar hain', 'AI stems are ready')} — ${stems.length}</div>
-      <button class="btn primary block" id="ais-to-mixer">${T('Sabhi AI Stems ko Mixer me load karein', 'Load all AI stems into the Mixer')}</button>
-      <button class="btn block" id="ais-to-remix" style="margin-top:8px">⚡ ${T('Auto Remix me istemal karein (4-stem pipeline)', 'Use in Auto Remix (4-stem pipeline)')}</button>
+      <div class="ok" style="margin:8px 0">✓ ${T('', 'AI stems are ready')} — ${stems.length}</div>
+      <button class="btn primary block" id="ais-to-mixer">${T('', 'Load all AI stems into the Mixer')}</button>
+      <button class="btn block" id="ais-to-remix" style="margin-top:8px">⚡ ${T('', 'Use in Auto Remix (4-stem pipeline)')}</button>
       <div id="ais-rows"></div>`;
     $('ais-to-mixer').addEventListener('click', () => {
       stems.forEach((s) => A.sendToMixer(s.buffer, s.name));
@@ -526,8 +523,8 @@ RM.aiStems = (function () {
         <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
       </div>
       <button class="btn small" data-a="play">▶</button>
-      <button class="btn small ghost" data-a="mix">${T('मिक्सर', 'Mixer')}</button>
-      <button class="btn small ghost" data-a="exp">${T('एक्सपोर्ट', 'Export')}</button>`;
+      <button class="btn small ghost" data-a="mix">${T('', 'Mixer')}</button>
+      <button class="btn small ghost" data-a="exp">${T('', 'Export')}</button>`;
     let player = null;
     const btn = d.querySelector('[data-a="play"]');
     btn.addEventListener('click', () => {
@@ -561,21 +558,20 @@ RM.aiStems = (function () {
     const box = $('ais-fail');
     if (!box) return;
     box.style.display = '';
-    const retryBtn = `<button class="btn primary" id="ais-retry">${T('Retry', 'Retry')}</button>`;
-    const cancelBtn = `<button class="btn ghost" id="ais-cancel">${T('रद्द करें', 'Cancel')}</button>`;
+    const retryBtn = `<button class="btn primary" id="ais-retry">${T('', 'Retry')}</button>`;
+    const cancelBtn = `<button class="btn ghost" id="ais-cancel">${T('', 'Cancel')}</button>`;
     let extra = '';
     if (kind === 'connect') {
-      extra = `<button class="btn" id="ais-go-dsp2">${T('Bina server ke basic separation (Beta DSP)', 'Basic separation without server (Beta DSP)')}</button>`;
+      extra = `<button class="btn" id="ais-go-dsp2">${T('', 'Basic separation without server (Beta DSP)')}</button>`;
     } else {
-      extra = `<button class="btn" id="ais-save-proj">${T('Save Project', 'Save Project')}</button>`;
+      extra = `<button class="btn" id="ais-save-proj">${T('', 'Save Project')}</button>`;
     }
     box.innerHTML = `
       <div class="panel">
         <div class="err" style="margin-bottom:8px">⚠ ${A.escapeHtml(msg)}</div>
         <div class="btn-row">${retryBtn}${extra}${cancelBtn}</div>
         ${kind === 'connect'
-          ? `<p class="muted small">${T('DSP wala option on-device hai — neural AI nahi, lekin bina server ke kaam karega.',
-             'The DSP option runs on-device — not neural AI, but it works without a server.')}</p>`
+          ? `<p class="muted small">${T('', 'The DSP option runs on-device — not neural AI, but it works without a server.')}</p>`
           : ''}
       </div>`;
     $('ais-retry').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; startFlow(); });
@@ -593,9 +589,9 @@ RM.aiStems = (function () {
     try {
       const p = A.state.project || RM.proj.create('AI Stem ' + (st.song ? st.song.label : ''));
       RM.proj.save(p);
-      A.toast(T('प्रोजेक्ट सहेजा गया ✓', 'Project saved ✓'));
+      A.toast(T('', 'Project saved ✓'));
     } catch (e) {
-      A.toast(T('सहेजा नहीं जा सका: ', 'Could not save: ') + (e && e.message ? e.message : e));
+      A.toast(T('', 'Could not save: ') + A.cleanErrMsg(e && e.message ? e.message : e));
     }
   }
 
@@ -622,7 +618,7 @@ RM.aiStems = (function () {
       <div class="panel">
         <div class="progress"><div class="pbar${indet ? ' indet' : ''}" style="width:${pct}%"></div></div>
         <div class="status">${A.escapeHtml(label || '')}</div>
-        ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('रद्द करें', 'Cancel')}</button>` : ''}
+        ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('', 'Cancel')}</button>` : ''}
       </div>`;
     if (cancelable) {
       const btn = $('ais-cancel-up');
@@ -639,6 +635,7 @@ RM.aiStems = (function () {
     st.running = false;
     st.job = null;
     adGateToken++; // gate me atka ad-callback ab kuch nahi karega
+    adGating = false; // gate cancel — dobara start ho sake
     if (st.xhr) { try { st.xhr.abort(); } catch (e) {} st.xhr = null; }
     stopProcessingAnim();
     stopAiPlayers();
@@ -657,7 +654,7 @@ RM.aiStems = (function () {
     const be = getBackend();
     if (be === 'hf') { testHfConnection(); return; }
     if (be === 'dsp') {
-      setAiStatus('', T('✂️ DSP Beta — test ki zaroorat nahi', '✂️ DSP Beta — no test needed'));
+      setAiStatus('', T('', '✂️ DSP Beta — no test needed'));
       const res = $('ai-test-result');
       if (res) res.innerHTML = '';
       return;
@@ -668,16 +665,16 @@ RM.aiStems = (function () {
     const res = $('ai-test-result');
     if (res) res.innerHTML = '';
     if (!url) {
-      setAiStatus('err', T('Pehle Server URL daalein', 'Enter the server URL first'));
+      setAiStatus('err', T('', 'Enter the server URL first'));
       return;
     }
     if (!/^https?:\/\//i.test(url)) {
-      setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+      setAiStatus('err', T('', 'The URL must start with http(s)://'));
       return;
     }
     // NOTE: test se pehle save NAHI karte — galat URL/key save ho jata to
     // AI screen setup ki jagah toote hue server pe khulti. Sirf safal test par save.
-    setAiStatus('', T('जाँच हो रही है… (pehli baar GPU start hone me 30-60s lag sakta hai)', 'Checking… (first check may take 30-60s for GPU cold start)'));
+    setAiStatus('', T('', 'Checking… (first check may take 30-60s for GPU cold start)'));
     const ctrl = new AbortController();
     const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 90000);
     fetch(url + '/health', {
@@ -690,19 +687,16 @@ RM.aiStems = (function () {
       return r.text(); // body shape is not critical; reachability + auth is
     }).then(() => {
       setCfg(url, key); // safal test par hi save
-      setAiStatus('ok', T('सर्वर ठीक है ✓', 'Server is reachable ✓'));
-      if (res) res.innerHTML = `<div class="ok">${T('कनेक्शन सफल — AI Stem Separation taiyaar hai.',
-        'Connection successful — AI Stem Separation is ready.')}</div>`;
+      setAiStatus('ok', T('', 'Server is reachable ✓'));
+      if (res) res.innerHTML = `<div class="ok">${T('', 'Connection successful — AI Stem Separation is ready.')}</div>`;
     }).catch((e) => {
       clearTimeout(to);
       if (e && e.auth) {
-        setAiStatus('err', T('API Key galat ya unauthorized', 'API key wrong or unauthorized'));
-        if (res) res.innerHTML = `<div class="err">${T('API Key galat hai ya authorized nahi. Key check karke dobara koshish karein.',
-          'The API key is wrong or unauthorized. Check the key and try again.')}</div>`;
+        setAiStatus('err', T('', 'API key wrong or unauthorized'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'The API key is wrong or unauthorized. Check the key and try again.')}</div>`;
       } else {
-        setAiStatus('err', T('Server se connect nahi ho pa raha', 'Cannot connect to the server'));
-        if (res) res.innerHTML = `<div class="err">${T('Server se connect nahi ho pa raha. URL aur internet check karein.',
-          'Cannot connect to the server. Check the URL and your internet connection.')}</div>`;
+        setAiStatus('err', T('', 'Cannot connect to the server'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'Cannot connect to the server. Check the URL and your internet connection.')}</div>`;
       }
     });
   }
@@ -717,36 +711,32 @@ RM.aiStems = (function () {
     const res = $('ai-test-result');
     if (res) res.innerHTML = '';
     if (!url) {
-      setAiStatus('err', T('Pehle Space URL daalein', 'Enter the Space URL first'));
+      setAiStatus('err', T('', 'Enter the Space URL first'));
       return;
     }
     if (!/^https?:\/\//i.test(url)) {
-      setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+      setAiStatus('err', T('', 'The URL must start with http(s)://'));
       return;
     }
     // NOTE: test se pehle save NAHI karte — galat URL save ho jata to AI
     // screen setup guide ki jagah toote hue Space pe khulti. Sirf safal test par save.
-    setAiStatus('', T('जाँच हो रही है… (soya Space jagte me 1-2 min le sakta hai)', 'Checking… (a sleeping Space can take 1-2 min to wake)'));
+    setAiStatus('', T('', 'Checking… (a sleeping Space can take 1-2 min to wake)'));
     RM.hfStems.testSpace(url, api).then((r) => {
       RM.hfStems.setCfg(url, api); // safal test par hi save
-      setAiStatus('ok', T('Space mil gaya ✓ (API: /' + r.api + ')', 'Space reachable ✓ (API: /' + r.api + ')'));
-      if (res) res.innerHTML = `<div class="ok">${T('कनेक्शन सफल — Hugging Face AI taiyaar hai. Outputs: ' + r.outputs + ' (Vocal + Instrumental).',
-        'Connection successful — Hugging Face AI is ready. Outputs: ' + r.outputs + ' (Vocal + Instrumental).')}</div>`;
+      setAiStatus('ok', T('', 'Space reachable ✓ (API: /' + r.api + ')'));
+      if (res) res.innerHTML = `<div class="ok">${T('', 'Connection successful — Hugging Face AI is ready. Outputs: ' + r.outputs + ' (Vocal + Instrumental).')}</div>`;
     }).catch((e) => {
       const kind = e && e.kind;
       if (kind === 'asleep') {
-        setAiStatus('err', T('Space jag raha hai — 1-2 min me dobara try karein', 'Space is waking up — retry in 1-2 min'));
-        if (res) res.innerHTML = `<div class="err">${T('Space abhi jag raha hai. 1-2 minute rukkar "कनेक्शन जांचें" dobara dabayein.',
-          'The Space is waking up. Wait 1-2 minutes and press "Test Connection" again.')}</div>`;
+        setAiStatus('err', T('', 'Space is waking up — retry in 1-2 min'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'The Space is waking up. Wait 1-2 minutes and press "Test Connection" again.')}</div>`;
       } else if (kind === 'badapi') {
         const names = (e.found && e.found.length ? e.found.join(', ') : '—');
-        setAiStatus('err', T('API name galat hai', 'Wrong API name'));
-        if (res) res.innerHTML = `<div class="err">${T('Ye API name Space pe nahi mila. Space page pe "View API" se sahi naam dekhein. Mile: ' + names,
-          'This API name was not found on the Space. Check the correct name via "View API" on the Space page. Found: ' + names)}</div>`;
+        setAiStatus('err', T('', 'Wrong API name'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'This API name was not found on the Space. Check the correct name via "View API" on the Space page. Found: ' + names)}</div>`;
       } else {
-        setAiStatus('err', T('Space se connect nahi ho pa raha', 'Cannot reach the Space'));
-        if (res) res.innerHTML = `<div class="err">${T('Space se connect nahi ho pa raha. URL aur internet check karein.',
-          'Cannot reach the Space. Check the URL and your internet connection.')}</div>`;
+        setAiStatus('err', T('', 'Cannot reach the Space'));
+        if (res) res.innerHTML = `<div class="err">${T('', 'Cannot reach the Space. Check the URL and your internet connection.')}</div>`;
       }
     });
   }
@@ -763,8 +753,8 @@ RM.aiStems = (function () {
       urlIn.value = cfg ? cfg.url : '';
       apiIn.value = cfg ? cfg.apiName : RM.hfStems.DEFAULT_API;
       setAiStatus('', cfg
-        ? T('सहेजा हुआ — कनेक्शन जाँचें', 'Saved — test the connection')
-        : T('सेट नहीं है', 'Not set'));
+        ? T('', 'Saved — test the connection')
+        : T('', 'Not set'));
     } else if (be === 'modal') {
       const urlIn = $('ai-url'), keyIn = $('ai-key');
       if (!urlIn || !keyIn) return;
@@ -772,12 +762,12 @@ RM.aiStems = (function () {
       if (cfg) {
         urlIn.value = cfg.url;
         keyIn.value = cfg.key || '';
-        setAiStatus('', T('सहेजा हुआ — कनेक्शन जाँचें', 'Saved — test the connection'));
+        setAiStatus('', T('', 'Saved — test the connection'));
       } else {
-        setAiStatus('', T('सेट नहीं है', 'Not set'));
+        setAiStatus('', T('', 'Not set'));
       }
     } else {
-      setAiStatus('', T('✂️ DSP Beta — settings ki zaroorat nahi', '✂️ DSP Beta — no settings needed'));
+      setAiStatus('', T('', '✂️ DSP Beta — no settings needed'));
     }
   }
 
@@ -805,30 +795,30 @@ RM.aiStems = (function () {
       if (!RM.hfStems) return;
       const url = $('ai-hf-url').value.trim().replace(/\/+$/, '');
       const api = ($('ai-hf-api').value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
-      if (!url) { setAiStatus('err', T('Pehle Space URL daalein', 'Enter the Space URL first')); return; }
+      if (!url) { setAiStatus('err', T('', 'Enter the Space URL first')); return; }
       if (!/^https?:\/\//i.test(url)) {
-        setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+        setAiStatus('err', T('', 'The URL must start with http(s)://'));
         return;
       }
       RM.hfStems.setCfg(url, api);
-      setAiStatus('', T('सहेजा गया ✓', 'Saved ✓'));
-      A.toast(T('Hugging Face settings सहेजी गईं', 'Hugging Face settings saved'));
+      setAiStatus('', T('', 'Saved ✓'));
+      A.toast(T('', 'Hugging Face settings saved'));
       return;
     }
     if (be === 'dsp') {
-      A.toast(T('DSP Beta me kuch save karne ki zaroorat nahi', 'Nothing to save for DSP Beta'));
+      A.toast(T('', 'Nothing to save for DSP Beta'));
       return;
     }
     const urlIn = $('ai-url'), keyIn = $('ai-key');
     const url = urlIn.value.trim().replace(/\/+$/, '');
-    if (!url) { setAiStatus('err', T('Pehle Server URL daalein', 'Enter the server URL first')); return; }
+    if (!url) { setAiStatus('err', T('', 'Enter the server URL first')); return; }
     if (!/^https?:\/\//i.test(url)) {
-      setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+      setAiStatus('err', T('', 'The URL must start with http(s)://'));
       return;
     }
     setCfg(url, keyIn.value);
-    setAiStatus('', T('सहेजा गया ✓', 'Saved ✓'));
-    A.toast(T('AI Server settings सहेजी गईं', 'AI server settings saved'));
+    setAiStatus('', T('', 'Saved ✓'));
+    A.toast(T('', 'AI server settings saved'));
   }
 
   function initSettings() {

@@ -479,11 +479,11 @@ public class MainActivity extends ComponentActivity {
         final String perm = audioPermission();
         if (audioPermDeniedBefore && !shouldShowRequestPermissionRationale(perm)) {
             new AlertDialog.Builder(this)
-                    .setTitle("Permission needed \uD83D\uDE4F")
-                    .setMessage("RuhMix couldn't access your audio files. " +
-                            "Go to Settings > Apps > RuhMix > Permissions and allow it, " +
-                            "then you can pick audio.")
-                    .setPositiveButton("Open Settings", (d, w) -> {
+                    .setTitle("अनुमति चाहिए \uD83D\uDE4F")
+                    .setMessage("RuhMix आपकी ऑडियो फाइलों तक नहीं पहुंच पाया। " +
+                            "Settings > Apps > RuhMix > Permissions में जाकर अनुमति दें, " +
+                            "फिर ऑडियो चुन सकेंगे।")
+                    .setPositiveButton("सेटिंग्स खोलें", (d, w) -> {
                         try {
                             Intent i = new Intent(
                                     android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -494,7 +494,7 @@ public class MainActivity extends ComponentActivity {
                         pendingAudioAction = null;
                         cancelPendingFileChooser();
                     })
-                    .setNegativeButton("Not now", (d, w) -> {
+                    .setNegativeButton("अभी नहीं", (d, w) -> {
                         pendingAudioAction = null;
                         cancelPendingFileChooser();
                     })
@@ -503,12 +503,12 @@ public class MainActivity extends ComponentActivity {
             return;
         }
         new AlertDialog.Builder(this)
-                .setTitle("Audio access \uD83C\uDFB6")
-                .setMessage("RuhMix needs access to your audio files " +
-                        "so you can pick songs and create mixes.")
-                .setPositiveButton("Allow",
+                .setTitle("ऑडियो एक्सेस \uD83C\uDFB6")
+                .setMessage("ऑडियो चुनने और मिक्स बनाने के लिए RuhMix को " +
+                        "आपकी ऑडियो फाइलों तक पहुंच चाहिए।")
+                .setPositiveButton("अनुमति दें",
                         (d, w) -> requestPermissions(new String[]{perm}, REQ_AUDIO_PERM))
-                .setNegativeButton("Not now", (d, w) -> {
+                .setNegativeButton("अभी नहीं", (d, w) -> {
                     pendingAudioAction = null;
                     cancelPendingFileChooser();
                 })
@@ -525,11 +525,11 @@ public class MainActivity extends ComponentActivity {
         final String perm = Manifest.permission.RECORD_AUDIO;
         if (micPermDeniedBefore && !shouldShowRequestPermissionRationale(perm)) {
             new AlertDialog.Builder(this)
-                    .setTitle("Permission needed \uD83D\uDE4F")
-                    .setMessage("RuhMix couldn't access your microphone. " +
-                            "Go to Settings > Apps > RuhMix > Permissions and allow it, " +
-                            "then you can record.")
-                    .setPositiveButton("Open Settings", (d, w) -> {
+                    .setTitle("अनुमति चाहिए \uD83D\uDE4F")
+                    .setMessage("RuhMix आपके माइक्रोफोन तक नहीं पहुंच पाया। " +
+                            "Settings > Apps > RuhMix > Permissions में जाकर अनुमति दें, " +
+                            "फिर रिकॉर्डिंग कर सकेंगे।")
+                    .setPositiveButton("सेटिंग्स खोलें", (d, w) -> {
                         try {
                             Intent i = new Intent(
                                     android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -539,17 +539,17 @@ public class MainActivity extends ComponentActivity {
                         }
                         pendingMicAction = null;
                     })
-                    .setNegativeButton("Not now", (d, w) -> pendingMicAction = null)
+                    .setNegativeButton("अभी नहीं", (d, w) -> pendingMicAction = null)
                     .setCancelable(false)
                     .show();
             return;
         }
         new AlertDialog.Builder(this)
-                .setTitle("Microphone access \uD83C\uDFA4")
-                .setMessage("RuhMix needs your microphone so you can record audio.")
-                .setPositiveButton("Allow",
+                .setTitle("माइक्रोफोन एक्सेस \uD83C\uDFA4")
+                .setMessage("ऑडियो रिकॉर्ड करने के लिए RuhMix को माइक्रोफोन की अनुमति चाहिए।")
+                .setPositiveButton("अनुमति दें",
                         (d, w) -> requestPermissions(new String[]{perm}, REQ_MIC_PERM))
-                .setNegativeButton("Not now", (d, w) -> pendingMicAction = null)
+                .setNegativeButton("अभी नहीं", (d, w) -> pendingMicAction = null)
                 .setCancelable(false)
                 .show();
     }
@@ -569,7 +569,7 @@ public class MainActivity extends ComponentActivity {
                 audioPermDeniedBefore = true;
                 cancelPendingFileChooser();
                 Toast.makeText(this,
-                        "Permission nahi mila \u2014 Settings > Apps > RuhMix me allow karo \uD83D\uDE4F",
+                        "अनुमति नहीं मिली \u2014 Settings > Apps > RuhMix में जाकर अनुमति दें \uD83D\uDE4F",
                         Toast.LENGTH_LONG).show();
             }
         } else if (requestCode == REQ_MIC_PERM) {
@@ -580,9 +580,9 @@ public class MainActivity extends ComponentActivity {
                 if (after != null) after.run();
             } else {
                 micPermDeniedBefore = true;
-                callJs("if(window.onRecordingError){window.onRecordingError('Microphone permission nahi mili')}");
+                callJs("if(window.onRecordingError){window.onRecordingError('माइक्रोफोन की अनुमति नहीं मिली')}");
                 Toast.makeText(this,
-                        "Permission nahi mila \u2014 Settings > Apps > RuhMix me allow karo \uD83D\uDE4F",
+                        "अनुमति नहीं मिली \u2014 Settings > Apps > RuhMix में जाकर अनुमति दें \uD83D\uDE4F",
                         Toast.LENGTH_LONG).show();
             }
         }
@@ -709,7 +709,7 @@ public class MainActivity extends ComponentActivity {
             String p = path.startsWith("file://") ? path.substring(7) : path;
             File file = new File(p);
             if (!file.exists()) {
-                Toast.makeText(this, "File nahi mili \uD83D\uDE1E", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "फ़ाइल नहीं मिली \uD83D\uDE1E", Toast.LENGTH_LONG).show();
                 return;
             }
             Uri uri = FileProvider.getUriForFile(this, FILEPROVIDER_AUTH, file);
@@ -721,7 +721,7 @@ public class MainActivity extends ComponentActivity {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(Intent.createChooser(i, "Share via"));
         } catch (Exception e) {
-            Toast.makeText(this, "Share fail ho gaya \uD83D\uDE1E", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "शेयर नहीं हो पाया \uD83D\uDE1E", Toast.LENGTH_LONG).show();
         }
     }
 

@@ -6,13 +6,21 @@
    Auto-save to localStorage, crash-recovery banner on unclean exit.
 
    Ops (applied in order by applyOps):
-     {t:'trim', a, b}    keep [a,b] seconds
-     {t:'cut', a, b}     remove [a,b] seconds
-     {t:'paste', at}     insert clipboard at `at` (clipboard is in-memory)
+     {t:'trim', a, b}    keep [a,b] seconds of the CURRENT VIEW
+     {t:'cut', a, b}     remove [a,b] seconds of the CURRENT VIEW
+     {t:'paste', at}     insert clipboard at `at` seconds of the CURRENT VIEW
+                         (clipboard is in-memory)
      {t:'fadein', dur}   linear fade-in over dur seconds (from view start)
      {t:'fadeout', dur}  linear fade-out over dur seconds (to view end)
      {t:'gain', db}      multiply view by dB
      {t:'reverse'}        reverse the view
+   Structural-op coordinates (a/b/at) are ALWAYS in the current view's
+   seconds — i.e. relative to the result of all preceding ops, exactly
+   what the user sees on screen. (Round-6 fix: pehle ye original-buffer
+   coordinates me lagte the — trim/cut ke baad cut/paste galat jagah ya
+   be-asar hota tha.) deserialize() har op validate karta hai: null,
+   unknown type ya non-numeric fields wale ops chup-chaap drop hote hain
+   taaki ek bhrasht op poora project na duboye.
    Live (non-op) params — speed, volume, pan, loop — are settings, not ops.
    ===================================================================== */
 window.RM = window.RM || {};
@@ -23,6 +31,11 @@ RM.proj = (function () {
   const LS_CLEAN = 'ruhmix.cleanExit.v1';
 
   let clipboard = null; // AudioBuffer, in-memory only
+  // Har clipboard change par badhta hai. applyOps ka viewCache sirf op-sig
+  // par key karta tha — clipboard BADALNE par (copy A -> paste -> undo ->
+  // copy B -> paste) sig same rehta aur PURANA (stale) view wapas milta tha.
+  // clipGen ko sig me jodna is stale-cache ka root fix hai.
+  let clipGen = 0;
   const viewCache = new WeakMap(); // buffer -> {sig, view}
 
   function uid() { return 'p' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36); }
@@ -56,12 +69,41 @@ RM.proj = (function () {
   }
   function deserialize(s) {
     try {
-      const o = JSON.parse(s);
+      // Round-6 (W3): kabhi plain objects bhi aa sakte hain (hand-edit) —
+      // sirf JSON strings expect karne par poori library silently khaali dikhti thi.
+      const o = typeof s === 'string' ? JSON.parse(s) : s;
       if (!o || !o.id) return null;
       o.settings = Object.assign(blankSettings(), o.settings || {});
-      o.ops = Array.isArray(o.ops) ? o.ops : [];
+      o.ops = sanitizeOps(o.ops);
       return o;
     } catch (e) { return null; }
+  }
+
+  // Op validation (root fix — Round-6 fuzz): bhrasht/hand-edited save me
+  // null entries, unknown op types ya non-numeric fields applyOps ko gira
+  // dete the (TypeError / NaN-length buffer -> har render fail -> project
+  // "poisoned"). Yahan sakhti se saaf karo: kharab op drop, project khule.
+  const OP_FIELDS = {
+    trim: ['a', 'b'], cut: ['a', 'b'], paste: ['at'],
+    fadein: ['dur'], fadeout: ['dur'], gain: ['db'], reverse: [],
+  };
+  function sanitizeOps(ops) {
+    if (!Array.isArray(ops)) return [];
+    const out = [];
+    for (const op of ops) {
+      if (!op || typeof op !== 'object' || typeof op.t !== 'string') continue;
+      const fields = OP_FIELDS[op.t];
+      if (!fields) continue; // unknown op type — purana/haath se bigda data
+      const clean = { t: op.t };
+      let ok = true;
+      for (const f of fields) {
+        const v = Number(op[f]);
+        if (!Number.isFinite(v)) { ok = false; break; }
+        clean[f] = v;
+      }
+      if (ok) out.push(clean);
+    }
+    return out;
   }
 
   /* ---------- project library ---------- */
@@ -129,6 +171,9 @@ RM.proj = (function () {
         };
       }
       if (s.remix) p.settings.remixStyle = s.remix.style || null;
+      // Round-6 (W7 Issue 8): Custom ke tempo/sliders bhi save karo, warna
+      // reopen par custom settings kho jati thin.
+      if (s.remix && s.remix.custom) p.settings.remixCustom = JSON.parse(JSON.stringify(s.remix.custom));
     } catch (e) {}
   }
 
@@ -154,6 +199,8 @@ RM.proj = (function () {
       if (typeof s.remixStyle !== 'undefined') {
         app.state.remix = app.state.remix || {};
         app.state.remix.style = s.remixStyle || null;
+        // Round-6 (W7 Issue 8): Custom settings restore.
+        if (s.remixCustom) app.state.remix.custom = JSON.parse(JSON.stringify(s.remixCustom));
         changed.remix = true;
       }
       return changed;
@@ -199,53 +246,73 @@ RM.proj = (function () {
   /* ---------- op-list rendering (non-destructive) ---------- */
   function sig(ops) { return JSON.stringify(ops); }
 
-  function setClipboard(buf) { clipboard = buf; }
+  function setClipboard(buf) { clipboard = buf; clipGen++; }
   function getClipboard() { return clipboard; }
-  function clearClipboard() { clipboard = null; }
+  function clearClipboard() { clipboard = null; clipGen++; }
+  // Round-6: paste ops ka clipboard in-memory hai — app restart ke baad
+  // reopen par paste ops render nahi honge (clipboard khaali). openProject
+  // me isko check karke user ko Hindi me batana chahiye (silent audio
+  // change na ho). hasPasteOps(p): project me paste ops hain ya nahi.
+  function hasPasteOps(p) {
+    try { return !!(p && Array.isArray(p.ops) && p.ops.some((o) => o && o.t === 'paste')); }
+    catch (e) { return false; }
+  }
 
   // Applies ops to a COPY of buffer. Original untouched. Chunked.
   function applyOps(buffer, ops, onProgress) {
-    const s = sig(ops);
+    const s = sig(ops) + '|clip' + clipGen;
     const cached = viewCache.get(buffer);
     if (cached && cached.sig === s) return Promise.resolve(cached.view);
 
     const sr = buffer.sampleRate;
     const nCh = buffer.numberOfChannels;
-    // Stage 1: structural ops (trim/cut/paste) -> build segment list
+    // Stage 1: structural ops (trim/cut/paste) -> build segment list.
+    // ROOT FIX (Round-6): op coordinates hamesha CURRENT VIEW ke hote hain
+    // (pichhle ops ka result — wahi jo user screen par dekhta hai), original
+    // buffer ke nahi. Pehle trim ke baad cut/paste original coords me lagta
+    // tha: galat jagah kat-ta ya bilkul be-asar hota tha. Ulte (a>b) range
+    // ab swap hote hain — pehle ulta cut beech ka hissa DUPLICATE kar deta
+    // tha. Segments internally source-buffer coordinates me rehte hain.
     let segs = [{ buf: buffer, a: 0, b: buffer.length }]; // sample ranges
-    const s2s = (sec) => Math.max(0, Math.min(buffer.length, Math.round(sec * sr)));
-
-    const cutRange = (aS, bS) => {
+    const sanNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+    const s2s = (sec) => Math.round(sanNum(sec) * sr); // view seconds -> view samples
+    const viewLen = () => { let t = 0; for (const sg of segs) t += Math.max(0, sg.b - sg.a); return t; };
+    // View-relative [aS, bS) ko source segments me kaato. Clamp + normalize;
+    // engine kabhi crash ya duplicate nahi karega.
+    const sliceView = (aS, bS) => {
+      const total = viewLen();
+      aS = Math.max(0, Math.min(total, Math.round(aS)));
+      bS = Math.max(0, Math.min(total, Math.round(bS)));
+      if (bS < aS) { const tmp = aS; aS = bS; bS = tmp; }
       const out = [];
-      segs.forEach((sg) => {
-        if (bS <= sg.a || aS >= sg.b) { out.push(sg); return; }
-        if (aS > sg.a) out.push({ buf: sg.buf, a: sg.a, b: Math.min(aS, sg.b) });
-        if (bS < sg.b) out.push({ buf: sg.buf, a: Math.max(bS, sg.a), b: sg.b });
-      });
-      segs = out;
+      let pos = 0;
+      for (const sg of segs) {
+        const len = Math.max(0, sg.b - sg.a);
+        const s0 = pos, s1 = pos + len;
+        pos = s1;
+        const ia = Math.max(aS, s0), ib = Math.min(bS, s1);
+        if (ib > ia) out.push({ buf: sg.buf, a: sg.a + (ia - s0), b: sg.a + (ib - s0) });
+      }
+      return out;
     };
 
     for (const op of ops) {
+      if (!op || typeof op !== 'object' || typeof op.t !== 'string') continue; // bhrasht entry skip
       if (op.t === 'trim') {
-        const aS = s2s(op.a), bS = s2s(op.b);
-        segs = [{ buf: buffer, a: aS, b: Math.max(aS + 1, bS) }];
+        segs = sliceView(s2s(op.a), s2s(op.b));
       } else if (op.t === 'cut') {
-        cutRange(s2s(op.a), s2s(op.b));
+        const total = viewLen(); // sliceView se pehle — segs abhi purane hain
+        const aS = s2s(op.a), bS = s2s(op.b);
+        const lo = Math.min(aS, bS), hi = Math.max(aS, bS);
+        segs = sliceView(0, lo).concat(sliceView(hi, total));
       } else if (op.t === 'paste' && clipboard) {
+        const total = viewLen(); // sliceView se pehle
         const atS = s2s(op.at);
-        const out = [];
-        let done = false;
-        segs.forEach((sg) => {
-          if (!done && atS >= sg.a && atS <= sg.b) {
-            if (atS > sg.a) out.push({ buf: sg.buf, a: sg.a, b: atS });
-            out.push({ buf: clipboard, a: 0, b: clipboard.length });
-            if (atS < sg.b) out.push({ buf: sg.buf, a: atS, b: sg.b });
-            done = true;
-          } else out.push(sg);
-        });
-        if (!done) out.push({ buf: clipboard, a: 0, b: clipboard.length });
-        segs = out;
+        segs = sliceView(0, atS)
+          .concat([{ buf: clipboard, a: 0, b: clipboard.length }])
+          .concat(sliceView(atS, total));
       }
+      // unknown op types: ignore (deserialize inhe pehle hi drop karta hai)
     }
 
     let total = 0;
@@ -280,8 +347,10 @@ RM.proj = (function () {
       //  `jobs[di++]()` → TypeError, saare sample ops toote hue the.)
       const jobs = [];
       for (const op of ops) {
+        if (!op || typeof op !== 'object' || typeof op.t !== 'string') continue;
         if (op.t === 'fadein' || op.t === 'fadeout') {
-          const fl = Math.min(view.length, Math.max(1, Math.round((op.dur || 1) * sr)));
+          const durN = sanNum(op.dur);
+          const fl = Math.min(view.length, Math.max(1, Math.round((durN || 1) * sr)));
           const tt = op.t;
           jobs.push((onP) => RM.audio.runChunked(view.length, 1 << 18, (a, b) => {
             for (let c = 0; c < nCh; c++) {
@@ -295,7 +364,7 @@ RM.proj = (function () {
             }
           }, onP));
         } else if (op.t === 'gain') {
-          const g = Math.pow(10, (op.db || 0) / 20);
+          const g = Math.pow(10, (sanNum(op.db)) / 20);
           jobs.push((onP) => RM.audio.runChunked(view.length, 1 << 18, (a, b) => {
             for (let c = 0; c < nCh; c++) {
               const d = view.getChannelData(c);
@@ -339,7 +408,7 @@ RM.proj = (function () {
     needsRecovery, discardAutosave,
     snapshotLive, restoreLive,
     applyOps, invalidateView,
-    setClipboard, getClipboard, clearClipboard,
+    setClipboard, getClipboard, clearClipboard, hasPasteOps,
     blankSettings,
   };
 })();

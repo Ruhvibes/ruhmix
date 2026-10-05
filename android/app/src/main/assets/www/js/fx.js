@@ -31,6 +31,120 @@ RM.fx = (function () {
     vshape:  { name: 'V-Shape',     g: [4, -3, 4] },
   };
 
+  /* ================= 8D / 3D / 16D spatial auto-pan =====================
+     Real DSP (koi fake nahi):
+       input -> dry ----------------------+------------------> output
+                +-> mono-sum -> pan(LFO) -> wet +
+                +-> pan -> rvSend -> convolver -> rvWet +   (space feel)
+                +-> dly(LFO2) -> dlyWet +                   (16D width)
+     - Sirf AMPLITUDE panning (StereoPannerNode, equal-power): koi phase
+       trick nahi, isliye mono sum (L+R) me signal kabhi gayab nahi hota.
+       dry+wet hamesha 1 rehta hai -> mono sum [1.0, 1.414] ke andar.
+     - Panner ko TRUE MONO (1ch) feed hota hai: Chrome ka StereoPannerNode
+       stereo input pe textbook curve nahi deta (measured: ~2x hot,
+       unpredictable). Mono input pe bilkul textbook hai.
+     - LFO kabhi stop nahi hota (click-free); enable/disable depth/wet
+       gains ko glide karta hai (tc 0.3) -> abrupt pan jump nahi.
+     - Slider changes dezippered hain (setTargetAtTime, tc 0.03).
+     - Kisi bhi BaseAudioContext (realtime/offline) me chalta hai -> export
+       render me effect pura sunai deta hai (oscillator offline bhi chalta hai).
+     ===================================================================== */
+  const SPATIAL_MODES = {
+    off:  { speed: 0.12, depth: 0,    wet: 0,    reverb: 0,    delayWet: 0    },
+    '8d': { speed: 0.12, depth: 0.85, wet: 0.90, reverb: 0.30, delayWet: 0    },
+    '3d': { speed: 0.07, depth: 0.45, wet: 0.55, reverb: 0.15, delayWet: 0    },
+    '16d':{ speed: 0.50, depth: 1.00, wet: 1.00, reverb: 0.20, delayWet: 0.20 },
+  };
+
+  function makeSpatial(ctx) {
+    const N = {};
+    const G = (v) => { const g = ctx.createGain(); g.gain.value = v; return g; };
+    // dezipper: har param change setTargetAtTime se (tc default 0.03)
+    const t = (param, v, tc) => param.setTargetAtTime(v, ctx.currentTime, tc == null ? 0.03 : tc);
+
+    N.input = G(1);
+    N.dry = G(1);
+    // Wet voice: pehle TRUE MONO (1ch) downmix, phir panner. Wajah (measured,
+    // Chrome): StereoPannerNode stereo input pe textbook equal-power NAHI
+    // deta — dono channels sum karke pan karta hai (~2x hot, unpredictable
+    // matrix). 1-channel mono input pe bilkul textbook hai (pan=0 -> 0.707,
+    // pan=+-1 -> hard). Isliye splitter -> 0.5+0.5 -> ChannelMerger(1).
+    N.split = ctx.createChannelSplitter(2);
+    N.sumL = G(0.5); N.sumR = G(0.5);
+    N.mono = ctx.createChannelMerger(1); // 1-channel output
+    N.pan = ctx.createStereoPanner(); N.pan.pan.value = 0;
+    N.wet = G(0);
+    // LFO -> depth -> pan.pan (depth 0 = centered, transparent)
+    N.lfo = ctx.createOscillator(); N.lfo.type = 'sine'; N.lfo.frequency.value = 0.12;
+    N.depth = G(0);
+    N.lfo.connect(N.depth); N.depth.connect(N.pan.pan);
+    N.lfo.start();
+    // space: post-pan reverb send (halki, 1.0s mono IR)
+    N.rvSend = G(0);
+    N.rv = ctx.createConvolver(); N.rv.buffer = buildIR(ctx, 1.0);
+    N.rvWet = G(0);
+    N.pan.connect(N.rvSend); N.rvSend.connect(N.rv); N.rv.connect(N.rvWet);
+    // 16D width: halka modulated delay — mono-compat ke liye bahut subtle
+    // (±2.5ms, wet 0.2): zyada depth mono sum me comb-filter dips deta hai.
+    N.dly = ctx.createDelay(0.05); N.dly.delayTime.value = 0.012;
+    N.dlyWet = G(0);
+    N.lfo2 = ctx.createOscillator(); N.lfo2.type = 'sine'; N.lfo2.frequency.value = 0.5;
+    N.lfo2g = G(0.0025);
+    N.lfo2.connect(N.lfo2g); N.lfo2g.connect(N.dly.delayTime); N.lfo2.start();
+
+    N.output = G(1);
+    N.input.connect(N.dry); N.dry.connect(N.output);
+    N.input.connect(N.split);
+    N.split.connect(N.sumL, 0); N.split.connect(N.sumR, 1);
+    N.sumL.connect(N.mono, 0, 0); N.sumR.connect(N.mono, 0, 0);
+    N.mono.connect(N.pan); N.pan.connect(N.wet); N.wet.connect(N.output);
+    N.rvWet.connect(N.output);
+    N.input.connect(N.dly); N.dly.connect(N.dlyWet); N.dlyWet.connect(N.output);
+
+    const st = { mode: 'off', speed: 0.12, depth: 1 };
+    function targets() {
+      const m = SPATIAL_MODES[st.mode] || SPATIAL_MODES.off;
+      const k = clamp(st.depth, 0, 1); // depth slider = intensity
+      return {
+        freq: clamp(st.speed, 0.05, 1),
+        depth: m.depth * k,
+        wet: m.wet * k, dry: 1 - m.wet * k,
+        rvSend: m.reverb > 0 ? 1 : 0, rvWet: m.reverb * k,
+        dlyWet: m.delayWet * k,
+      };
+    }
+    // glide: enable/disable dheere (tc 0.3), sliders tez-dezippered (tc 0.03)
+    function apply(tc) {
+      const tg = targets();
+      t(N.lfo.frequency, tg.freq, tc); t(N.lfo2.frequency, tg.freq, tc);
+      t(N.depth.gain, tg.depth, tc);
+      t(N.wet.gain, tg.wet, tc); t(N.dry.gain, tg.dry, tc);
+      t(N.rvSend.gain, tg.rvSend, tc); t(N.rvWet.gain, tg.rvWet, tc);
+      t(N.dlyWet.gain, tg.dlyWet, tc);
+    }
+    const api = {
+      input: N.input, output: N.output, nodes: N,
+      // Mode badlo -> us mode ke default speed/depth, glide ke saath.
+      // (Preset restore iske baad setSpeed/setDepth call karta hai.)
+      setMode(mode) {
+        st.mode = SPATIAL_MODES[mode] ? mode : 'off';
+        const m = SPATIAL_MODES[st.mode];
+        st.speed = m.speed; st.depth = 1;
+        apply(0.3);
+      },
+      setSpeed(hz) { st.speed = clamp(+hz || 0.12, 0.05, 1); apply(0.03); },
+      setDepth(d) { st.depth = clamp(+d || 0, 0, 1); apply(0.03); },
+      getSettings() { return { mode: st.mode, speed: +st.speed.toFixed(3), depth: +st.depth.toFixed(3) }; },
+      dispose() {
+        try { N.lfo.stop(); } catch (e) {}
+        try { N.lfo2.stop(); } catch (e) {}
+        Object.keys(N).forEach((k) => { try { N[k].disconnect(); } catch (e) {} });
+      },
+    };
+    apply(0.03);
+    return api;
+  }
+
   function driveCurve(amount) {
     const n = 256, curve = new Float32Array(n);
     if (amount <= 0) {
@@ -39,7 +153,7 @@ RM.fx = (function () {
       for (let i = 0; i < n; i++) curve[i] = (i / (n - 1)) * 2 - 1;
       return curve;
     }
-    const k = 1 + amount * 40;
+    const k = 1 + amount * 5;
     for (let i = 0; i < n; i++) {
       const x = (i / (n - 1)) * 2 - 1;
       curve[i] = Math.tanh(k * x) / Math.tanh(k);
@@ -87,7 +201,11 @@ RM.fx = (function () {
     N.filter.Q.value = 0.707; // Butterworth: Q=1 (default) 15.5kHz pe +0.73dB bump deta tha "flat" chain me
 
     // soft drive
-    N.drive = ctx.createWaveShaper(); N.drive.curve = driveCurve(0); N.drive.oversample = '2x';
+    // Round-6 (W6-verify): oversample '2x'/'4x' Chromium me LINEAR curve pe bhi
+    // transparent nahi hai (measured: maxDiff 0.765 @2x, 0.5 @4x, 0 @none) —
+    // drive=0 pe chain colored ho jati thi. Anti-aliasing ka koi measured
+    // fayda bhi nahi mila (drive=0.5 pe hfRatio same). Isliye hamesha 'none'.
+    N.drive = ctx.createWaveShaper(); N.drive.curve = driveCurve(0); N.drive.oversample = 'none';
 
     // chorus: dry + modulated delay voice
     N.chDry = G(1);
@@ -128,6 +246,13 @@ RM.fx = (function () {
     N.output = G(1);
     N.clip = RM.audio.createSafetyClipper(ctx); // absolute final node
 
+    // 8D/3D/16D spatial auto-pan: limiter ke BAAD (comp/limiter kaam kar chuke
+    // hain, pan ke baad dynamics nahi badalte), output se pehle. Mode 'off'
+    // me transparent passthrough (dry=1).
+    N.spatial = makeSpatial(ctx);
+    N.limiter.connect(N.spatial.input);
+    N.spatial.output.connect(N.output);
+
     // Static wiring — final topology (documented):
     //   input -> eq3 -> eq10 -> filter -> drive -+-> chorusDry -> comp
     //                                            +-> chorusWet -> comp
@@ -136,6 +261,7 @@ RM.fx = (function () {
     //   comp -> limiter -> output
     // Echo and reverb are parallel SENDS (never inserts), so toggling them
     // never breaks the dry path.
+    // Spatial (8D/3D/16D): limiter -> spatial.input ... spatial.output -> output
     N.input.connect(N.eqBass);
     N.eqBass.connect(N.eqMid); N.eqMid.connect(N.eqTreble);
     let head = N.eqTreble;
@@ -150,7 +276,10 @@ RM.fx = (function () {
     N.drive.connect(N.rvSend);                                  // reverb send
     N.rvSend.connect(N.rvHP); N.rvHP.connect(N.convolver);
     N.convolver.connect(N.rvWet); N.rvWet.connect(N.comp);      // reverb return
-    N.comp.connect(N.limiter); N.limiter.connect(N.output);
+    N.comp.connect(N.limiter);
+    // NOTE: limiter -> output DIRECT connect nahi hai — limiter -> spatial.input
+    // -> spatial.output -> output (upar wired). Direct connect wapas jodne se
+    // signal DOUBLE (+6dB) ho jayega.
     N.output.connect(N.clip); // clipper is the chain's output: 0 dBFS ceiling
 
     const t = (param, v, tc) => param.setTargetAtTime(v, ctx.currentTime, tc || 0.015);
@@ -195,6 +324,9 @@ RM.fx = (function () {
           case 'compAttack': t(N.comp.attack, clamp(v, 0.001, 0.5), 0.05); break;
           case 'compRelease': t(N.comp.release, clamp(v, 0.01, 2), 0.05); break;
           case 'outGain': t(N.output.gain, clamp(v, 0, 2)); break;
+          case 'spatialMode': N.spatial.setMode(String(value)); break; // string! v (number) nahi
+          case 'spatialSpeed': N.spatial.setSpeed(v); break;
+          case 'spatialDepth': N.spatial.setDepth(v); break;
         }
       },
       applyPreset(p) { // p: {eq3:[b,m,t], eq10:[..], filter, drive, chorus:{on,rate,depth}, echo:{on,time,fb,wet}, reverb:{on,room,wet}, comp:{on,thr,ratio,atk,rel}, out}
@@ -204,14 +336,46 @@ RM.fx = (function () {
         if (p.filter != null) api.set('filterCutoff', p.filter);
         if (p.drive != null) api.set('drive', p.drive);
         if (p.chorus) { api.set('chorusOn', p.chorus.on); api.set('chorusRate', p.chorus.rate || 1.2); api.set('chorusDepth', p.chorus.depth || 0.004); }
-        if (p.echo) { api.set('echoOn', p.echo.on); api.set('echoTime', p.echo.time || 0.375); api.set('echoFeedback', p.echo.fb || 0.35); api.set('echoWet', p.echo.wet != null ? p.echo.wet : 0.35); }
-        if (p.reverb) { api.set('reverbOn', p.reverb.on); if (p.reverb.room) api.set('reverbRoom', p.reverb.room); api.set('reverbWet', p.reverb.wet != null ? p.reverb.wet : 0.4); }
-        if (p.comp) { api.set('compOn', p.comp.on); api.set('compThreshold', p.comp.thr != null ? p.comp.thr : -18); api.set('compRatio', p.comp.ratio || 4); api.set('compAttack', p.comp.atk || 0.01); api.set('compRelease', p.comp.rel || 0.2); }
+        if (p.echo) {
+          api.set('echoOn', p.echo.on);
+          api.set('echoTime', p.echo.time || 0.375);
+          api.set('echoFeedback', p.echo.fb || 0.35);
+          // Round-6 (W6): echoOn(false) ke baad echoWet set karne se OFF toot jata tha —
+          // default chain me echo sneak-ON tha (wet 0.35) jabki UI me OFF dikhta tha.
+          if (p.echo.on) api.set('echoWet', p.echo.wet != null ? p.echo.wet : 0.35);
+        }
+        if (p.reverb) {
+          api.set('reverbOn', p.reverb.on);
+          if (p.reverb.room) api.set('reverbRoom', p.reverb.room);
+          // Round-6 (W6): reverbOn(false) ke baad reverbWet set karne se OFF toot jata tha —
+          // default chain me hall reverb sneak-ON tha (wet 0.4, +7.45dB RMS) jabki UI OFF tha.
+          if (p.reverb.on) api.set('reverbWet', p.reverb.wet != null ? p.reverb.wet : 0.4);
+        }
+        if (p.comp) {
+          api.set('compOn', p.comp.on);
+          // Round-6 (W5): compOn(false) ke baad threshold/ratio set karne se
+          // bypass toot jata tha (flatFx "bypass" asal me compress karta tha).
+          if (p.comp.on !== false) {
+            api.set('compThreshold', p.comp.thr != null ? p.comp.thr : -18);
+            api.set('compRatio', p.comp.ratio || 4);
+            api.set('compAttack', p.comp.atk || 0.01);
+            api.set('compRelease', p.comp.rel || 0.2);
+          }
+        }
         if (p.out != null) api.set('outGain', p.out);
+        // 8D/3D/16D: preset me save/restore (plain JSON -> projects/autosave me apne aap)
+        if (p.spatial) {
+          if (p.spatial.mode) api.set('spatialMode', p.spatial.mode);
+          if (p.spatial.speed != null) api.set('spatialSpeed', p.spatial.speed);
+          if (p.spatial.depth != null) api.set('spatialDepth', p.spatial.depth);
+        }
       },
+      getSpatial() { return N.spatial.getSettings(); },
       dispose() {
+        try { N.spatial.dispose(); } catch (e) {} // pehle: iske LFOs stop hon
         try { N.chLFO.stop(); } catch (e) {}
         Object.keys(N).forEach(k => {
+          if (k === 'spatial') return; // api object hai, node nahi (upar dispose ho chuka)
           const n = N[k];
           (Array.isArray(n) ? n : [n]).forEach(x => { try { x.disconnect(); } catch (e) {} });
         });
@@ -266,5 +430,5 @@ RM.fx = (function () {
     lofi:    { label: 'Lo-Fi Tape',    eqB: 2, eqM: 0, eqT: -5, thr: -10, knee: 14, ratio: 2,  atk: 0.02, rel: 0.5, makeup: 0.95 },
   };
 
-  return { makeChain, makeMasterChain, REVERB_ROOMS, EQ_PRESETS, EQ10_FREQS, MASTER_PRESETS };
+  return { makeChain, makeMasterChain, makeSpatial, SPATIAL_MODES, REVERB_ROOMS, EQ_PRESETS, EQ10_FREQS, MASTER_PRESETS };
 })();

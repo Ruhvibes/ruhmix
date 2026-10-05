@@ -12,7 +12,7 @@ RM.remix = (function () {
   // rate: playbackRate multiplier. HONEST NOTE used in UI: slowing down also
   // lowers pitch — tempo and pitch are linked in Web Audio (no independent
   // pitch-shift in v1).
-  const PITCH_NOTE = 'Pitch tempo ke saath badalta hai (independent pitch-shift v1 me nahi).';
+  const PITCH_NOTE = 'Pitch changes with tempo (independent pitch-shift is not in v1).';
 
   const STYLES = [
     { id: 'commercial', name: 'Commercial',
@@ -28,14 +28,14 @@ RM.remix = (function () {
       fx: { eq3: [2, 1, -6], filter: 4200, drive: 0.25,
             chorus: { on: false }, echo: { on: true, time: 0.42, fb: 0.35, wet: 0.25 },
             reverb: { on: true, room: 'room', wet: 0.3 },
-            comp: { on: true, thr: -14, ratio: 2.5, atk: 0.015, rel: 0.35 }, out: 1.0 } },
+            comp: { on: true, thr: -14, ratio: 2.5, atk: 0.015, rel: 0.35 }, out: 0.81 } },
     { id: 'slowed', name: 'Slowed+Reverb',
       tag: 'Deep & dreamy',
       rate: 0.80,
       fx: { eq3: [4, 1, -2], filter: 12000, drive: 0,
             chorus: { on: false }, echo: { on: false },
             reverb: { on: true, room: 'church', wet: 0.55 },
-            comp: { on: true, thr: -14, ratio: 3, atk: 0.01, rel: 0.3 }, out: 1.0 },
+            comp: { on: true, thr: -14, ratio: 3, atk: 0.01, rel: 0.3 }, out: 0.92 },
       note: PITCH_NOTE },
     { id: 'emotional', name: 'Emotional',
       tag: 'Soft & heartfelt',
@@ -51,14 +51,14 @@ RM.remix = (function () {
       fx: { eq3: [3, 0, 4], filter: 19000, drive: 0.12,
             chorus: { on: false }, echo: { on: true, time: 0.28, fb: 0.35, wet: 0.3 },
             reverb: { on: true, room: 'hall', wet: 0.3 },
-            comp: { on: true, thr: -18, ratio: 5, atk: 0.004, rel: 0.18 }, out: 1.1 } },
+            comp: { on: true, thr: -18, ratio: 5, atk: 0.004, rel: 0.18 }, out: 0.96 } },
     { id: 'trap', name: 'Trap',
       tag: 'Heavy 808 feel',
       rate: 0.96,
       fx: { eq3: [7, 1, 1], filter: 18000, drive: 0.15,
             chorus: { on: false }, echo: { on: true, time: 0.33, fb: 0.4, wet: 0.28 },
             reverb: { on: true, room: 'room', wet: 0.25 },
-            comp: { on: true, thr: -16, ratio: 4, atk: 0.005, rel: 0.2 }, out: 1.05 } },
+            comp: { on: true, thr: -16, ratio: 4, atk: 0.005, rel: 0.2 }, out: 0.90 } },
     { id: 'synthwave', name: 'Synthwave',
       tag: 'Retro neon',
       rate: 1.00,
@@ -66,7 +66,7 @@ RM.remix = (function () {
             chorus: { on: true, rate: 1.4, depth: 0.005 },
             echo: { on: true, time: 0.375, fb: 0.38, wet: 0.32 },
             reverb: { on: true, room: 'hall', wet: 0.35 },
-            comp: { on: true, thr: -15, ratio: 3.5, atk: 0.008, rel: 0.22 }, out: 1.05 } },
+            comp: { on: true, thr: -15, ratio: 3.5, atk: 0.008, rel: 0.22 }, out: 0.92 } },
     { id: 'acoustic', name: 'Acoustic',
       tag: 'Natural & clean',
       rate: 1.00,
@@ -85,13 +85,18 @@ RM.remix = (function () {
     { id: 'vocalfocus', name: 'Vocal Focus',
       tag: 'Voice forward',
       rate: 1.00,
-      fx: { eq3: [-2, 4, 3], filter: 19000, drive: 0,
+      // MEASURED 2026-10 (signal-level): eq3 [-2,4,3] + out 1.05 drove hot
+      // sustained tones into the chain limiter -> -21dB THD (eq flat: -80dB).
+      // [-2,3,2] still tickled it (-26dB); [-2,2,2] + out 1.0 sits safely
+      // below the limiter knee -> -59dB THD, inaudible, while keeping a
+      // clear vocal-forward tilt (-2 bass / +2 presence+air).
+      fx: { eq3: [-2, 2, 2], filter: 19000, drive: 0,
             chorus: { on: false }, echo: { on: false },
             reverb: { on: true, room: 'room', wet: 0.2 },
-            comp: { on: true, thr: -16, ratio: 4, atk: 0.005, rel: 0.18 }, out: 1.05 },
-      note: 'Presence EQ se vocal aage aata hai. Stronger separation ke liye Stems me "Vocal Cut (DSP)" dekhein.' },
+            comp: { on: true, thr: -16, ratio: 4, atk: 0.005, rel: 0.18 }, out: 1.0 },
+      note: 'Presence EQ brings vocals forward. For stronger separation, try "Vocal Cut (DSP)" in Stems.' },
     { id: 'custom', name: 'Custom',
-      tag: 'Apne haath se',
+      tag: 'Manual',
       rate: 1.00, custom: true,
       fx: { eq3: [0, 0, 0], filter: 19000, drive: 0,
             chorus: { on: false }, echo: { on: false },
@@ -164,11 +169,11 @@ RM.remix = (function () {
       opts = opts || {};
       const style = get(styleId);
       const roles = (pack && pack.roles ? pack.roles : []).filter((r) => r && r.buffer);
-      if (roles.length < 4) return Promise.reject(new Error('4 stems chahiye — pack adhura hai.'));
+      if (roles.length < 2) return Promise.reject(new Error('At least 2 stems are needed — the pack is incomplete.'));
       const OC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
       if (!OC) return Promise.reject(new Error('OfflineAudioContext not supported.'));
       const prog = (label, frac) => { try { if (onProgress) onProgress(label, frac); } catch (e) {} };
-      prog('BPM पहचाना जा रहा है…', 0.02);
+      prog('Detecting BPM…', 0.02);
 
       const sr = roles[0].buffer.sampleRate;
       // resample roles to a common sample rate if needed
@@ -179,9 +184,9 @@ RM.remix = (function () {
       return Promise.all(prep).then((bufs) => {
         const rb = roles.map((r, i) => ({ role: r.role, label: r.label, buffer: bufs[i] }));
         const bpmP = opts.bpm ? Promise.resolve(opts.bpm)
-          : RM.audio.detectBPM(rb[0].buffer, (p) => prog('BPM पहचाना जा रहा है…', 0.02 + p * 0.12));
+          : RM.audio.detectBPM(rb[0].buffer, (p) => prog('Detecting BPM…', 0.02 + p * 0.12));
         return bpmP.then((bpm) => {
-          prog('Stems तैयार हो रहे हैं…', 0.16);
+          prog('Preparing stems…', 0.16);
           const rate = (styleId === 'custom' && opts.customTempo) ? opts.customTempo : style.rate;
           // Custom style: honour the user's Custom-slider FX in stem mode too
           // (app.js passes opts.customFx; falls back to the flat default).
@@ -201,7 +206,7 @@ RM.remix = (function () {
           const xf = Math.min(2 * beat, 0.08 * D);
           const chains = [];
           rb.forEach((r, ri) => {
-            prog('Stems तैयार हो रहे हैं…', 0.16 + 0.10 * (ri / rb.length));
+            prog('Preparing stems…', 0.16 + 0.10 * (ri / rb.length));
             const src = oc.createBufferSource();
             src.buffer = r.buffer;
             src.playbackRate.value = rate; // BPM/beat sync via style rate
@@ -222,14 +227,14 @@ RM.remix = (function () {
             const outT = Math.max(secs[2][0], D - 3);
             g.gain.setValueAtTime(Math.max(0.0001, lv[2]), outT);
             g.gain.linearRampToValueAtTime(0.0001, D); // outro fade
-            src.connect(chain.input);
-            chain.output.connect(g);
-            g.connect(mixBus);
+            src.connect(g);
+            g.connect(chain.input);
+            chain.output.connect(mixBus);
             src.start(0);
           });
-          prog('Mix ho raha hai…', 0.30);
+          prog('Mixing…', 0.30);
           return oc.startRendering().then((rendered) => {
-            prog('Master ho raha hai…', 0.95);
+            prog('Mastering…', 0.95);
             chains.forEach((c) => { try { c.dispose(); } catch (e) {} });
             try { master.dispose(); } catch (e) {}
             prog('Ho gaya ✓', 1);

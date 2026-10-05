@@ -80,7 +80,7 @@ RM.wave = (function () {
       if (!view.buffer || !view.peaks.length) {
         g.fillStyle = '#5b6b8c'; g.font = `${Math.max(11, H * 0.16)}px sans-serif`;
         g.textAlign = 'center'; g.textBaseline = 'middle';
-        g.fillText('ऑडियो लोड करें', W / 2, H / 2);
+        g.fillText('Load audio', W / 2, H / 2);
         return;
       }
       const { a: wA, b: wB } = view.window();

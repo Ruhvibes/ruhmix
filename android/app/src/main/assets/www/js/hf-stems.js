@@ -29,18 +29,21 @@ window.RM = window.RM || {};
 RM.hfStems = (function () {
   let A = null;
   let $ = null;
-  const HI = () => { try { return (localStorage.getItem('ruhmix.lang') || 'hi') === 'hi'; } catch (e) { return true; } };
-  const T = (hi, en) => (HI() ? hi : en);
+  const HI = () => false; // English-only build: language locked to English
+  const T = (hi, en) => en; // English-only build
 
   const LS_KEY = 'rmx_ai_hf';
   const DEFAULT_API = 'inference';   // /gradio_api/info se verified
   const SSE_TIMEOUT = 5 * 60 * 1000; // 5 min
   const UPLOAD_TIMEOUT = 2 * 60 * 1000;
   const CALL_TIMEOUT = 60 * 1000;
+  // NOTE: let hai (const nahi) taaki Node torture suite isko fast-forward karke
+  // dead-download timeout verify kar sake — production me hamesha 3 min.
+  let DL_TIMEOUT_MS = 3 * 60 * 1000; // per stem download; dead connection pe stuck spinner nahi
 
   // Consent text — consent dialog me verbatim dikhaya jata hai. The Space is
   // the USER's own duplicate (setup guide), so the text says "aapke Space".
-  const CONSENT_HF = 'Free AI pe ~30-60 second lag sakta hai, roz ~6-10 gaane ki limit hoti hai. Aapka audio aapke Hugging Face Space (free AI server) par process hoga; processing khatm hote hi file delete ho jati hai. Is option me koi ad nahi hai — bilkul free.';
+  const CONSENT_HF = 'Free AI can take ~30-60 seconds, with a daily limit of ~6-10 songs. Your audio will be processed on your Hugging Face Space (free AI server); the file is deleted as soon as processing finishes. This option has no ads — completely free.';
 
   const st = {
     song: null,
@@ -164,6 +167,7 @@ RM.hfStems = (function () {
     }
     if (r.status === 503) throw { kind: 'asleep' };
     if (r.status === 429) throw { kind: 'quota' };
+    if (r.status >= 500) throw { kind: 'server', status: r.status };
     if (!r.ok) throw { kind: 'connect', status: r.status };
     const j = await r.json();
     if (!j || !j.event_id) throw { kind: 'process' };
@@ -209,6 +213,7 @@ RM.hfStems = (function () {
       const r = await fetch(spaceUrl + '/gradio_api/call/' + api + '/' + eventId, { signal: ctrl.signal });
       if (r.status === 503) throw { kind: 'asleep' };
       if (r.status === 429) throw { kind: 'quota' };
+      if (r.status >= 500) throw { kind: 'server', status: r.status };
       if (!r.ok) throw { kind: 'connect', status: r.status };
       // Stream ko chunk-by-chunk padho taaki estimation/progress dikhe.
       let text = '';
@@ -226,9 +231,9 @@ RM.hfStems = (function () {
           if (last && !seen[last]) {
             seen[last] = true;
             if (last === 'estimation' && typeof onStatus === 'function') {
-              onStatus(T('⏳ Server line me hain — intezaar karein…', '⏳ Queued on the server — please wait…'));
+              onStatus(T('', '⏳ Queued on the server — please wait…'));
             } else if ((last === 'progress' || last === 'generating') && typeof onStatus === 'function') {
-              onStatus(T('🧠 AI stems alag ho rahe hain…', '🧠 AI is separating the stems…'));
+              onStatus(T('', '🧠 AI is separating the stems…'));
             }
           }
         }
@@ -255,28 +260,59 @@ RM.hfStems = (function () {
     return null;
   }
 
-  async function fetchStemBuffer(spaceUrl, f, ctx) {
+  async function fetchStemBuffer(spaceUrl, f, ctx, signal) {
     const url = outputUrl(spaceUrl, f);
     if (!url) throw { kind: 'process' };
-    let r;
-    try { r = await fetch(url); }
-    catch (e) { throw { kind: 'connect' }; }
-    if (!r.ok) throw { kind: 'connect', status: r.status };
-    const ab = await r.arrayBuffer();
-    if (!ab || ab.byteLength === 0) throw { kind: 'empty' }; // 0-byte stem
-    let buf;
-    try {
-      buf = await new Promise((res, rej) => {
-        try {
-          const p = ctx.decodeAudioData(ab.slice(0), res, rej);
-          if (p && typeof p.then === 'function') p.then(res, rej);
-        } catch (e) { rej(e); }
-      });
-    } catch (e) {
-      throw { kind: 'decode' }; // corrupt audio bytes
+    // Apna AbortController: outer signal (user cancel) AUR andar ka DL timeout
+    // dono isi ko abort karte hain — taaki cancel turant lage aur dead
+    // connection pe download hamesha ke liye atka na rahe (stuck spinner).
+    const ctrl = new AbortController();
+    const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, DL_TIMEOUT_MS);
+    const onOuterAbort = () => { try { ctrl.abort(); } catch (e) {} };
+    if (signal) {
+      if (signal.aborted) onOuterAbort();
+      else if (typeof signal.addEventListener === 'function') signal.addEventListener('abort', onOuterAbort, { once: true });
     }
-    if (!buf || !buf.length) throw { kind: 'empty' };
-    return buf;
+    // 'cancel' = user ne cancel dabaya (outer signal aborted);
+    // 'timeout' = andar ka DL timer fire hua.
+    const abortedKind = () => ((signal && signal.aborted) ? 'cancel' : 'timeout');
+    try {
+      let r;
+      try {
+        r = await fetch(url, { signal: ctrl.signal });
+      } catch (e) {
+        if (e && e.name === 'AbortError') throw { kind: abortedKind() };
+        throw { kind: 'connect' };
+      }
+      if (r.status === 503) throw { kind: 'asleep' };
+      if (r.status === 429) throw { kind: 'quota' };
+      if (r.status >= 500) throw { kind: 'server', status: r.status };
+      if (!r.ok) throw { kind: 'connect', status: r.status };
+      let ab;
+      try {
+        ab = await r.arrayBuffer(); // beech me network/cancel/timeout toot jaye to reject hota hai
+      } catch (e) {
+        if (e && e.name === 'AbortError') throw { kind: abortedKind() };
+        throw { kind: 'connect' }; // aadha-downloaded data discard — corrupt stem nahi banta
+      }
+      if (!ab || ab.byteLength === 0) throw { kind: 'empty' }; // 0-byte stem
+      let buf;
+      try {
+        buf = await new Promise((res, rej) => {
+          try {
+            const p = ctx.decodeAudioData(ab.slice(0), res, rej);
+            if (p && typeof p.then === 'function') p.then(res, rej);
+          } catch (e) { rej(e); }
+        });
+      } catch (e) {
+        throw { kind: 'decode' }; // corrupt audio bytes
+      }
+      if (!buf || !buf.length) throw { kind: 'empty' };
+      return buf;
+    } finally {
+      clearTimeout(to);
+      if (signal && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', onOuterAbort);
+    }
   }
 
   /* ================= entry / render ================= */
@@ -300,26 +336,20 @@ RM.hfStems = (function () {
     st.setupEl.innerHTML = `
       <div class="panel">
         <h4>🤗 Hugging Face — FREE AI Setup</h4>
-        <p>${T('Apna khud ka FREE AI server — card nahi chahiye:',
-               'Your own FREE AI server — no card needed:')}</p>
+        <p>${T('', 'Your own FREE AI server — no card needed:')}</p>
         <ol class="setup-steps">
-          <li>${T('<b>huggingface.co</b> pe free account banayein (card nahi lagta).',
-                  'Create a free account on <b>huggingface.co</b> (no card needed).')}</li>
-          <li>${T('<b>abidlabs/music-separation</b> Space kholein → <b>⋮ menu → "Duplicate"</b> → hardware <b>ZeroGPU</b> chunein → visibility <b>Public</b> rakhein.',
-                  'Open the <b>abidlabs/music-separation</b> Space → <b>⋮ menu → "Duplicate"</b> → choose hardware <b>ZeroGPU</b> → keep visibility <b>Public</b>.')}</li>
-          <li>${T('Jo URL mile (jaise <span class="mono">https://username-music-separation.hf.space</span>) use <b>Settings → AI Server</b> me daalein.',
-                  'Paste the URL you get (like <span class="mono">https://username-music-separation.hf.space</span>) into <b>Settings → AI Server</b>.')}</li>
-          <li>⚠️ ${T('<b>Honest note:</b> naya account ZeroGPU host karne ke liye <b>30 din purana</b> hona chahiye — tab tak wait karein ya purana account use karein.',
-                     '<b>Honest note:</b> a new account must be <b>30 days old</b> to host on ZeroGPU — wait it out or use an older account.')}</li>
+          <li>${T('', 'Create a free account on <b>huggingface.co</b> (no card needed).')}</li>
+          <li>${T('', 'Open the <b>abidlabs/music-separation</b> Space → <b>⋮ menu → "Duplicate"</b> → choose hardware <b>ZeroGPU</b> → keep visibility <b>Public</b>.')}</li>
+          <li>${T('', 'Paste the URL you get (like <span class="mono">https://username-music-separation.hf.space</span>) into <b>Settings → AI Server</b>.')}</li>
+          <li>⚠️ ${T('', '<b>Honest note:</b> a new account must be <b>30 days old</b> to host on ZeroGPU — wait it out or use an older account.')}</li>
         </ol>
-        <button class="btn primary big block" id="hf-go-settings">${T('Settings kholein', 'Open Settings')}</button>
+        <button class="btn primary big block" id="hf-go-settings">${T('', 'Open Settings')}</button>
       </div>
-      <div class="divider"><span>${T('ya', 'or')}</span></div>
+      <div class="divider"><span>${T('', 'or')}</span></div>
       <div class="panel">
-        <h4>${T('Bina server ke basic separation', 'Basic separation without server')} <span class="beta">Beta (DSP)</span></h4>
-        <p class="muted small">${T('On-device DSP technique — neural AI nahi, lekin turant kaam karta hai.',
-               'On-device DSP technique — not neural AI, but works instantly.')}</p>
-        <button class="btn block" id="hf-go-dsp">✂️ ${T('DSP Beta try karein (turant)', 'Try DSP Beta (instant)')}</button>
+        <h4>${T('', 'Basic separation without server')} <span class="beta">Beta (DSP)</span></h4>
+        <p class="muted small">${T('', 'On-device DSP technique — not neural AI, but works instantly.')}</p>
+        <button class="btn block" id="hf-go-dsp">✂️ ${T('', 'Try DSP Beta (instant)')}</button>
       </div>`;
     $('hf-go-settings').addEventListener('click', () => A.show('settings'));
     $('hf-go-dsp').addEventListener('click', () => A.show('stems'));
@@ -329,7 +359,7 @@ RM.hfStems = (function () {
   function songOptions() {
     const opts = [];
     const vb = A.state.viewBuffer || A.state.buffer;
-    if (vb) opts.push({ label: A.state.fileName || T('वर्तमान प्रोजेक्ट', 'Current project'), buffer: vb });
+    if (vb) opts.push({ label: A.state.fileName || T('', 'Current project'), buffer: vb });
     (A.state.imports || []).forEach((it) => {
       if (it && it.buffer) opts.push({ label: it.name, buffer: it.buffer });
     });
@@ -343,18 +373,17 @@ RM.hfStems = (function () {
     st.results = [];
     box.innerHTML = `
       <div class="panel">
-        <h4>${T('गाना चुनें', 'Select song')}</h4>
+        <h4>${T('', 'Select song')}</h4>
         <div id="ais-songs"></div>
-        <div class="honest">🤗 ${T('Ye FREE AI separation hai — ~30-60 second lag sakta hai, roz ~6-10 gaane ki limit. Koi ad nahi. 2 stems milte hain: Vocal + Instrumental.',
-               'This is FREE AI separation — it may take ~30-60 seconds, with a daily limit of ~6-10 songs. No ads. You get 2 stems: Vocal + Instrumental.')}</div>
-        <button class="btn primary big block" id="ais-start">${T('AI Se Stem Alag Karein', 'Separate Stems with AI')}</button>
+        <div class="honest">🤗 ${T('', 'This is FREE AI separation — it may take ~30-60 seconds, with a daily limit of ~6-10 songs. No ads. You get 2 stems: Vocal + Instrumental.')}</div>
+        <button class="btn primary big block" id="ais-start">${T('', 'Separate Stems with AI')}</button>
       </div>
       <div id="ais-progress" style="display:none"></div>
       <div id="ais-fail" style="display:none"></div>
       <div id="ais-results"></div>`;
     const list = $('ais-songs');
     if (!opts.length) {
-      list.innerHTML = `<div class="empty">${T('कोई ऑडियो नहीं मिला — पहले इम्पोर्ट करें।', 'No audio found — import first.')}</div>`;
+      list.innerHTML = `<div class="empty"><div class="empty-icon">🎵</div>${T('', 'No audio found — import first.')}</div>`;
       $('ais-start').disabled = true;
     }
     opts.forEach((o, i) => {
@@ -372,15 +401,15 @@ RM.hfStems = (function () {
 
   function startFlowHf() {
     if (st.running) return;
-    if (!st.song || !st.song.buffer) { A.toast(T('Pehle gaana chunein', 'Select a song first')); return; }
+    if (!st.song || !st.song.buffer) { A.toast(T('', 'Select a song first')); return; }
     const cfg = getCfg();
     if (!cfg) { renderInto(st.setupEl, st.mainEl); return; }
     // NOTE: HF me koi rewarded ad nahi — free hai.
     if (st.consentGiven) { runHf(cfg, false); return; }
-    A.dialog('🤗 ' + T('Hugging Face AI Stem Separation', 'Hugging Face AI Stem Separation'),
+    A.dialog('🤗 ' + T('', 'Hugging Face AI Stem Separation'),
       `<p>${A.escapeHtml(CONSENT_HF)}</p>` +
       `<p class="muted small">Space: <span class="mono">${A.escapeHtml(cfg.url)}</span></p>`,
-      T('सहमत', 'Sahmat'), T('रद्द करें', 'Radd karein')).then((ok) => {
+      T('', 'I Agree'), T('', 'Decline')).then((ok) => {
       if (!ok) return;
       st.consentGiven = true;
       runHf(cfg, false);
@@ -398,23 +427,40 @@ RM.hfStems = (function () {
     try {
       blob = bufferToWavBlob(st.song.buffer);
     } catch (e) {
-      return failHf(T('Audio taiyaar nahi ho saka: ', 'Could not prepare audio: ') + (e && e.message ? e.message : e), 'process');
+      return failHf(T('', 'Could not prepare audio: ') + A.cleanErrMsg(e && e.message ? e.message : e), 'process');
     }
     if (st.song.buffer.duration > 600) {
-      A.toast(T('Badi file hai — upload me samay lag sakta hai', 'Large file — upload may take a while'));
+      A.toast(T('', 'Large file — upload may take a while'));
     }
     st.running = true;
     const spaceUrl = cfg.url.replace(/\/+$/, '');
     const api = (cfg.apiName || DEFAULT_API).replace(/^\/+/, '') || DEFAULT_API;
     try {
-      // 1. upload
-      showProgress(0, T('Upload ho raha hai…', 'Uploading…'), true);
-      const srvPath = await uploadFile(spaceUrl, blob, safeName(st.song.label) + '.wav', (p) => {
-        if (st.running) showProgress(p, T('Upload ho raha hai', 'Uploading') + ' ' + Math.round(p * 100) + '%', true);
-      });
+      // 1. upload — cold-start (soya Space) pe response aane me 1-2 min lag
+      // sakta hai; 20 s tak koi progress event na aaye to user ko batao
+      // (dead 0%/100% bar nahi). Progress aate hi % wapas aa jayega.
+      showProgress(0, T('', 'Uploading…'), true);
+      const upT0 = Date.now();
+      let upLastEv = upT0, upHinted = false;
+      const upHintTo = setInterval(() => {
+        if (!st.running || upHinted) { clearInterval(upHintTo); return; }
+        if (Date.now() - upLastEv > 20000) {
+          upHinted = true;
+          showProgress(-1, T('', '⏳ Waiting for the server… (a sleeping Space can take 1-2 min to wake)'), true);
+        }
+      }, 5000);
+      let srvPath;
+      try {
+        srvPath = await uploadFile(spaceUrl, blob, safeName(st.song.label) + '.wav', (p) => {
+          upLastEv = Date.now();
+          if (st.running) showProgress(p, T('', 'Uploading') + ' ' + Math.round(p * 100) + '%', true);
+        });
+      } finally {
+        clearInterval(upHintTo);
+      }
       if (!st.running) return;
       // 2. call
-      showProgress(-1, T('🧠 AI request bheji gayi…', '🧠 AI request sent…'), true);
+      showProgress(-1, T('', '🧠 AI request sent…'), true);
       const callCtrl = new AbortController();
       st.abort = callCtrl;
       const callTo = setTimeout(() => { try { callCtrl.abort(); } catch (e) {} }, CALL_TIMEOUT);
@@ -427,7 +473,7 @@ RM.hfStems = (function () {
       }
       if (!st.running) return;
       // 3. SSE — server line/progress khud batata hai
-      showProgress(-1, T('🧠 AI process ho raha hai… (~30-60 second)', '🧠 AI is processing… (~30-60 seconds)'), true);
+      showProgress(-1, T('', '🧠 AI is processing… (~30-60 seconds)'), true);
       const out = await waitResult(spaceUrl, api, eventId, (msg) => {
         if (st.running) showProgress(-1, msg, true);
       });
@@ -440,10 +486,23 @@ RM.hfStems = (function () {
       const labels = ['Vocal (HF)', 'Instrumental (HF)'];
       for (let i = 0; i < files.length; i++) {
         if (!st.running) return;
-        showProgress(-1, T('Stem download ho raha hai', 'Downloading stem') + ` ${i + 1}/${files.length}…`, true);
-        const buf = await fetchStemBuffer(spaceUrl, files[i], ctx);
-        stems.push({ name: labels[i] || (T('Stem ', 'Stem ') + (i + 1) + ' (HF)'), buffer: buf, engine: 'hf' });
+        showProgress(-1, T('', 'Downloading stem') + ` ${i + 1}/${files.length}…`, true);
+        // Har download ka apna AbortController — cancel turant request maar de,
+        // server pe orphan connection latki na rahe (st.abort via abortAll).
+        const dlCtrl = new AbortController();
+        st.abort = dlCtrl;
+        let buf;
+        try {
+          buf = await fetchStemBuffer(spaceUrl, files[i], ctx, dlCtrl.signal);
+        } finally {
+          if (st.abort === dlCtrl) st.abort = null;
+        }
+        // Cancel race: download poora hone ke BAAD cancel daba to results
+        // render mat karo — warna cancel ke baad bhi "taiyaar" dikhega.
+        if (!st.running) return;
+        stems.push({ name: labels[i] || (T('', 'Stem ') + (i + 1) + ' (HF)'), buffer: buf, engine: 'hf' });
       }
+      if (!st.running) return;
       finishHf(stems);
     } catch (e) {
       // NOTE: abortAll() hamesha sabse pehle st.running=false karta hai —
@@ -455,8 +514,11 @@ RM.hfStems = (function () {
       if (e && e.kind === 'cancel') e = { kind: 'timeout' }; // /call step ka timeout-abort
       if (!autoRetried && e && (e.kind === 'asleep' || e.kind === 'connect' || e.kind === 'server')) {
         // 1 auto-retry — space jag raha ho to dusri baar lag jata hai.
+        // 'asleep' pe user ko saaf batao ki server jag raha hai (dead spinner nahi).
         // Cancel button rakha hai taaki 5 s wait me user atka na rahe.
-        showProgress(-1, T('🔁 Dobara koshish ho rahi hai…', '🔁 Retrying…'), true);
+        showProgress(-1, e.kind === 'asleep'
+          ? T('', '🤗 Space is waking up… retrying')
+          : T('', '🔁 Retrying…'), true);
         setTimeout(() => { if (st.running) runHf(cfg, true); }, 5000);
         return;
       }
@@ -467,35 +529,27 @@ RM.hfStems = (function () {
   function errToMessage(e) {
     const kind = e && e.kind;
     if (kind === 'asleep') {
-      return T('Space jag raha hai (pehli baar start hone me 1-2 min lag sakta hai). Thodi der me dobara try karein.',
-               'The Space is waking up (first start can take 1-2 min). Please try again in a bit.');
+      return T('', 'The Space is waking up (first start can take 1-2 min). Please try again in a bit.');
     }
     if (kind === 'quota') {
-      return T('Aaj ki free limit khatm ho gayi lagti hai (roz ~6-10 gaane). Kal dobara try karein ya apna Space duplicate karein.',
-               'The free daily limit seems over (~6-10 songs/day). Try again tomorrow or duplicate your own Space.');
+      return T('', 'The free daily limit seems over (~6-10 songs/day). Try again tomorrow or duplicate your own Space.');
     }
     if (kind === 'timeout') {
-      return T('Jawab aane me bahut samay laga (timeout). Chhota gaana try karein ya dobara koshish karein.',
-               'The response took too long (timeout). Try a shorter song or try again.');
+      return T('', 'The response took too long (timeout). Try a shorter song or try again.');
     }
     if (kind === 'server') {
-      return T('Server me error aaya' + (e && e.status ? ' (HTTP ' + e.status + ')' : '') + '. Thodi der rukkar dobara koshish karein.',
-               'The server returned an error' + (e && e.status ? ' (HTTP ' + e.status + ')' : '') + '. Please wait a bit and try again.');
+      return T('', 'The server returned an error' + (e && e.status ? ' (HTTP ' + e.status + ')' : '') + '. Please wait a bit and try again.');
     }
     if (kind === 'empty') {
-      return T('Server ne khaali stem bheja (0 second ka audio). Dobara koshish karein ya chhota gaana try karein.',
-               'The server returned an empty stem (0 seconds of audio). Try again or use a shorter song.');
+      return T('', 'The server returned an empty stem (0 seconds of audio). Try again or use a shorter song.');
     }
     if (kind === 'decode') {
-      return T('Stem ka audio samajh nahi aaya (decode fail ho gaya). Dobara koshish karein.',
-               'Could not decode the stem audio. Please try again.');
+      return T('', 'Could not decode the stem audio. Please try again.');
     }
     if (kind === 'connect') {
-      return T('Server se connect nahi ho pa raha. Internet aur Space URL check karein.',
-               'Cannot connect to the server. Check your internet and the Space URL.');
+      return T('', 'Cannot connect to the server. Check your internet and the Space URL.');
     }
-    return T('AI processing me gadbad hui. Dobara koshish karein.',
-             'Something went wrong during AI processing. Please try again.');
+    return T('', 'Something went wrong during AI processing. Please try again.');
   }
 
   /* ================= done: results + mixer ================= */
@@ -503,18 +557,27 @@ RM.hfStems = (function () {
     st.running = false;
     st.results = stems;
     stems.forEach((s) => RM.stems.results.push({ name: s.name, buffer: s.buffer, engine: 'hf' }));
+    // Round-6 (W7 Issue 9): HF ke 2 stems (Vocal + Instrumental) ko stem pack me
+    // register karo taaki Auto Remix stem pipeline use kare — pehle silently
+    // preset flow chalta tha. labels = ['Vocal (HF)', 'Instrumental (HF)'].
+    try {
+      RM.stems.setStemPack({
+        source: 'hf',
+        roles: stems.map((s, i) => ({ role: i === 0 ? 'vocal' : 'other', label: s.name, buffer: s.buffer })),
+      });
+      try { if (A.updateRemixStemBadge) A.updateRemixStemBadge(); } catch (e) {}
+    } catch (e) { /* pack optional — preset flow fallback rehta hai */ }
     hideProgress();
     renderResultsHf(stems);
-    A.toast(T('HF Stems taiyaar hain ✓', 'HF stems are ready ✓'));
+    A.toast(T('', 'HF stems are ready ✓'));
   }
 
   function renderResultsHf(stems) {
     const box = $('ais-results');
     box.innerHTML = `
-      <div class="ok" style="margin:8px 0">✓ ${T('HF Stems taiyaar hain', 'HF stems are ready')} — ${stems.length}</div>
-      <div class="honest">🤗 ${T('Ye 2 stems hain — Vocal + Instrumental (HF Space ka output).',
-               'These are 2 stems — Vocal + Instrumental (the HF Space output).')}</div>
-      <button class="btn primary block" id="ais-to-mixer">${T('Sabhi HF Stems ko Mixer me load karein', 'Load all HF stems into the Mixer')}</button>
+      <div class="ok" style="margin:8px 0">✓ ${T('', 'HF stems are ready')} — ${stems.length}</div>
+      <div class="honest">🤗 ${T('', 'These are 2 stems — Vocal + Instrumental (the HF Space output).')}</div>
+      <button class="btn primary block" id="ais-to-mixer">${T('', 'Load all HF stems into the Mixer')}</button>
       <div id="ais-rows"></div>`;
     $('ais-to-mixer').addEventListener('click', () => {
       stems.forEach((s) => A.sendToMixer(s.buffer, s.name));
@@ -538,8 +601,8 @@ RM.hfStems = (function () {
         <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
       </div>
       <button class="btn small" data-a="play">▶</button>
-      <button class="btn small ghost" data-a="mix">${T('मिक्सर', 'Mixer')}</button>
-      <button class="btn small ghost" data-a="exp">${T('एक्सपोर्ट', 'Export')}</button>`;
+      <button class="btn small ghost" data-a="mix">${T('', 'Mixer')}</button>
+      <button class="btn small ghost" data-a="exp">${T('', 'Export')}</button>`;
     let player = null;
     const btn = d.querySelector('[data-a="play"]');
     btn.addEventListener('click', () => {
@@ -572,11 +635,11 @@ RM.hfStems = (function () {
     const box = $('ais-fail');
     if (!box) return;
     box.style.display = '';
-    const retryBtn = `<button class="btn primary" id="ais-retry">${T('🔁 Dobara koshish karein', '🔁 Try again')}</button>`;
-    const cancelBtn = `<button class="btn ghost" id="ais-cancel">${T('रद्द करें', 'Cancel')}</button>`;
+    const retryBtn = `<button class="btn primary" id="ais-retry">${T('', '🔁 Try again')}</button>`;
+    const cancelBtn = `<button class="btn ghost" id="ais-cancel">${T('', 'Cancel')}</button>`;
     const dspBtn = (kind === 'connect' || kind === 'asleep' || kind === 'quota' || kind === 'timeout' ||
       kind === 'server' || kind === 'empty' || kind === 'decode')
-      ? `<button class="btn" id="ais-go-dsp2">✂️ ${T('DSP Beta try karein (turant)', 'Try DSP Beta (instant)')}</button>`
+      ? `<button class="btn" id="ais-go-dsp2">✂️ ${T('', 'Try DSP Beta (instant)')}</button>`
       : '';
     box.innerHTML = `
       <div class="panel">
@@ -614,7 +677,7 @@ RM.hfStems = (function () {
       <div class="panel">
         <div class="progress"><div class="pbar${indet ? ' indet' : ''}" style="width:${pct}%"></div></div>
         <div class="status">${A.escapeHtml(label || '')}</div>
-        ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('रद्द करें', 'Cancel')}</button>` : ''}
+        ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('', 'Cancel')}</button>` : ''}
       </div>`;
     if (cancelable) {
       const btn = $('ais-cancel-up');
@@ -639,7 +702,7 @@ RM.hfStems = (function () {
   }
 
   /* ================= Settings test helper ================= */
-  // Settings > AI Server ka "कनेक्शन जांचें" HF ke liye isi ko call karta hai.
+  // Settings > AI Server "Test Connection" calls this for HF.
   function testSpace(spaceUrl, apiName) {
     const url = String(spaceUrl || '').trim().replace(/\/+$/, '');
     const api = (String(apiName || DEFAULT_API).trim().replace(/^\/+/, '')) || DEFAULT_API;
@@ -671,7 +734,14 @@ RM.hfStems = (function () {
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
         api: { getCfg, setCfg, renderInto, abortAll, testSpace, DEFAULT_API },
-        internals: { uploadFile, startCall, parseSSE, waitResult, outputUrl, fetchStemBuffer, CONSENT_HF },
+        internals: {
+          uploadFile, startCall, parseSSE, waitResult, outputUrl, fetchStemBuffer,
+          errToMessage, CONSENT_HF,
+          _test: {
+            getDlTimeout: () => DL_TIMEOUT_MS,
+            setDlTimeout: (ms) => { DL_TIMEOUT_MS = ms; },
+          },
+        },
       };
     }
   } catch (e) {}

@@ -8,24 +8,11 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 5 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 6 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
   const I18N = {
-    hi: {
-      tagline: 'प्रोफेशनल म्यूज़िक एवं रीमिक्स स्टूडियो',
-      nav_home: 'होम', nav_editor: 'एडिटर', nav_remix: 'रीमिक्स', nav_mixer: 'मिक्सर', nav_more: 'अधिक',
-      new_project: 'नया प्रोजेक्ट', auto_remix: 'ऑटो रीमिक्स', slowed: 'स्लोड+रिवर्ब',
-      audio_editor: 'ऑडियो एडिटर', stems: 'स्टेम सेपरेटर', recorder: 'वॉइस रिकॉर्डर',
-      ai_stems: 'AI स्टेम सेपरेटर',
-      equalizer: 'इक्वलाइज़र', mastering: 'मास्टरिंग', recent: 'हाल के प्रोजेक्ट',
-      search: 'खोजें…', import_title: 'ऑडियो इम्पोर्ट', pick_audio: 'ऑडियो चुनें',
-      editor_title: 'ऑडियो एडिटर', play: 'चलाएं', pause: 'रोकें', stop: 'बंद करें',
-      pro_title: 'RuhMix Pro', coming_soon: 'जल्द आ रहा है',
-      settings_title: 'सेटिंग्स', export_title: 'एक्सपोर्ट',
-      by: 'By Hasnain Khan',
-    },
     en: {
       tagline: 'Professional Music & Remix Studio',
       nav_home: 'Home', nav_editor: 'Editor', nav_remix: 'Remix', nav_mixer: 'Mixer', nav_more: 'More',
@@ -40,12 +27,11 @@ RM.app = (function () {
       by: 'By Hasnain Khan',
     },
   };
-  let lang = 'hi';
-  try { lang = localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) {}
-  function t(k) { return (I18N[lang] && I18N[lang][k]) || I18N.hi[k] || k; }
+  let lang = 'en'; // English-only build: language locked to English
+  function t(k) { return (I18N[lang] && I18N[lang][k]) || I18N.en[k] || k; }
   function setLang(l) {
-    lang = (l === 'en') ? 'en' : 'hi';
-    try { localStorage.setItem('ruhmix.lang', lang); } catch (e) {}
+    lang = 'en'; // locked: language selector offers English only
+    try { localStorage.setItem('ruhmix.lang', 'en'); } catch (e) {}
     document.querySelectorAll('[data-i18n]').forEach((el) => {
       el.textContent = t(el.getAttribute('data-i18n'));
     });
@@ -69,6 +55,15 @@ RM.app = (function () {
 
   /* ================= toast + dialog ================= */
   let toastTimer = 0;
+  /* Strip technical noise from an error before showing it to the user —
+     no stack traces, no "TypeError:", no [object Object]. */
+  function cleanErrMsg(m) {
+    let s = String(m || '').split('\n')[0];       // first line only (no stack)
+    s = s.replace(/^[A-Za-z$][\w$]*Error:\s*/g, ''); // "TypeError: x" -> "x"
+    s = s.replace(/^\[object [^\]]+\]$/, '').trim();  // "[object Object]" -> ""
+    if (s.length > 140) s = s.slice(0, 137) + '…';
+    return s;
+  }
   function toast(msg, ms) {
     const el = $('toast');
     if (!el) return;
@@ -83,11 +78,20 @@ RM.app = (function () {
       $('dlg-body').innerHTML = bodyHTML;
       $('dlg-ok').textContent = okLabel || 'OK';
       const c = $('dlg-cancel');
-      c.textContent = cancelLabel || 'रद्द करें';
-      c.style.display = cancelLabel === null ? 'none' : '';
+      c.textContent = cancelLabel || 'Cancel';
+      const hasCancel = cancelLabel !== null;
+      c.style.display = hasCancel ? '' : 'none';
+      const x = $('dlg-x');
+      if (x) x.style.display = hasCancel ? '' : 'none';
+      const close = (v) => { $('dlg').classList.remove('show'); resolve(v); };
+      $('dlg-ok').onclick = () => close(true);
+      c.onclick = () => close(false);
+      if (x) x.onclick = () => close(false);
+      // Backdrop tap dismisses (same as Cancel) — ✕ and backdrop both
+      // present, per dialog style guide. Not when cancel is hidden
+      // (confirmation-only dialogs must be answered).
+      $('dlg').onclick = (ev) => { if (hasCancel && ev.target === $('dlg')) close(false); };
       $('dlg').classList.add('show');
-      $('dlg-ok').onclick = () => { $('dlg').classList.remove('show'); resolve(true); };
-      c.onclick = () => { $('dlg').classList.remove('show'); resolve(false); };
     });
   }
 
@@ -108,6 +112,8 @@ RM.app = (function () {
     waveView: null,
     remix: { style: null, bpm: null },
     stemMix: null,      // stem-pipeline mix buffer (part 2)
+    remixBuffer: null,  // preset-flow remix offline render (Round-6 W7 Issue 6: exportable)
+    remixBufferName: '',
     slowed: { speed: 0.8, room: 'church', wet: 0.55, decay: 1.8, echo: 0.25, bass: 4, width: 1.2 },
     mastering: { preset: 'clean', ab: 'after', settings: null },
     exportDefaults: { format: 'mp3', bitrate: 192, sampleRate: 44100 },
@@ -152,7 +158,7 @@ RM.app = (function () {
 
   function needAudio() {
     if (!state.buffer) {
-      toast(lang === 'hi' ? 'पहले ऑडियो इम्पोर्ट करें' : 'Please import audio first');
+      toast('Please import audio first');
       show('import');
       return false;
     }
@@ -274,6 +280,8 @@ RM.app = (function () {
     if (!state.project) state.project = RM.proj.create(name);
     state.buffer = buffer;
     state.viewBuffer = null;
+    state.remixBuffer = null; // purane gaane ka remix render naye audio pe export na ho (Round-6)
+    state.remixBufferName = '';
     state.fileName = name || 'audio';
     state.project.audioRef = audioRef || { name: state.fileName, size: 0, type: '', lastModified: 0 };
     state.project.ops = [];
@@ -282,15 +290,13 @@ RM.app = (function () {
     RM.proj.invalidateView(buffer);
     refreshView().then(() => {
       RM.proj.autosave(state.project);
-      toast((lang === 'hi' ? 'लोड हो गया: ' : 'Loaded: ') + state.fileName);
+      toast(('Loaded: ') + state.fileName);
       if (state.screen === 'import') show('editor');
       if (RM.app.updateEditorMeta) RM.app.updateEditorMeta();
     }).catch(() => {
       // applyOps reject ho sakta hai (bahut badi file -> createBuffer OOM).
       // Bina catch ke unhandled rejection + "load ho gaya" ka jhootha bharosa.
-      toast(lang === 'hi'
-        ? 'ऑडियो तैयार नहीं हो पाया — फ़ाइल बहुत बड़ी हो सकती है'
-        : 'Could not prepare audio — the file may be too large', 3500);
+      toast('Could not prepare audio — the file may be too large', 3500);
     });
   }
 
@@ -338,29 +344,29 @@ RM.app = (function () {
       const i = state.project.ops.lastIndexOf(op);
       if (i !== -1) state.project.ops.splice(i, 1);
       RM.proj.autosave(state.project);
-      toast(lang === 'hi' ? 'Edit लागू नहीं हो पाया' : 'Could not apply edit', 3000);
+      toast('Could not apply edit', 3000);
       return refreshView().catch(() => null);
     });
   }
   function undoOp() {
     const op = state.project.ops.pop();
-    if (!op) { toast(lang === 'hi' ? 'कुछ नहीं है' : 'Nothing to undo'); return; }
+    if (!op) { toast('Nothing to undo'); return; }
     state.redoStack.push(op);
     RM.proj.autosave(state.project);
     refreshView().catch(() => {
-      toast(lang === 'hi' ? 'Edit लागू नहीं हो पाया' : 'Could not apply edit', 3000);
+      toast('Could not apply edit', 3000);
     });
   }
   function redoOp() {
     const op = state.redoStack.pop();
-    if (!op) { toast(lang === 'hi' ? 'कुछ नहीं है' : 'Nothing to redo'); return; }
+    if (!op) { toast('Nothing to redo'); return; }
     state.project.ops.push(op);
     RM.proj.autosave(state.project);
     refreshView().catch(() => {
       const i = state.project.ops.lastIndexOf(op);
       if (i !== -1) state.project.ops.splice(i, 1);
       RM.proj.autosave(state.project);
-      toast(lang === 'hi' ? 'Edit लागू नहीं हो पाया' : 'Could not apply edit', 3000);
+      toast('Could not apply edit', 3000);
     });
   }
 
@@ -386,7 +392,7 @@ RM.app = (function () {
     }
     const inp = $('file-input');
     if (inp) inp.click();
-    else toast(lang === 'hi' ? 'फाइल चुनना उपलब्ध नहीं है' : 'File picking unavailable');
+    else toast('File picking is unavailable');
   }
 
   function fetchFileUrl(url) {
@@ -405,7 +411,7 @@ RM.app = (function () {
   }
 
   function decodeAndAdd(ab, name, size) {
-    toast((lang === 'hi' ? 'डिकोड हो रहा है: ' : 'Decoding: ') + name);
+    toast(('Decoding: ') + name);
     return RM.audio.decodeArrayBuffer(ab).then((buf) => {
       state.imports.unshift({ name, buffer: buf, size: size || ab.byteLength, type: '' });
       // Memory edge: har import poora decoded AudioBuffer pakadta hai
@@ -414,18 +420,16 @@ RM.app = (function () {
       if (state.imports.length > MAX_IMPORTS) {
         const dropped = state.imports.splice(MAX_IMPORTS);
         dropped.forEach((it) => RM.wave.dropPeaks(it.buffer));
-        toast(lang === 'hi' ? 'मेमोरी के लिए पुराने इम्पोर्ट हटाए गए' : 'Old imports removed to save memory', 2500);
+        toast('Old imports removed to save memory', 2500);
       }
       renderImportList();
       return buf;
     }).catch(() => {
-      const msg = lang === 'hi'
-        ? 'ऑडियो फ़ाइल डिकोड नहीं हो पाई — फ़ॉर्मेट इस डिवाइस पर सपोर्टेड नहीं हो सकता।'
-        : 'Could not decode the audio file — the format may be unsupported on this device.';
-      return dialog(lang === 'hi' ? 'डिकोड विफल' : 'Decode failed',
+      const msg = 'Could not decode the audio file — the format may be unsupported on this device.';
+      return dialog('Decode failed',
         `<p>${escapeHtml(msg)}</p><p class="muted">${escapeHtml(name)}</p>`,
-        lang === 'hi' ? '🔁 पुनः प्रयास' : '🔁 Retry',
-        lang === 'hi' ? 'रद्द करें' : 'Cancel').then((retry) => {
+        '🔁 Retry',
+        'Cancel').then((retry) => {
           if (retry) return decodeAndAdd(ab, name, size);
           return null;
         });
@@ -436,14 +440,14 @@ RM.app = (function () {
   function handleAudioPicked(paths) {
     if (!paths) return;
     const arr = Array.isArray(paths) ? paths : [paths];
-    if (!arr.length) { toast(lang === 'hi' ? 'कुछ चुना नहीं गया' : 'Nothing selected'); return; }
-    toast((lang === 'hi' ? 'लोड हो रहा है… (' : 'Loading… (') + arr.length + ')');
+    if (!arr.length) { toast('Nothing selected'); return; }
+    toast(('Loading… (') + arr.length + ')');
     let chain = Promise.resolve();
     arr.forEach((p) => {
       const name = String(p).split('/').pop() || 'audio';
       chain = chain.then(() => fetchFileUrl(p)
         .then((ab) => decodeAndAdd(ab, name, ab.byteLength))
-        .catch(() => toast((lang === 'hi' ? 'पढ़ा नहीं जा सका: ' : 'Could not read: ') + name, 3000)));
+        .catch(() => toast(('Could not read: ') + name, 3000)));
     });
     chain.then(() => { show('import'); });
   }
@@ -463,7 +467,7 @@ RM.app = (function () {
     if (!box) return;
     box.innerHTML = '';
     if (!state.imports.length) {
-      box.innerHTML = `<div class="empty">${lang === 'hi' ? 'अभी कोई ऑडियो नहीं — ऊपर से चुनें' : 'No audio yet — pick from above'}</div>`;
+      box.innerHTML = `<div class="empty"><div class="empty-icon">🎵</div>${'No audio yet — pick from above'}</div>`;
       return;
     }
     state.imports.forEach((it, idx) => {
@@ -474,7 +478,7 @@ RM.app = (function () {
           <div class="ii-name">${escapeHtml(it.name)}</div>
           <div class="ii-meta">${fmtTime(it.buffer.duration)} • ${it.buffer.sampleRate} Hz • ${it.buffer.numberOfChannels === 2 ? 'Stereo' : 'Mono'} • ${fmtSize(it.size)}</div>
         </div>
-        <button class="btn small" data-act="use">${lang === 'hi' ? 'इस्तेमाल करें' : 'Use'}</button>
+        <button class="btn small" data-act="use">${'Use'}</button>
         <button class="btn small ghost" data-act="del">✕</button>`;
       d.querySelector('[data-act="use"]').addEventListener('click', () => {
         loadAudioBuffer(it.buffer, it.name, { name: it.name, size: it.size, type: it.type, lastModified: Date.now() });
@@ -520,7 +524,7 @@ RM.app = (function () {
           stream.getTracks().forEach((tr) => tr.stop());
           const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
           blob.arrayBuffer().then((ab) => decodeAndAdd(ab, 'Voice Recording (browser).webm', ab.byteLength)
-            .then((buf) => { if (buf) toast(lang === 'hi' ? 'रिकॉर्डिंग जुड़ गई' : 'Recording added'); }));
+            .then((buf) => { if (buf) toast('Recording added'); }));
           rec.recording = false;
           updateRecUI();
         };
@@ -529,11 +533,11 @@ RM.app = (function () {
         rec.recording = true;
         rec.startT = Date.now();
         updateRecUI();
-        toast(lang === 'hi' ? 'रिकॉर्डिंग शुरू (ब्राउज़र)' : 'Recording started (browser)');
-      }).catch(() => { rec.pending = false; toast(lang === 'hi' ? 'माइक की अनुमति नहीं मिली' : 'Mic permission denied', 3000); });
+        toast('Recording started (browser)');
+      }).catch(() => { rec.pending = false; toast('Mic permission denied', 3000); });
       return;
     }
-    toast(lang === 'hi' ? 'रिकॉर्डिंग इस डिवाइस पर उपलब्ध नहीं है' : 'Recording unavailable on this device', 3000);
+    toast('Recording unavailable on this device', 3000);
   }
   function stopRecording() {
     rec.pending = false;
@@ -548,15 +552,15 @@ RM.app = (function () {
     rec.startT = Date.now();
     rec.path = path;
     updateRecUI();
-    toast(lang === 'hi' ? 'रिकॉर्डिंग शुरू…' : 'Recording…');
+    toast('Recording…');
   }
   function handleRecordingStopped(path) {
     rec.pending = false;
     rec.recording = false;
     updateRecUI();
     const p = path || rec.path;
-    if (!p) { toast(lang === 'hi' ? 'रिकॉर्डिंग फ़ाइल नहीं मिली' : 'Recording file not found', 3000); return; }
-    toast(lang === 'hi' ? 'रिकॉर्डिंग डिकोड हो रही है…' : 'Decoding recording…');
+    if (!p) { toast('Recording file not found', 3000); return; }
+    toast('Decoding recording…');
     // NOTE: the shell records in the device's native format (3GP). We decode
     // whatever the device gives us — no false format claims in the UI.
     fetchFileUrl(p).then((ab) => RM.audio.decodeArrayBuffer(ab)).then((buf) => {
@@ -567,38 +571,36 @@ RM.app = (function () {
       loadAudioBuffer(buf, name, { name, size: ab.byteLength, type: '', lastModified: Date.now() });
       show('editor');
     }).catch(() => {
-      toast(lang === 'hi'
-        ? 'रिकॉर्डिंग डिकोड नहीं हो पाई — यह फॉर्मेट इस डिवाइस पर समर्थित नहीं है'
-        : 'Could not decode the recording — format not supported on this device', 4000);
+      toast('Could not decode the recording — format not supported on this device', 4000);
     });
   }
   function handleRecordingError(msg) {
     rec.pending = false;
     rec.recording = false;
     updateRecUI();
-    toast((lang === 'hi' ? 'रिकॉर्डिंग त्रुटि: ' : 'Recording error: ') + (msg || ''), 3500);
+    toast(('Recording error: ') + cleanErrMsg(msg), 3500);
   }
   function updateRecUI() {
     const btn = $('rec-btn');
     const st = $('rec-status');
     if (btn) {
-      btn.textContent = rec.recording ? (lang === 'hi' ? '■ रिकॉर्डिंग रोकें' : '■ Stop Recording') : (lang === 'hi' ? '● रिकॉर्डिंग शुरू करें' : '● Start Recording');
+      btn.textContent = rec.recording ? ('■ Stop Recording') : ('● Start Recording');
       btn.classList.toggle('rec-on', rec.recording);
     }
     clearInterval(rec.timer);
     if (rec.recording && st) {
-      const tickT = () => { st.textContent = fmtTime((Date.now() - rec.startT) / 1000) + (lang === 'hi' ? ' — रिकॉर्ड हो रहा है…' : ' — recording…'); };
+      const tickT = () => { st.textContent = fmtTime((Date.now() - rec.startT) / 1000) + (' — Recording…'); };
       tickT();
       rec.timer = setInterval(tickT, 500);
     } else if (st) {
-      st.textContent = lang === 'hi' ? 'तैयार है' : 'Ready';
+      st.textContent = 'Ready';
     }
   }
 
   /* ================= update check ================= */
   function checkUpdate(manual) {
     const box = $('update-status');
-    if (box) box.textContent = lang === 'hi' ? 'जांच हो रही है…' : 'Checking…';
+    if (box) box.textContent = 'Checking…';
     fetch(VERSION_URL, { cache: 'no-store' }).then((r) => {
       if (!r.ok) throw new Error('http ' + r.status);
       return r.json();
@@ -607,12 +609,12 @@ RM.app = (function () {
       if (remote > APP.versionCode) {
         if (box) box.textContent = '';
         dialog(
-          lang === 'hi' ? 'नया अपडेट उपलब्ध है' : 'Update available',
-          `<p><b>RuhMix ${escapeHtml(v.versionName || '')}</b> ${lang === 'hi' ? 'उपलब्ध है।' : 'is available.'}</p>` +
+          'Update available',
+          `<p><b>RuhMix ${escapeHtml(v.versionName || '')}</b> ${'is available.'}</p>` +
           (v.notes ? `<p class="muted">${escapeHtml(v.notes)}</p>` : '') +
-          `<p class="muted">${lang === 'hi' ? 'डाउनलोड करके इंस्टॉल करें।' : 'Download and install to update.'}</p>`,
-          lang === 'hi' ? 'डाउनलोड करें' : 'Download',
-          lang === 'hi' ? 'बाद में' : 'Later'
+          `<p class="muted">${'Download and install to update.'}</p>`,
+          'Download',
+          'Later'
         ).then((ok) => {
           if (!ok || !v.apkUrl) return;
           const nat = RM.audio.native;
@@ -621,17 +623,17 @@ RM.app = (function () {
           else window.open(v.apkUrl, '_blank');
         });
       } else {
-        if (box) box.textContent = lang === 'hi' ? 'आप नवीनतम संस्करण पर हैं (1.0)' : 'You are on the latest version (1.0)';
-        if (manual) toast(lang === 'hi' ? 'ऐप अपडेटेड है ✓' : 'App is up to date ✓');
+        if (box) box.textContent = 'You are on the latest version (1.0)';
+        if (manual) toast('App is up to date ✓');
       }
     }).catch(() => {
-      if (box) box.textContent = lang === 'hi' ? 'जांच नहीं हो पाई — इंटरनेट देखें' : 'Check failed — check internet';
+      if (box) box.textContent = 'Check failed — check your internet connection';
     });
   }
 
   // ---- placeholder: part 2/3 continue below ----
   return {
-    APP, state, $, toast, dialog, t, setLang, setTheme, loadTheme,
+    APP, state, $, toast, dialog, cleanErrMsg, t, setLang, setTheme, loadTheme,
     show, needAudio, ensureStudio, setWidth, applyFxToChain, defaultFx,
     newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
     pickAudio, handleAudioPicked, decodeAndAdd, renderImportList, fmtTime, fmtSize, escapeHtml,
@@ -658,29 +660,29 @@ window.onRecordingError = function (msg) { RM.app.handleRecordingError(msg); };
 Object.assign(RM.app, (function () {
   const A = RM.app;
   const $ = A.$, clamp = RM.audio.clamp;
-  const lang = () => { try { return localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) { return 'hi'; } };
-  const HI = () => lang() === 'hi';
+  const HI = () => false; // English-only build: language locked to English
 
-  /* ============ guarded async ops: friendly Hindi errors + Retry/Cancel ============
-     Har async processing (export, remix generate, stem run, decode) iske andar
-     chalta hai: failure par user-friendly Hindi message + [पुनः प्रयास] [रद्द करें].
-     Generic crash kabhi nahi — har error pakda jaata hai. */
+  /* ============ guarded async ops: friendly English errors + Retry/Cancel ============
+     Every async operation (export, remix generate, stem run, decode) runs inside
+     this: on failure the user gets a friendly English message + [Retry] [Cancel].
+     No generic crash ever — every error is caught. */
   function friendlyErr(e) {
     const m = String((e && e.message) || e || '');
     if (/cancel/i.test(m)) return null; // user-cancelled: not an error
     if (/network|fetch failed|failed to fetch|xhr|internet|offline|ERR_INTERNET/i.test(m))
-      return HI() ? 'इंटरनेट कनेक्शन में दिक्कत है। कनेक्शन जांचकर दोबारा कोशिश करें।'
-                  : 'Network problem. Check your connection and retry.';
+      return 'Network problem. Check your connection and retry.';
     if (/decode|decoding/i.test(m))
-      return HI() ? 'ऑडियो फ़ाइल डिकोड नहीं हो पाई — फ़ॉर्मेट इस डिवाइस पर सपोर्टेड नहीं हो सकता।'
-                  : 'Could not decode the audio file — the format may be unsupported.';
+      return 'Could not decode the audio file — the format may be unsupported.';
     if (/memory|allocation|too large|length/i.test(m))
-      return HI() ? 'फ़ाइल बहुत बड़ी है — मेमोरी कम पड़ गई। छोटी फ़ाइल से कोशिश करें।'
-                  : 'File too large — ran out of memory. Try a smaller file.';
+      return 'File too large — ran out of memory. Try a smaller file.';
     if (/not supported/i.test(m))
-      return HI() ? 'यह फ़ीचर इस डिवाइस/ब्राउज़र पर सपोर्टेड नहीं है।'
-                  : 'This feature is not supported on this device/browser.';
-    return (HI() ? 'कुछ गड़बड़ हो गई: ' : 'Something went wrong: ') + m;
+      return 'This feature is not supported on this device/browser.';
+    // Fallback: NEVER show the raw error verbatim — strip stack traces,
+    // "XxxError:" prefixes and [object Object] via cleanErrMsg. If nothing
+    // readable remains, show a plain generic message instead.
+    const c = A.cleanErrMsg(m);
+    if (!c) return 'Something went wrong. Please try again.';
+    return ('Something went wrong: ') + c;
   }
   // title: dialog title. fn: () => Promise<value>. Resolves {ok, result?, cancelled?}.
   function guarded(title, fn) {
@@ -692,8 +694,8 @@ Object.assign(RM.app, (function () {
         if (msg === null) return { ok: false, cancelled: true };
         return A.dialog(title,
           `<p>${A.escapeHtml(msg)}</p>`,
-          HI() ? '🔁 पुनः प्रयास' : '🔁 Retry',
-          HI() ? 'रद्द करें' : 'Cancel').then((retry) => {
+          '🔁 Retry',
+          'Cancel').then((retry) => {
             if (retry) return attempt();
             return { ok: false, cancelled: true };
           });
@@ -728,7 +730,7 @@ Object.assign(RM.app, (function () {
   function updateEditorMeta() {
     const el = $('ed-meta');
     if (!el) return;
-    if (!A.state.buffer) { el.textContent = HI() ? 'कोई ऑडियो नहीं' : 'No audio'; return; }
+    if (!A.state.buffer) { el.textContent = 'No audio'; return; }
     const p = A.state.project;
     el.textContent = `${A.state.fileName} • ${A.fmtTime(A.state.buffer.duration)} • ${A.state.buffer.sampleRate} Hz • ${p.ops.length} edits`;
   }
@@ -800,35 +802,35 @@ Object.assign(RM.app, (function () {
     $('ed-trim').addEventListener('click', () => {
       if (!A.needAudio()) return;
       const r = selRange();
-      if (r.b - r.a < 0.05) { A.toast(HI() ? 'पहले चयन (selection) बनाएं' : 'Make a selection first'); return; }
+      if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
       A.pushOp({ t: 'trim', a: r.a, b: r.b }).then(updateEditorMeta);
     });
     $('ed-cut').addEventListener('click', () => {
       if (!A.needAudio()) return;
       const r = selRange();
-      if (r.b - r.a < 0.05) { A.toast(HI() ? 'पहले चयन बनाएं' : 'Make a selection first'); return; }
+      if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
       A.pushOp({ t: 'cut', a: r.a, b: r.b }).then(updateEditorMeta);
     });
     $('ed-copy').addEventListener('click', () => {
       if (!A.needAudio()) return;
       const r = selRange();
-      if (r.b - r.a < 0.05) { A.toast(HI() ? 'पहले चयन बनाएं' : 'Make a selection first'); return; }
+      if (r.b - r.a < 0.05) { A.toast('Make a selection first'); return; }
       copyRange(r.a, r.b);
     });
     $('ed-paste').addEventListener('click', () => {
       if (!A.needAudio()) return;
-      if (!RM.proj.getClipboard()) { A.toast(HI() ? 'क्लिपबोर्ड खाली है' : 'Clipboard is empty'); return; }
+      if (!RM.proj.getClipboard()) { A.toast('Clipboard is empty'); return; }
       const at = A.state.player.position();
       A.pushOp({ t: 'paste', at }).then(updateEditorMeta);
     });
     $('ed-split').addEventListener('click', () => {
       if (!A.needAudio()) return;
-      if (!A.state.viewBuffer) { A.toast(HI() ? 'ऑडियो तैयार हो रहा है…' : 'Audio is getting ready…'); return; }
+      if (!A.state.viewBuffer) { A.toast('Preparing audio…'); return; }
       const p = A.state.player.position();
       const dur = A.state.viewBuffer.duration;
-      if (dur - p < 0.1) { A.toast(HI() ? 'अंत के पास स्प्लिट नहीं हो सकता' : 'Cannot split near the end'); return; }
+      if (dur - p < 0.1) { A.toast('Cannot split near the end'); return; }
       copyRange(p, dur, () => A.pushOp({ t: 'cut', a: p, b: dur }).then(() => {
-        A.toast(HI() ? 'स्प्लिट हो गया — पिछला भाग क्लिपबोर्ड में है' : 'Split done — tail is in clipboard');
+        A.toast('Split complete — the tail section is in the clipboard');
         updateEditorMeta();
       }));
     });
@@ -865,7 +867,7 @@ Object.assign(RM.app, (function () {
 
   function copyRange(a, b, done) {
     const src = A.state.viewBuffer;
-    if (!src) { A.toast(HI() ? 'ऑडियो तैयार हो रहा है…' : 'Audio is getting ready…'); return; }
+    if (!src) { A.toast('Preparing audio…'); return; }
     const sr = src.sampleRate;
     const aS = Math.round(a * sr), bS = Math.min(src.length, Math.round(b * sr));
     const len = Math.max(1, bS - aS);
@@ -878,7 +880,7 @@ Object.assign(RM.app, (function () {
       }
     }).then(() => {
       RM.proj.setClipboard(cb);
-      A.toast(HI() ? 'कॉपी हो गया' : 'Copied');
+      A.toast('Copied');
       if (done) done();
     });
   }
@@ -888,11 +890,14 @@ Object.assign(RM.app, (function () {
     if (!box) return;
     const ms = A.state.project ? A.state.project.settings.markers : [];
     box.innerHTML = '';
+    if (!ms.length) {
+      box.innerHTML = '<div class="empty"><div class="empty-icon">📍</div>No markers yet — tap "＋ Marker" to add one.</div>';
+    }
     ms.forEach((m, i) => {
       const d = document.createElement('div');
       d.className = 'marker-row';
       d.innerHTML = `<span>${A.escapeHtml(m.label)} — ${A.fmtTime(m.t)}</span>
-        <button class="btn small" data-a="go">${HI() ? 'जाएं' : 'Go'}</button>
+        <button class="btn small" data-a="go">${'Go'}</button>
         <button class="btn small ghost" data-a="del">✕</button>`;
       d.querySelector('[data-a="go"]').addEventListener('click', () => {
         A.ensureStudio();
@@ -921,6 +926,10 @@ Object.assign(RM.app, (function () {
       grid.appendChild(d);
     });
     $('remix-generate').addEventListener('click', generateRemix);
+    // Placeholder until a style is picked (avoids an empty bordered panel).
+    if ($('remix-desc') && !$('remix-desc').innerHTML.trim()) {
+      $('remix-desc').innerHTML = '<span class="muted">Select a style above to see its details, then tap Generate.</span>';
+    }
     const stemPv = $('remix-stem-preview');
     if (stemPv) stemPv.addEventListener('click', toggleStemPreview);
     $('remix-preview').addEventListener('click', () => {
@@ -928,7 +937,7 @@ Object.assign(RM.app, (function () {
       A.ensureStudio(); A.applyFxToChain();
       const p = A.state.player;
       if (p.playing) p.pause();
-      else { p.setRate(A.state.remix.style ? RM.remix.get(A.state.remix.style).rate : 1); p.play(0); }
+      else { const st = A.state.remix.style; const rt = (st === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : (st ? RM.remix.get(st).rate : 1); p.setRate(rt); p.play(0); }
     });
     // custom sliders
     ['c-tempo','c-reverb','c-echo','c-bass'].forEach((id) => {
@@ -964,7 +973,7 @@ Object.assign(RM.app, (function () {
     if (!A.needAudio()) return;
     // Double-tap guard: BPM detect + stem pipeline dono heavy hain; do run
     // parallel me status ladta aur CPU double hota.
-    if (remixBusy) { A.toast(HI() ? 'रीमिक्स बन रहा है — कृपया प्रतीक्षा करें' : 'Remix is being generated — please wait'); return; }
+    if (remixBusy) { A.toast('Generating remix — please wait'); return; }
     remixBusy = true;
     const genBtn = $('remix-generate');
     if (genBtn) genBtn.disabled = true;
@@ -975,12 +984,13 @@ Object.assign(RM.app, (function () {
     };
     const id = A.state.remix.style || 'commercial';
     const status = $('remix-status');
-    // Part 2: jab 4 stems loaded hon -> stem-based pipeline; bina stems ke
+    // Part 2: jab stem pack loaded ho (2-4 roles) -> stem-based pipeline; bina stems ke
     // purana preset-flow bilkul waisa hi rahe (koi regression nahi).
     if (RM.stems.packAvailable()) { generateStemRemix(id, status, finishRemix); return; }
-    status.textContent = HI() ? 'BPM पहचाना जा रहा है…' : 'Detecting BPM…';
-    guarded(HI() ? 'ऑटो रीमिक्स' : 'Auto Remix', () => RM.audio.detectBPM(A.state.buffer, (p) => {
-      status.textContent = (HI() ? 'BPM पहचाना जा रहा है… ' : 'Detecting BPM… ') + Math.round(p * 100) + '%';
+    status.innerHTML = `<div class="load-row"><span class="spinner" aria-hidden="true"></span><span id="remix-plabel">Detecting BPM…</span></div>`;
+    const setRemixLabel = (t) => { const lb = $('remix-plabel'); if (lb) lb.textContent = t; else status.textContent = t; };
+    guarded('Auto Remix', () => RM.audio.detectBPM(A.state.buffer, (p) => {
+      setRemixLabel(('Detecting BPM… ') + Math.round(p * 100) + '%');
     }).then((bpm) => {
       A.state.remix.bpm = bpm;
       const s = RM.remix.get(id);
@@ -997,31 +1007,46 @@ Object.assign(RM.app, (function () {
       const rate = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : s.rate;
       A.state.player.setRate(rate);
       A.state.player.play(0);
+      // Round-6 (W7 Issue 6): preset-flow remix exportable banao — style rate +
+      // style FX ke saath offline render, warna export me tempo kho jata hai.
+      try {
+        const rxBuf = A.state.buffer, rxRate = rate, rxFx = A.state.fx, rxName = s.name;
+        RM.exp.renderOffline(rxBuf, (oc, srcNode) => {
+          const chain = RM.fx.makeChain(oc);
+          chain.applyPreset(rxFx);
+          srcNode.connect(chain.input);
+          return chain.output;
+        }, { sampleRate: rxBuf.sampleRate, rate: rxRate }).then((rb) => {
+          A.state.remixBuffer = rb;
+          A.state.remixBufferName = rxName + ' — ' + (A.state.fileName || 'remix');
+          try { A.refreshExportSource(); } catch (e) {}
+        }).catch(() => {});
+      } catch (e) {}
       status.innerHTML = `✓ <b>${A.escapeHtml(s.name)}</b> — BPM ${bpm}, tempo ${rate.toFixed(2)}×` +
         (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '');
-      A.toast(HI() ? 'रीमिक्स तैयार है' : 'Remix ready');
+      A.toast('Remix ready');
     })).then((r) => {
       finishRemix();
       if (!r.ok) status.textContent = r.cancelled
-        ? (HI() ? 'रद्द कर दिया गया' : 'Cancelled')
-        : (HI() ? 'BPM पहचान नहीं हो पाई' : 'BPM detection failed');
+        ? ('Cancelled')
+        : ('BPM detection failed');
     });
   }
 
-  // Stem-based pipeline: 4 stems -> per-stem FX -> arrange -> mix -> master.
+  // Stem-based pipeline: stems -> per-stem FX -> arrange -> mix -> master.
   function generateStemRemix(id, status, finishRemix) {
     const pack = RM.stems.getStemPack();
-    const srcName = pack.source === 'ai' ? (HI() ? 'AI stems' : 'AI stems') : (HI() ? 'Spectral bands (DSP)' : 'Spectral bands (DSP)');
+    const srcName = pack.source === 'ai' ? ('AI stems') : ('Spectral bands (DSP)');
     A.stopAll();
     RM.remix.stemPipeline.stopPreview();
-    status.innerHTML = `<div class="progress"><div class="pbar" id="remix-pbar"></div></div><div id="remix-plabel">${HI() ? 'शुरू हो रहा है…' : 'Starting…'}</div>`;
+    status.innerHTML = `<div class="progress"><div class="pbar" id="remix-pbar"></div></div><div id="remix-plabel">${'Starting…'}</div>`;
     const setP = (label, frac) => {
       const bar = $('remix-pbar'), lb = $('remix-plabel');
       if (bar) bar.style.width = Math.round(frac * 100) + '%';
       if (lb) lb.textContent = label;
       status.setAttribute('data-stage', label);
     };
-    guarded(HI() ? 'स्टेम रीमिक्स' : 'Stem Remix', () => {
+    guarded('Stem Remix', () => {
       const customTempo = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : null;
       const customFx = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.fx : null;
       return RM.remix.stemPipeline.generate(id, pack, { customTempo, customFx }, setP).then((res) => {
@@ -1029,19 +1054,19 @@ Object.assign(RM.app, (function () {
         A.state.remix.bpm = res.bpm;
         RM.remix.stemPipeline.preview(res.buffer);
         status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — BPM ${res.bpm}, tempo ${res.rate.toFixed(2)}×` +
-          `<div class="honest">🎤 ${A.escapeHtml(srcName)} — 4-स्टेम पाइपलाइन (per-stem FX → arrange → mix → master)</div>` +
-          `<div class="btn-row" style="margin-top:8px"><button class="btn small" id="remix-stem-stop">■ ${HI() ? 'प्रीव्यू रोकें' : 'Stop preview'}</button></div>`;
+          `<div class="honest">🎤 ${A.escapeHtml(srcName)} — ${pack.roles.length}-stem pipeline (per-stem FX → arrange → mix → master)</div>` +
+          `<div class="btn-row" style="margin-top:8px"><button class="btn small" id="remix-stem-stop">■ ${'Stop preview'}</button></div>`;
         $('remix-stem-stop').addEventListener('click', () => {
           RM.remix.stemPipeline.stopPreview();
-          status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — ${HI() ? 'तैयार है' : 'ready'}`;
+          status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — ${'ready'}`;
         });
-        A.toast(HI() ? 'स्टेम रीमिक्स तैयार है' : 'Stem remix ready');
+        A.toast('Stem remix ready');
       });
     }).then((r) => {
       if (finishRemix) finishRemix();
       if (!r.ok) status.innerHTML = r.cancelled
-        ? (HI() ? 'रद्द कर दिया गया' : 'Cancelled')
-        : (HI() ? 'स्टेम रीमिक्स विफल रहा' : 'Stem remix failed');
+        ? ('Cancelled')
+        : ('Stem remix failed');
     });
   }
 
@@ -1051,8 +1076,8 @@ Object.assign(RM.app, (function () {
     if (!el) return;
     if (RM.stems.packAvailable()) {
       const pack = RM.stems.getStemPack();
-      const n = pack.source === 'ai' ? (HI() ? 'AI stems (cloud)' : 'AI stems (cloud)') : (HI() ? 'Spectral bands (DSP)' : 'Spectral bands (DSP)');
-      el.innerHTML = `🎤 <b>4 stems loaded</b> — ${A.escapeHtml(n)}: Generate दबाने पर स्टेम-पाइपलाइन चलेगी।`;
+      const n = pack.source === 'ai' ? ('AI stems (cloud)') : (pack.source === 'hf' ? ('AI stems (Hugging Face — Vocals + Instrumental)') : ('Spectral bands (DSP)'));
+      el.innerHTML = `🎤 <b>${pack.roles.length} stems loaded</b> — ${A.escapeHtml(n)}: press Generate to run the stem pipeline.`;
       el.style.display = '';
       const pv = $('remix-stem-preview');
       if (pv) pv.style.display = A.state.stemMix ? '' : 'none';
@@ -1065,7 +1090,7 @@ Object.assign(RM.app, (function () {
   function toggleStemPreview() {
     if (RM.remix.stemPipeline.isPreviewing()) RM.remix.stemPipeline.stopPreview();
     else if (A.state.stemMix) { A.stopAll(); RM.remix.stemPipeline.preview(A.state.stemMix); }
-    else A.toast(HI() ? 'पहले Generate दबाएं' : 'Generate first');
+    else A.toast('Generate first');
   }
 
   /* ================= slowed + reverb studio ================= */
@@ -1145,7 +1170,7 @@ Object.assign(RM.app, (function () {
         <div class="ec-name">${A.escapeHtml(e.name)} <span class="beta">BETA</span></div>
         <div class="ec-desc">${A.escapeHtml(e.desc)}</div>
         <div class="honest">${A.escapeHtml(e.note)}</div>
-        <button class="btn primary block" data-run="${e.id}">${HI() ? 'अलग करें' : 'Separate'}</button>`;
+        <button class="btn primary block" data-run="${e.id}">${'Separate'}</button>`;
       d.querySelector('[data-run]').addEventListener('click', () => runStemEngine(e.id));
       grid.appendChild(d);
     });
@@ -1156,7 +1181,7 @@ Object.assign(RM.app, (function () {
   }
   function runStemEngine(id) {
     if (!A.needAudio()) return;
-    if (stemBusy) { A.toast(HI() ? 'सेपरेशन चल रहा है — कृपया प्रतीक्षा करें' : 'Separation is running — please wait'); return; }
+    if (stemBusy) { A.toast('Separation is running — please wait'); return; }
     stemBusy = true;
     const runBtns = Array.from(document.querySelectorAll('#stems-grid [data-run]'));
     runBtns.forEach((b) => { b.disabled = true; });
@@ -1166,9 +1191,9 @@ Object.assign(RM.app, (function () {
     stopStemPlayers();
     A.stopAll();
     const eng = RM.stems.ENGINES.find((e) => e.id === id);
-    status.innerHTML = `<div class="progress"><div class="pbar" id="stems-pbar"></div></div><div id="stems-plabel">${A.escapeHtml(eng.name)}…</div>`;
+    status.innerHTML = `<div class="load-row"><span class="spinner" aria-hidden="true"></span><span id="stems-plabel">${A.escapeHtml(eng.name)}…</span></div><div class="progress"><div class="pbar" id="stems-pbar"></div></div>`;
     const t0 = Date.now();
-    guarded(HI() ? 'स्टेम सेपरेटर' : 'Stem Separator', () => RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
+    guarded('Stem Separator', () => RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
       const bar = $('stems-pbar'), lb = $('stems-plabel');
       if (bar) bar.style.width = Math.round(p * 100) + '%';
       if (lb) lb.textContent = (label || eng.name) + ' ' + Math.round(p * 100) + '%';
@@ -1176,19 +1201,19 @@ Object.assign(RM.app, (function () {
       stemBusy = false;
       runBtns.forEach((b) => { b.disabled = false; });
       if (!r.ok) {
-        if (!r.cancelled) status.innerHTML = `<div class="err">${HI() ? 'विफल रहा' : 'Failed'}</div>`;
+        if (!r.cancelled) status.innerHTML = `<div class="err">${'Failed'}</div>`;
         return;
       }
       const stems = r.result;
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
-      status.innerHTML = `<div class="ok">${HI() ? 'हो गया' : 'Done'} (${secs}s) — ${stems.length} stems</div><div class="honest">${A.escapeHtml(eng.note)}</div>`;
+      status.innerHTML = `<div class="ok">${'Done'} (${secs}s) — ${stems.length} stems</div><div class="honest">${A.escapeHtml(eng.note)}</div>`;
       stems.forEach((s, i) => addStemRow(s, i));
       // 4-band spectral split -> honestly-labelled 4-role pack for Auto Remix testing
       if (id === 'spectral' && stems.length === 4) {
         const b = document.createElement('button');
         b.className = 'btn primary block';
         b.style.marginTop = '10px';
-        b.textContent = HI() ? '⚡ Auto Remix में इस्तेमाल करें (4 bands)' : '⚡ Use in Auto Remix (4 bands)';
+        b.textContent = '⚡ Use in Auto Remix (4 bands)';
         b.addEventListener('click', () => {
           try {
             RM.stems.setStemPack({
@@ -1200,21 +1225,19 @@ Object.assign(RM.app, (function () {
                 { role: 'air',     label: stems[3].name + ' (band)', buffer: stems[3].buffer },
               ],
             });
-            A.toast(HI() ? '4 bands Auto Remix के लिए तैयार ✓' : '4 bands ready for Auto Remix ✓');
+            A.toast('4 bands ready for Auto Remix ✓');
             A.show('remix');
           } catch (e) {
-            A.toast((HI() ? 'विफल: ' : 'Failed: ') + (e.message || e), 3000);
+            A.toast(('Failed: ') + A.cleanErrMsg(e.message || e), 3000);
           }
         });
         results.appendChild(b);
         const note = document.createElement('div');
         note.className = 'honest';
-        note.textContent = HI()
-          ? 'नोट: ये frequency bands हैं — true instrument isolation नहीं। AI stems (vocal/drums/bass/other) आने पर वही इस्तेमाल होंगे।'
-          : 'Note: these are frequency bands, not true instrument isolation. AI stems (vocal/drums/bass/other) will be used when available.';
+        note.textContent = 'Note: these are frequency bands, not true instrument isolation. AI stems (vocal/drums/bass/other) will be used when available.';
         results.appendChild(note);
       }
-      A.toast(HI() ? 'Stems तैयार हैं' : 'Stems ready');
+      A.toast('Stems ready');
     });
   }
   function addStemRow(s, i) {
@@ -1227,8 +1250,8 @@ Object.assign(RM.app, (function () {
         <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
       </div>
       <button class="btn small" data-a="play">▶</button>
-      <button class="btn small ghost" data-a="mix">${HI() ? 'मिक्सर' : 'Mixer'}</button>
-      <button class="btn small ghost" data-a="exp">${HI() ? 'एक्सपोर्ट' : 'Export'}</button>`;
+      <button class="btn small ghost" data-a="mix">${'Mixer'}</button>
+      <button class="btn small ghost" data-a="exp">${'Export'}</button>`;
     let player = null;
     const btn = d.querySelector('[data-a="play"]');
     btn.addEventListener('click', () => {
@@ -1270,7 +1293,7 @@ Object.assign(RM.app, (function () {
 Object.assign(RM.app, (function () {
   const A = RM.app;
   const $ = A.$, clamp = RM.audio.clamp;
-  const HI = () => { try { return (localStorage.getItem('ruhmix.lang') || 'hi') === 'hi'; } catch (e) { return true; } };
+  const HI = () => false; // English-only build: language locked to English
 
   /* ================= multitrack mixer (6 tracks) ================= */
   const mixer = { tracks: [] };
@@ -1286,7 +1309,7 @@ Object.assign(RM.app, (function () {
       d.innerHTML = `
         <div class="tr-head"><span class="tr-name">${tr.name}</span><span class="tr-src muted"></span></div>
         <div class="tr-row">
-          <button class="btn small" data-a="load">${HI() ? 'लोड' : 'Load'}</button>
+          <button class="btn small" data-a="load">${'Load'}</button>
           <button class="btn small" data-a="play">▶</button>
           <button class="btn small tog" data-a="mute">M</button>
           <button class="btn small tog" data-a="solo">S</button>
@@ -1325,7 +1348,7 @@ Object.assign(RM.app, (function () {
       const d = $('mx-track-' + tr.id);
       if (!d) return;
       d.querySelector('.tr-name').textContent = tr.name;
-      d.querySelector('.tr-src').textContent = tr.buffer ? A.fmtTime(tr.buffer.duration) : (HI() ? 'खाली' : 'empty');
+      d.querySelector('.tr-src').textContent = tr.buffer ? A.fmtTime(tr.buffer.duration) : ('Empty');
       d.querySelector('[data-a="mute"]').classList.toggle('on', tr.mute);
       d.querySelector('[data-a="solo"]').classList.toggle('on', tr.solo);
       d.querySelector('[data-a="play"]').textContent = (tr.player && tr.player.playing) ? '⏸' : '▶';
@@ -1335,7 +1358,7 @@ Object.assign(RM.app, (function () {
     const q = (s) => d.querySelector(s);
     q('[data-a="load"]').addEventListener('click', () => showTrackLoadMenu(tr));
     q('[data-a="play"]').addEventListener('click', () => {
-      if (!tr.buffer) { A.toast(HI() ? 'पहले ट्रैक में ऑडियो लोड करें' : 'Load audio into the track first'); return; }
+      if (!tr.buffer) { A.toast('Load audio into the track first'); return; }
       RM.audio.ensureCtx();
       if (!tr.player) { tr.player = RM.audio.makePlayer(); tr.player.load(tr.buffer); }
       if (tr.player.playing) tr.player.pause();
@@ -1357,12 +1380,12 @@ Object.assign(RM.app, (function () {
   }
   function showTrackLoadMenu(tr) {
     const opts = [];
-    if (A.state.viewBuffer) opts.push({ label: (HI() ? 'वर्तमान प्रोजेक्ट' : 'Current project'), buf: A.state.viewBuffer });
+    if (A.state.viewBuffer) opts.push({ label: ('Current project'), buf: A.state.viewBuffer });
     RM.stems.results.forEach((s) => opts.push({ label: 'Stem: ' + s.name, buf: s.buffer }));
     A.state.imports.forEach((it) => opts.push({ label: it.name, buf: it.buffer }));
-    if (!opts.length) { A.toast(HI() ? 'लोड करने के लिए कुछ नहीं है' : 'Nothing to load'); return; }
+    if (!opts.length) { A.toast('Nothing to load'); return; }
     const body = opts.map((o, i) => `<button class="btn block listbtn" data-i="${i}">${A.escapeHtml(o.label)}</button>`).join('');
-    A.dialog(HI() ? 'ट्रैक में लोड करें' : 'Load into track', body, null, HI() ? 'रद्द करें' : 'Cancel').then(() => {});
+    A.dialog('Load into track', body, null, 'Cancel').then(() => {});
     document.querySelectorAll('#dlg-body .listbtn').forEach((b) => {
       b.addEventListener('click', () => {
         const o = opts[+b.dataset.i];
@@ -1388,7 +1411,7 @@ Object.assign(RM.app, (function () {
     tr.name = Array.from(name || 'Audio').slice(0, 28).join('');
     if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
     refreshTrackUI();
-    A.toast((HI() ? 'मिक्सर में भेजा गया: ' : 'Sent to mixer: ') + tr.name);
+    A.toast(('Sent to mixer: ') + tr.name);
     return true;
   }
   A.sendToMixer = sendToMixer;
@@ -1461,7 +1484,7 @@ Object.assign(RM.app, (function () {
       A.state.fx = A.defaultFx();
       A.applyFxToChain();
       syncFxUI();
-      A.toast(HI() ? 'FX रीसेट हो गया' : 'FX reset');
+      A.toast('FX reset');
     });
     $('fx-save').addEventListener('click', () => {
       try {
@@ -1470,7 +1493,7 @@ Object.assign(RM.app, (function () {
         saved[name] = A.state.fx;
         localStorage.setItem('ruhmix.fxpresets', JSON.stringify(saved));
         renderFxSaved();
-        A.toast((HI() ? 'सहेजा गया: ' : 'Saved: ') + name);
+        A.toast(('Saved: ') + name);
       } catch (e) {}
     });
     renderFxSaved();
@@ -1488,7 +1511,7 @@ Object.assign(RM.app, (function () {
       b.addEventListener('click', () => {
         A.state.fx = saved[name];
         A.applyFxToChain(); syncFxUI();
-        A.toast((HI() ? 'लागू: ' : 'Applied: ') + name);
+        A.toast(('Applied: ') + name);
       });
       box.appendChild(b);
     });
@@ -1537,7 +1560,7 @@ Object.assign(RM.app, (function () {
     });
     $('mst-ab').addEventListener('click', (e) => {
       mst.ab = mst.ab === 'after' ? 'before' : 'after';
-      e.target.textContent = mst.ab === 'after' ? (HI() ? 'सुन रहे हैं: AFTER (मास्टर्ड)' : 'Hearing: AFTER (mastered)') : (HI() ? 'सुन रहे हैं: BEFORE (मूल)' : 'Hearing: BEFORE (original)');
+      e.target.textContent = mst.ab === 'after' ? ('Hearing: AFTER (mastered)') : ('Hearing: BEFORE (original)');
       applyMstChain();
     });
     $('mst-play').addEventListener('click', () => {
@@ -1548,11 +1571,11 @@ Object.assign(RM.app, (function () {
     });
     $('mst-normalize').addEventListener('click', () => {
       if (!A.needAudio()) return;
-      A.toast(HI() ? 'नॉर्मलाइज़ हो रहा है…' : 'Normalizing…');
-      RM.audio.normalizeBuffer(A.state.viewBuffer, 0.95, (p) => {
+      A.toast('Normalizing…');
+      RM.audio.normalizeBuffer(A.state.viewBuffer, 0.9441, (p) => {
         $('mst-status').textContent = Math.round(p * 100) + '%';
       }).then(() => {
-        $('mst-status').textContent = HI() ? '✓ Loudness normalize हो गया (peak −0.5 dB)' : '✓ Loudness normalized (peak −0.5 dB)';
+        $('mst-status').textContent = '✓ Loudness normalized (peak −0.5 dB)';
         A.refreshView();
       });
     });
@@ -1633,12 +1656,12 @@ Object.assign(RM.app, (function () {
         metro.playing = true; metro.beat = 0;
         metro.nextTime = RM.audio.ensureCtx().currentTime + 0.06;
         metro.timer = setInterval(metroSchedule, 25);
-        e.target.textContent = HI() ? 'बंद करें' : 'Stop';
+        e.target.textContent = 'Stop';
         e.target.classList.add('on');
       } else {
         metro.playing = false;
         clearInterval(metro.timer); metro.timer = null;
-        e.target.textContent = HI() ? 'शुरू करें' : 'Start';
+        e.target.textContent = 'Start';
         e.target.classList.remove('on');
       }
     });
@@ -1667,14 +1690,14 @@ Object.assign(RM.app, (function () {
   const expToken = { cancelled: false };
 
   // Export filename sanitize — unicode-safe, deterministic:
-  // - Hindi/regional naam bache rehte hain: \p{L} letters + \p{M} COMBINING
-  //   MARKS (Hindi matras! purana [^\w] "मेरा" -> "मर" kar deta tha) + \p{N}
-  // - "_" bhi rakho (Team 4 ke [^A-Za-z0-9._-] se align)
-  // - spaces -> '_' (native saveFile bhi spaces ko '_' karta hai, isliye
-  //   toast me jo naam dikhe wahi file save ho — Team 4 ka mismatch fix)
-  // - maujooda AUDIO extension hatao (".mp3") taaki "song.mp3.mp3" na bane;
-  //   sirf known audio ext — "my.song.v2" ka ".v2" extension nahi hai
-  // - Array.from slice: emoji surrogate-pair kabhi aadha na kate
+  // - Hindi/regional names are preserved: \p{L} letters + \p{M} COMBINING
+  //   MARKS (Hindi matras — the old [^\w] turned "song" names into stubs) + \p{N}
+  // - keep "_" as well (aligned with Team 4's [^A-Za-z0-9._-])
+  // - spaces -> '_' (native saveFile also turns spaces into '_', so the name
+  //   the name shown in the toast is exactly the file that gets saved)
+  // - strip an existing AUDIO extension (".mp3") so "song.mp3.mp3" can't happen;
+  //   known audio extensions only — the ".v2" in "my.song.v2" is not an extension
+  // - Array.from slice: never split an emoji surrogate pair in half
   function sanitizeFileBase(name) {
     const raw = String(name || '').trim()
       .replace(/\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|webm|3gp|3g2|wma|aiff|aif)$/i, '');
@@ -1689,12 +1712,14 @@ Object.assign(RM.app, (function () {
     if (!box) return;
     box.innerHTML = '';
     const opts = [];
-    if (A.state.stemMix) opts.push({ kind: 'stemmix', label: (HI() ? '🎤 स्टेम मिक्स — ऑटो रीमिक्स' : '🎤 Stem Mix — Auto Remix'), get: () => ({ buffer: A.state.stemMix, rate: 1, fx: A.flatFx(), name: 'stem-mix' }) });
-    if (A.state.viewBuffer) opts.push({ kind: 'project', label: (HI() ? 'वर्तमान प्रोजेक्ट' : 'Current project') + ' (' + A.state.fileName + ')', get: () => ({ buffer: A.state.viewBuffer, rate: A.state.project.settings.speed || 1, fx: A.state.fx, name: A.state.fileName }) });
+    if (A.state.stemMix) opts.push({ kind: 'stemmix', label: ('🎤 Stem Mix — Auto Remix'), get: () => ({ buffer: A.state.stemMix, rate: 1, fx: A.flatFx(), name: 'stem-mix', tail: 0 }) });
+    // Round-6 (W7 Issue 6): preset-flow remix bhi exportable — generate time pe offline render hota hai.
+    if (A.state.remixBuffer) opts.push({ kind: 'remix', label: ('🎛️ Remix — ') + (A.state.remixBufferName || 'remix'), get: () => ({ buffer: A.state.remixBuffer, rate: 1, fx: A.flatFx(), name: 'remix-' + (A.state.remixBufferName || 'remix'), tail: 0 }) });
+    if (A.state.viewBuffer) opts.push({ kind: 'project', label: ('Current project') + ' (' + A.state.fileName + ')', get: () => ({ buffer: A.state.viewBuffer, rate: A.state.project.settings.speed || 1, fx: A.state.fx, name: A.state.fileName, vol: A.state.project.settings.volume, pan: A.state.project.settings.pan }) });
     RM.stems.results.forEach((s) => opts.push({ kind: 'stem', label: 'Stem: ' + s.name, get: () => ({ buffer: s.buffer, rate: 1, fx: A.defaultFx(), name: s.name }) }));
     A.state.imports.forEach((it) => opts.push({ kind: 'import', label: it.name, get: () => ({ buffer: it.buffer, rate: 1, fx: A.defaultFx(), name: it.name }) }));
     if (!opts.length) {
-      box.innerHTML = `<div class="empty">${HI() ? 'एक्सपोर्ट के लिए पहले ऑडियो लोड करें' : 'Load audio first to export'}</div>`;
+      box.innerHTML = `<div class="empty"><div class="empty-icon">📤</div>${'Load audio first to export'}</div>`;
       return;
     }
     // Stem row se "Export" dabane par exportSource {kind:'buffer', buffer, name}
@@ -1703,7 +1728,7 @@ Object.assign(RM.app, (function () {
     const es = A.state.exportSource;
     let checkedIdx = 0;
     if (es && es.kind === 'buffer' && es.buffer) {
-      opts.unshift({ kind: 'explicit', label: (HI() ? '🎯 चुना हुआ: ' : '🎯 Selected: ') + es.name, get: () => ({ buffer: es.buffer, rate: 1, fx: A.defaultFx(), name: es.name }) });
+      opts.unshift({ kind: 'explicit', label: ('🎯 Selected: ') + es.name, get: () => ({ buffer: es.buffer, rate: 1, fx: A.defaultFx(), name: es.name }) });
       checkedIdx = 0;
     } else if (es && typeof es.idx === 'number' && es.idx >= 0 && es.idx < opts.length) {
       checkedIdx = es.idx;
@@ -1740,13 +1765,13 @@ Object.assign(RM.app, (function () {
     $('exp-start').addEventListener('click', doExport);
     $('exp-cancel').addEventListener('click', () => {
       expToken.cancelled = true;
-      $('exp-status').textContent = HI() ? 'रद्द किया जा रहा है…' : 'Cancelling…';
+      $('exp-status').textContent = 'Cancelling…';
     });
     $('exp-share').addEventListener('click', () => {
-      if (!A.state.lastDelivery) { A.toast(HI() ? 'पहले एक्सपोर्ट करें' : 'Export first'); return; }
+      if (!A.state.lastDelivery) { A.toast('Export first'); return; }
       const mime = A.state.lastDelivery.mime;
       const r = RM.exp.share(A.state.lastDelivery, mime);
-      if (r === 'unavailable') A.toast(HI() ? 'शेयर इस डिवाइस पर उपलब्ध नहीं है' : 'Share unavailable on this device', 3000);
+      if (r === 'unavailable') A.toast('Share unavailable on this device', 3000);
     });
   }
   function syncExpFormat() {
@@ -1754,9 +1779,9 @@ Object.assign(RM.app, (function () {
     const f = fmt ? fmt.value : 'mp3';
     $('exp-bitrate-row').style.display = f === 'mp3' ? '' : 'none';
     $('exp-note').textContent =
-      f === 'mp3' ? (HI() ? 'MP3 — छोटी फ़ाइल, हर जगह चलती है (lamejs, ऑफलाइन)' : 'MP3 — small file, plays everywhere (lamejs, offline)')
-      : f === 'flac' ? (HI() ? 'FLAC — lossless क्वालिटी, WAV से छोटी फ़ाइल (ऑफलाइन एनकोडर)' : 'FLAC — lossless quality, smaller than WAV (offline encoder)')
-      : (HI() ? 'WAV — बेस्ट क्वालिटी, बड़ी फ़ाइल (16-bit PCM)' : 'WAV — best quality, larger file (16-bit PCM)');
+      f === 'mp3' ? ('MP3 — small file, plays everywhere (lamejs, offline)')
+      : f === 'flac' ? ('FLAC — lossless quality, smaller than WAV (offline encoder)')
+      : ('WAV — best quality, larger file (16-bit PCM)');
   }
   function setExpStage(label, frac) {
     $('exp-status').textContent = label;
@@ -1765,7 +1790,7 @@ Object.assign(RM.app, (function () {
   }
   function doExport() {
     const opts = A.state._exportOpts;
-    if (!opts || !opts.length) { A.toast(HI() ? 'एक्सपोर्ट के लिए कुछ नहीं है' : 'Nothing to export'); return; }
+    if (!opts || !opts.length) { A.toast('Nothing to export'); return; }
     const sel = document.querySelector('input[name="expsrc"]:checked');
     const src = opts[sel ? +sel.value : 0].get();
     const fmtEl = document.querySelector('input[name="expfmt"]:checked');
@@ -1794,7 +1819,7 @@ Object.assign(RM.app, (function () {
     // agar SYNCHRONOUSLY throw kare (bahut badi file -> OfflineAudioContext
     // length limit) to bhi .catch tak pahunche aur Export button dobara
     // enable ho. Bina iske button hamesha disabled rehta (dead UI).
-    stage(HI() ? 'तैयार हो रहा है…' : 'Preparing…', 0.02);
+    stage('Preparing…', 0.02);
     let chain;
     // Echo tail: high feedback pe echo 2.5s se bahut lambi chalti hai (fb=0.85 →
     // ~16s). Default tail use ki to tail kat jati hai — isliye echo settings se
@@ -1814,42 +1839,57 @@ Object.assign(RM.app, (function () {
       const wVal = (A.state.width && A.state.width.wGain) ? A.state.width.wGain.gain.value : 1;
       const W = widthMatrix(oc, wVal);
       chain.output.connect(W.in);
-      return W.out;
-    }, { sampleRate: sr, rate: src.rate || 1, tail: tailNeed }))
+      // Round-6 (W6 P2): export me project volume/pan bhi lagao — jo sunte ho
+      // wahi export ho (playback me panner+gain hain, export me the hi nahi).
+      let outNode = W.out;
+      const xVol = (src.vol != null ? src.vol : 1);
+      const xPan = (src.pan || 0);
+      if (xVol !== 1 || xPan !== 0) {
+        const xg = oc.createGain(); xg.gain.value = xVol;
+        W.out.connect(xg);
+        if (oc.createStereoPanner) {
+          const xp = oc.createStereoPanner();
+          xp.pan.value = Math.max(-1, Math.min(1, xPan));
+          xg.connect(xp);
+          outNode = xp;
+        } else { outNode = xg; }
+      }
+      return outNode;
+    }, { sampleRate: sr, rate: src.rate || 1, tail: (src.tail !== undefined ? src.tail : tailNeed) }))
       .then((rendered) => {
         try { if (chain) chain.dispose(); } catch (e) {}
-        stage(HI() ? 'रेंडर हो रहा है… कृपया प्रतीक्षा करें' : 'Rendering… please wait', 0.35);
+        stage('Rendering… please wait', 0.35);
         const p2 = normalize
-          ? RM.audio.normalizeBuffer(rendered, 0.95, (p) => setExpStage((HI() ? 'नॉर्मलाइज़: ' : 'Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
+          ? RM.audio.normalizeBuffer(rendered, 0.9441, (p) => setExpStage(('Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
           : Promise.resolve(rendered);
         return p2.then(() => {
           // NOTE: normalizeBuffer normalizes IN PLACE and resolves to the peak
           // (a number), NOT the buffer — always use `rendered` here.
           const buf = rendered;
-          stage(HI() ? 'एनकोड हो रहा है…' : 'Encoding…', 0.5);
+          stage('Encoding…', 0.5);
           if (isFlac) {
             // FLAC: 16-bit PCM -> pure-JS FLAC encoder (offline, lossless)
-            return RM.audio.floatToInt16(buf, (p) => setExpStage((HI() ? 'तैयार: ' : 'Preparing: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
+            return RM.audio.floatToInt16(buf, (p) => setExpStage(('Preparing: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
               .then((i16) => {
-                stage(HI() ? 'FLAC एनकोड हो रहा है…' : 'Encoding FLAC…', 0.6);
+                stage('Encoding FLAC…', 0.6);
                 return RM.exp.encodeFlac(i16, buf.sampleRate,
                   (p, label) => setExpStage('FLAC ' + Math.round(p * 100) + '%', 0.6 + p * 0.3), expToken);
               });
           }
           if (!isMp3) {
-            return RM.audio.encodeWavBuffer(buf, (p) => setExpStage((HI() ? 'एनकोड: ' : 'Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35))
+            return RM.audio.encodeWavBuffer(buf, (p) => setExpStage(('Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35))
               .then((ab) => new Blob([ab], { type: mime }));
           }
           // MP3: resample to the chosen sample rate (44100/48000 — both valid MPEG-1), then encode
-          return RM.audio.resampleBuffer(buf, sr, (p) => setExpStage((HI() ? 'रीसैंपल: ' : 'Resampling: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
-            .then((rs) => RM.audio.floatToInt16(rs, (p) => setExpStage((HI() ? 'तैयार: ' : 'Preparing: ') + Math.round(p * 100) + '%', 0.6 + p * 0.1)))
+          return RM.audio.resampleBuffer(buf, sr, (p) => setExpStage(('Resampling: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
+            .then((rs) => RM.audio.floatToInt16(rs, (p) => setExpStage(('Preparing: ') + Math.round(p * 100) + '%', 0.6 + p * 0.1)))
             .then((i16) => {
-              stage(HI() ? 'MP3 एनकोड हो रहा है…' : 'Encoding MP3…', 0.7);
+              stage('Encoding MP3…', 0.7);
               return RM.exp.encodeMp3(i16, kbps, sr, (p) => setExpStage('MP3 ' + Math.round(p * 100) + '%', 0.7 + p * 0.2), expToken);
             });
         }).then((blob) => {
-          stage(HI() ? 'सहेजा जा रहा है…' : 'Saving…', 0.95);
-          return RM.exp.deliver(blob, fileName, mime, (p) => setExpStage((HI() ? 'सहेजा जा रहा है… ' : 'Saving… ') + Math.round(p * 100) + '%', 0.95));
+          stage('Saving…', 0.95);
+          return RM.exp.deliver(blob, fileName, mime, (p) => setExpStage(('Saving… ') + Math.round(p * 100) + '%', 0.95));
         }).then((delivery) => {
           delivery.mime = mime;
           A.state.lastDelivery = delivery;
@@ -1858,34 +1898,34 @@ Object.assign(RM.app, (function () {
             localStorage.setItem('ruhmix.exportDefaults', JSON.stringify(A.state.exportDefaults));
           } catch (e) {}
           const nat = RM.audio.native;
-          if (nat.method('showNotification')) nat.call('showNotification', 'RuhMix', (HI() ? 'एक्सपोर्ट हो गया: ' : 'Export complete: ') + fileName);
-          done((HI() ? '✓ हो गया: ' : '✓ Done: ') + fileName, true);
+          if (nat.method('showNotification')) nat.call('showNotification', 'RuhMix', ('Export complete: ') + fileName);
+          done(('✓ Done: ') + fileName, true);
           $('exp-share').style.display = '';
-          A.toast(HI() ? 'एक्सपोर्ट हो गया' : 'Export complete');
+          A.toast('Export complete');
           // Interstitial ad: har 2nd export par (pehle par nahi), max 1 per 5 min.
           // Fail ho to silent skip — export pe koi asar nahi.
           try { if (window.RM && RM.ads) RM.ads.notifyExportDone(); } catch (e) {}
         });
       })
       .catch((e) => {
-        if (e && e.message === 'cancelled') { done(HI() ? 'रद्द कर दिया गया' : 'Cancelled', false); return; }
+        if (e && e.message === 'cancelled') { done('Cancelled', false); return; }
         const msg = A.friendlyErr(e);
-        done(HI() ? 'विफल रहा' : 'Failed', false);
-        A.dialog(HI() ? 'एक्सपोर्ट विफल' : 'Export failed',
+        done('Failed', false);
+        A.dialog('Export failed',
           `<p>${A.escapeHtml(msg)}</p>`,
-          HI() ? '🔁 पुनः प्रयास' : '🔁 Retry',
-          HI() ? 'रद्द करें' : 'Cancel').then((retry) => { if (retry) doExport(); });
+          '🔁 Retry',
+          'Cancel').then((retry) => { if (retry) doExport(); });
       });
   }
 
   /* ================= projects screen ================= */
   function initProjects() {
     $('proj-new').addEventListener('click', () => {
-      A.dialog(HI() ? 'नया प्रोजेक्ट' : 'New Project',
-        `<input id="dlg-name" class="textin" value="${HI() ? 'मेरा प्रोजेक्ट' : 'My Project'}" maxlength="40">`,
-        HI() ? 'बनाएं' : 'Create', HI() ? 'रद्द करें' : 'Cancel').then((ok) => {
+      A.dialog('New Project',
+        `<input id="dlg-name" class="textin" value="${'My Project'}" maxlength="40">`,
+        'Create', 'Cancel').then((ok) => {
           if (!ok) return;
-          const name = ($('dlg-name') && $('dlg-name').value.trim()) || (HI() ? 'मेरा प्रोजेक्ट' : 'My Project');
+          const name = ($('dlg-name') && $('dlg-name').value.trim()) || ('My Project');
           RM.proj.save(A.state.project || RM.proj.create(name));
           A.newProject(name);
           renderProjects();
@@ -1902,7 +1942,7 @@ Object.assign(RM.app, (function () {
     let arr = RM.proj.list();
     if (q) arr = arr.filter((p) => (p.name || '').toLowerCase().includes(q));
     if (!arr.length) {
-      box.innerHTML = `<div class="empty">${q ? (HI() ? 'कोई प्रोजेक्ट नहीं मिला' : 'No projects found') : (HI() ? 'अभी कोई सहेजा हुआ प्रोजेक्ट नहीं है' : 'No saved projects yet')}</div>`;
+      box.innerHTML = `<div class="empty"><div class="empty-icon">📁</div>${q ? ('No projects found') : ('No saved projects yet')}</div>`;
       return;
     }
     arr.forEach((p) => {
@@ -1912,13 +1952,13 @@ Object.assign(RM.app, (function () {
       d.innerHTML = `
         <div class="ii-main">
           <div class="ii-name">${A.escapeHtml(p.name)}</div>
-          <div class="ii-meta">${A.escapeHtml((p.audioRef && p.audioRef.name) || (HI() ? 'कोई ऑडियो नहीं' : 'no audio'))} • ${p.ops.length} edits • ${dt}</div>
+          <div class="ii-meta">${A.escapeHtml((p.audioRef && p.audioRef.name) || ('No audio'))} • ${p.ops.length} edits • ${dt}</div>
         </div>
-        <button class="btn small" data-a="open">${HI() ? 'खोलें' : 'Open'}</button>
+        <button class="btn small" data-a="open">${'Open'}</button>
         <button class="btn small ghost" data-a="del">✕</button>`;
       d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
       d.querySelector('[data-a="del"]').addEventListener('click', () => {
-        A.dialog(HI() ? 'हटाएं?' : 'Delete?', `<p>${A.escapeHtml(p.name)}</p>`, HI() ? 'हटाएं' : 'Delete', HI() ? 'रद्द करें' : 'Cancel')
+        A.dialog('Delete?', `<p>${A.escapeHtml(p.name)}</p>`, 'Delete', 'Cancel')
           .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
       });
       box.appendChild(d);
@@ -1938,10 +1978,18 @@ Object.assign(RM.app, (function () {
     A.show('import');
     const hint = $('import-hint');
     if (hint && p.audioRef) {
-      hint.innerHTML = (HI() ? 'इस प्रोजेक्ट का ऑडियो चुनें: <b>' : 'Pick this project\'s audio: <b>') + A.escapeHtml(p.audioRef.name) + '</b>';
+      hint.innerHTML = ('Pick this project\'s audio: <b>') + A.escapeHtml(p.audioRef.name) + '</b>';
       hint.style.display = '';
     }
-    A.toast((HI() ? 'प्रोजेक्ट खुल गया: ' : 'Project opened: ') + p.name);
+    A.toast(('Project opened: ') + p.name);
+    // Round-6: paste ops ka clipboard in-memory hai — restart ke baad reopen
+    // par paste wale hisse render nahi honge. Chup-chaap audio badalne ke
+    // bajay user ko saaf-saaf bata do.
+    try {
+      if (RM.proj.hasPasteOps(p) && !RM.proj.getClipboard()) {
+        A.toast('Note: pasted audio could not be restored (clipboard is empty)', 4000);
+      }
+    } catch (e) {}
   }
 
   /* ================= settings ================= */
@@ -1982,16 +2030,16 @@ Object.assign(RM.app, (function () {
     });
     $('set-clear-cache').addEventListener('click', () => {
       const nativeCleared = clearTempData();
-      A.toast(nativeCleared ? (HI() ? 'कैश साफ़ हो गया' : 'Cache cleared') : (HI() ? 'अस्थायी डेटा साफ़ हो गया' : 'Temporary data cleared'));
+      A.toast(nativeCleared ? ('Cache cleared') : ('Temporary data cleared'));
     });
     const privClear = $('set-privacy-clear');
     if (privClear) privClear.addEventListener('click', () => {
-      A.dialog(HI() ? 'अस्थायी फ़ाइलें साफ़ करें?' : 'Clear temporary files?',
-        `<p>${HI() ? 'Stem results, stem-mix preview, peaks cache और अस्थायी ऐप डेटा हट जाएगा। सहेजे हुए प्रोजेक्ट सुरक्षित रहेंगे।' : 'Stem results, stem-mix preview, peaks cache and temporary app data will be removed. Saved projects stay safe.'}</p>`,
-        HI() ? 'साफ़ करें' : 'Clear', HI() ? 'रद्द करें' : 'Cancel').then((ok) => {
+      A.dialog('Clear temporary files?',
+        `<p>${'Stem results, stem-mix preview, peaks cache and temporary app data will be removed. Saved projects stay safe.'}</p>`,
+        'Clear', 'Cancel').then((ok) => {
           if (!ok) return;
           clearTempData();
-          A.toast(HI() ? 'अस्थायी फ़ाइलें साफ़ हो गईं ✓' : 'Temporary files cleared ✓');
+          A.toast('Temporary files cleared ✓');
         });
     });
     $('set-check-update').addEventListener('click', () => A.checkUpdate(true));
@@ -2008,29 +2056,29 @@ Object.assign(RM.app, (function () {
       Object.keys(localStorage).forEach((k) => { if (k.indexOf('ruhmix.') === 0) lsKB += (localStorage.getItem(k) || '').length; });
     } catch (e) {}
     el.innerHTML = `<div>Cache: <span class="mono">${A.escapeHtml(String(dir))}</span></div>
-      <div>${HI() ? 'ऐप डेटा' : 'App data'}: ~${Math.round(lsKB / 1024)} KB • ${HI() ? 'प्रोजेक्ट' : 'Projects'}: ${RM.proj.list().length}</div>`;
+      <div>${'App data'}: ~${Math.round(lsKB / 1024)} KB • ${'Projects'}: ${RM.proj.list().length}</div>`;
   }
 
   /* ================= RuhMix Pro (locked, coming soon) ================= */
   const PRO_FEATURES = [
-    { icon: '☁️', hi: 'क्लाउड बैकअप', en: 'Cloud backup' },
-    { icon: '🎚️', hi: '16-ट्रैक मिक्सर', en: '16-track mixer' },
-    { icon: '✨', hi: 'प्रीमियम FX पैक', en: 'Premium FX pack' },
-    { icon: '🎧', hi: 'एडवांस्ड मास्टरिंग', en: 'Advanced mastering' },
-    { icon: '📦', hi: 'स्टेम एक्सपोर्ट पैक', en: 'Stem export pack' },
-    { icon: '🚫', hi: 'विज्ञापन-मुक्त अनुभव', en: 'Ad-free experience' },
+    { icon: '☁️', en: 'Cloud backup' },
+    { icon: '🎚️', en: '16-track mixer' },
+    { icon: '✨', en: 'Premium FX pack' },
+    { icon: '🎧', en: 'Advanced mastering' },
+    { icon: '📦', en: 'Stem export pack' },
+    { icon: '🚫', en: 'Ad-free experience' },
   ];
   function initPro() {
     const grid = $('pro-grid');
     PRO_FEATURES.forEach((f) => {
       const d = document.createElement('div');
       d.className = 'pro-card locked';
-      d.innerHTML = `<div class="pro-icon">${f.icon}</div><div class="pro-name">${HI() ? f.hi : f.en}</div><div class="pro-lock">🔒 PRO</div>`;
+      d.innerHTML = `<div class="pro-icon">${f.icon}</div><div class="pro-name">${f.en}</div><div class="pro-lock">🔒 PRO</div>`;
       grid.appendChild(d);
     });
     $('pro-notify').addEventListener('click', () => {
       try { localStorage.setItem('ruhmix.proNotify', '1'); } catch (e) {}
-      A.toast(HI() ? 'जानकारी मिलते ही बता देंगे ✓' : 'We will notify you ✓');
+      A.toast('We will notify you ✓');
       $('pro-notify').disabled = true;
     });
     if (A.state.pro.isPro) document.body.classList.add('pro');
@@ -2046,7 +2094,7 @@ Object.assign(RM.app, (function () {
   function initMore() {
     const grid = $('more-grid');
     MORE_LINKS.forEach(([scr, icon, i18n]) => {
-      const label = { slowed: HI() ? 'स्लोड+रिवर्ब स्टूडियो' : 'Slowed+Reverb Studio', stems: HI() ? 'स्टेम सेपरेटर' : 'Stem Separator', aistem: HI() ? 'AI स्टेम सेपरेटर' : 'AI Stem Separator', fx: HI() ? 'FX रैक' : 'FX Rack', master: HI() ? 'मास्टरिंग' : 'Mastering', record: HI() ? 'वॉइस रिकॉर्डर' : 'Voice Recorder', beat: HI() ? 'बीट टूल्स' : 'Beat Tools', export: HI() ? 'एक्सपोर्ट' : 'Export', projects: HI() ? 'प्रोजेक्ट्स' : 'Projects', settings: HI() ? 'सेटिंग्स' : 'Settings', pro: 'RuhMix Pro' }[scr];
+      const label = { slowed: 'Slowed+Reverb Studio', stems: 'Stem Separator', aistem: 'AI Stem Separator', fx: 'FX Rack', master: 'Mastering', record: 'Voice Recorder', beat: 'Beat Tools', export: 'Export', projects: 'Projects', settings: 'Settings', pro: 'RuhMix Pro' }[scr];
       const b = document.createElement('button');
       b.className = 'home-card';
       b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label">${label}</div>`;
@@ -2101,7 +2149,7 @@ Object.assign(RM.app, (function () {
     box.innerHTML = '';
     const arr = RM.proj.list().slice(0, 5);
     if (!arr.length) {
-      box.innerHTML = `<div class="empty">${HI() ? 'अभी कोई प्रोजेक्ट नहीं है' : 'No projects yet'}</div>`;
+      box.innerHTML = `<div class="empty"><div class="empty-icon">🎵</div>${'No projects yet'}</div>`;
       return;
     }
     arr.forEach((p) => {
@@ -2123,7 +2171,7 @@ Object.assign(RM.app, (function () {
       if (name === 'home') renderHomeRecent();
       if (name === 'remix') A.updateRemixStemBadge();
     };    A.loadTheme();
-    A.setLang((() => { try { return localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) { return 'hi'; } })());
+    A.setLang('en');
     // nav
     document.querySelectorAll('.navbtn').forEach((b) => {
       b.addEventListener('click', () => {
@@ -2163,7 +2211,7 @@ Object.assign(RM.app, (function () {
       const p = RM.proj.loadAutosave();
       const banner = $('recovery-banner');
       if (p && banner) {
-        $('recovery-text').innerHTML = (HI() ? 'पिछला प्रोजेक्ट मिल गया: <b>' : 'Found a previous project: <b>') + A.escapeHtml(p.name) + '</b> — ' + (HI() ? 'रिकवर करें?' : 'Recover it?');
+        $('recovery-text').innerHTML = ('Found a previous project: <b>') + A.escapeHtml(p.name) + '</b> — ' + ('Recover it?');
         banner.style.display = '';
         $('recovery-yes').addEventListener('click', () => {
           banner.style.display = 'none';

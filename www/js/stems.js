@@ -25,21 +25,21 @@ window.RM = window.RM || {};
 
 RM.stems = (function () {
   const clamp = RM.audio.clamp;
-  const HONEST = 'Experimental DSP-based separation — bleed ho sakta hai (koi neural network nahi).';
+  const HONEST = 'Experimental DSP-based separation — some bleed is possible (no neural network).';
 
   const ENGINES = [
     { id: 'vocalcut', name: 'Vocal Cut (DSP)',
-      desc: 'Center-channel cancellation — center (vocal) aur sides (instrumental) alag karein.',
+      desc: 'Center-channel cancellation — separates the center (vocals) from the sides (instrumental).',
       note: HONEST },
     { id: 'hpss', name: 'Drum Extract (HPSS)',
-      desc: 'Harmonic-percussive separation — transients (drums) aur tonal part alag karein.',
-      note: HONEST + ' Processing me samay lag sakta hai.' },
+      desc: 'Harmonic-percussive separation — separates transients (drums) from the tonal part.',
+      note: HONEST + ' Processing may take some time.' },
     { id: 'bass', name: 'Bass Focus',
       desc: 'Low-passed bass band extraction.',
       note: HONEST },
     { id: 'spectral', name: 'Stem Split (Spectral)',
       desc: '4-way frequency-band split.',
-      note: 'Ye frequency bands hain — true instrument isolation nahi. Experimental DSP.' },
+      note: 'These are frequency bands — not true instrument isolation. Experimental DSP.' },
   ];
 
   /* ================= FFT (iterative radix-2, in-place) ================= */
@@ -385,19 +385,23 @@ RM.stems = (function () {
   /* ================= public API ================= */
   const results = []; // last extraction: [{name, buffer, engine}]
 
-  /* ---- 4-role stem pack registry ----
-     A "stem pack" is exactly 4 audio roles that Auto Remix can consume as
-     separate tracks. Roles from AI/cloud separation: 'vocal', 'drums',
-     'bass', 'other'. Roles from the DSP spectral engine are frequency
-     bands ('low','lowmid','presence','air') — labelled honestly, never
-     passed off as instrument isolation.
-     A future cloud/AI module registers its 4 stems via setStemPack(). */
-  let stemPack = null; // {source:'ai'|'dsp-spectral', createdAt, roles:[{role,label,buffer}]}
+  /* ---- stem pack registry ----
+     A "stem pack" is 2–4 audio roles that Auto Remix can consume as
+     separate tracks. 4-role: AI/cloud separation ('vocal', 'drums',
+     'bass', 'other') ya DSP spectral bands ('low','lowmid','presence','air')
+     — labelled honestly, never passed off as instrument isolation.
+     2-role: Hugging Face free AI (Vocals + Instrumental) — Round-6 me
+     support add hua taaki free AI flow bhi stem pipeline use kare.
+     A future cloud/AI module registers its stems via setStemPack(). */
+  let stemPack = null; // {source:'ai'|'hf'|'dsp-spectral', createdAt, roles:[{role,label,buffer}]}
   function setStemPack(pack) {
-    if (!pack || !Array.isArray(pack.roles) || pack.roles.length !== 4)
-      throw new Error('Stem pack me exactly 4 roles chahiye.');
+    // Fail-safe (Round-6 W7 Issue 4): validate se PEHLE purana pack hatao —
+    // warna failed registration ke baad Auto Remix stale stems par chalta rahega.
+    stemPack = null;
+    if (!pack || !Array.isArray(pack.roles) || pack.roles.length < 2)
+      throw new Error('A stem pack needs at least 2 roles.');
     pack.roles.forEach((r, i) => {
-      if (!r || !r.buffer || !r.buffer.getChannelData) throw new Error(`Role ${i + 1} me audio buffer nahi hai.`);
+      if (!r || !r.buffer || !r.buffer.getChannelData) throw new Error(`Role ${i + 1} has no audio buffer.`);
     });
     stemPack = {
       source: pack.source || 'ai',
@@ -408,7 +412,7 @@ RM.stems = (function () {
   }
   function getStemPack() { return stemPack; }
   function packAvailable() {
-    return !!(stemPack && stemPack.roles.length === 4 &&
+    return !!(stemPack && stemPack.roles.length >= 2 &&
       stemPack.roles.every((r) => r.buffer && r.buffer.getChannelData));
   }
   function clearStemPack() { stemPack = null; }

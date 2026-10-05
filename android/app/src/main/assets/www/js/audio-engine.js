@@ -195,6 +195,12 @@ RM.audio = (function () {
         Rs[lag] = r;
         if (r > bestR) { bestR = r; bestLag = lag; }
       }
+      // Octave disambiguation (Round-6, W7): half-lag (double tempo) ka
+      // correlation agar best ke 90% ke andar hai to tez tempo chuno —
+      // click/hat-sparse material me autocorrelation 2x lag pe tie/jeet
+      // jata hai (128->64, 150->75 measured).
+      const halfLag = Math.round(bestLag / 2);
+      if (halfLag >= minLag && Rs[halfLag] > 0.9 * bestR) { bestLag = halfLag; bestR = Rs[halfLag]; }
       // Parabolic interpolation around the peak lag (sub-hop accuracy)
       let refined = bestLag;
       if (bestLag > minLag && bestLag < maxLag) {
