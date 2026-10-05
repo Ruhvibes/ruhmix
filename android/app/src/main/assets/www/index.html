@@ -99,7 +99,7 @@
     <div class="row"><label>Volume <input type="range" id="ed-vol" min="0" max="120" value="90"></label><span id="ed-vol-v">90%</span></div>
     <div class="row"><label>Pan <input type="range" id="ed-pan" min="-100" max="100" value="0"></label></div>
     <div class="row"><label>Speed <input type="range" id="ed-speed" min="50" max="200" value="100"></label><span id="ed-speed-v">1.00×</span></div>
-    <div class="honest">Speed बदलने से pitch भी बदलती है — tempo और pitch linked हैं (v1)।</div>
+    <div class="honest">Pitch tempo ke saath badalta hai (independent pitch-shift v1 me nahi).</div>
     <button class="btn small tog" id="ed-loop">🔁 Loop</button>
   </div>
   <div class="panel">
@@ -113,6 +113,7 @@
 <section class="screen" id="screen-remix">
   <h2 data-i18n="auto_remix">ऑटो रीमिक्स</h2>
   <p class="muted">BPM अपने आप पहचाना जाता है • 11 स्टाइल प्रीसेट (DSP चेन)</p>
+  <div id="remix-stem-badge" class="panel" style="display:none"></div>
   <div class="card-grid" id="remix-grid"></div>
   <div id="remix-custom" class="panel" style="display:none">
     <h4>Custom</h4>
@@ -125,6 +126,7 @@
   <div class="btn-row">
     <button class="btn primary" id="remix-generate">⚡ Generate</button>
     <button class="btn" id="remix-preview">▶ Preview</button>
+    <button class="btn" id="remix-stem-preview" style="display:none">🎤 स्टेम प्रीव्यू</button>
   </div>
   <div id="remix-status" class="status"></div>
 </section>
@@ -133,7 +135,7 @@
 <section class="screen" id="screen-slowed">
   <h2 data-i18n="slowed">स्लोड+रिवर्ब</h2>
   <p class="muted">Slowed + Reverb Studio</p>
-  <div class="honest">Speed कम करने से pitch भी नीचे जाती है — tempo और pitch linked हैं (Web Audio v1)।</div>
+  <div class="honest">Pitch tempo ke saath badalta hai (independent pitch-shift v1 me nahi).</div>
   <div class="card-grid" id="slowed-presets"></div>
   <div class="panel">
     <div class="row"><label>Speed <input type="range" id="sl-speed" min="0.5" max="1" step="0.01" value="0.8"></label><span id="sl-speed-v">0.80×</span></div>
@@ -149,6 +151,14 @@
 <!-- ======================= 6. STEMS ======================= -->
 <section class="screen" id="screen-stems">
   <h2 data-i18n="stems">स्टेम सेपरेटर</h2>
+  <!-- AI (neural, server) — the ONLY flow allowed to say "AI" -->
+  <div class="engine-card ai-card">
+    <div class="ec-name">🧠 AI Stem Separation <span class="beta">AI • SERVER</span></div>
+    <div class="ec-desc">Neural AI model (server) se Vocal / Drums / Bass / Other — studio-quality separation.</div>
+    <button class="btn primary block" id="btn-ai-stem">AI Se Alag Karein</button>
+  </div>
+  <!-- DSP engines: Beta (DSP) — neural AI nahi -->
+  <h3>DSP इंजन <span class="beta">Beta (DSP) — neural AI nahi</span></h3>
   <p class="muted">DSP-आधारित सेपरेशन • <span class="beta">BETA — experimental</span></p>
   <div class="honest">यहां कोई neural network मॉडल नहीं है — सिर्फ क्लासिकल DSP तकनीकें हैं। नतीजों में bleed हो सकता है।</div>
   <div id="stems-grid"></div>
@@ -156,10 +166,18 @@
   <div id="stems-results"></div>
 </section>
 
+<!-- ======================= 6b. AI STEMS (neural, server) ======================= -->
+<section class="screen" id="screen-aistem">
+  <h2>🧠 AI Stem Separation</h2>
+  <p class="muted">Neural AI (server) • Vocal / Drums / Bass / Other</p>
+  <div id="aistem-setup" style="display:none"></div>
+  <div id="aistem-main" style="display:none"></div>
+</section>
+
 <!-- ======================= 7. MIXER ======================= -->
 <section class="screen" id="screen-mixer">
   <h2 data-i18n="nav_mixer">मिक्सर</h2>
-  <p class="muted">5 ट्रैक • Volume / Pan / Mute / Solo</p>
+  <p class="muted">6 ट्रैक • Volume / Pan / Mute / Solo</p>
   <div class="btn-row">
     <button class="btn primary" id="mx-play-all">▶ सभी चलाएं</button>
     <button class="btn" id="mx-stop-all">■ रोकें</button>
@@ -283,13 +301,14 @@
   </div>
   <div class="panel">
     <h4>फॉर्मेट</h4>
-    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-mp3" checked><span>MP3</span></label>
-    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-wav"><span>WAV</span></label>
+    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-mp3" value="mp3" checked><span>MP3</span></label>
+    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-wav" value="wav"><span>WAV</span></label>
+    <label class="radio-row"><input type="radio" name="expfmt" id="exp-format-flac" value="flac"><span>FLAC</span></label>
     <div class="row" id="exp-bitrate-row"><label>Bitrate <select id="exp-bitrate"><option>128</option><option selected>192</option><option>256</option><option>320</option></select> kbps</label></div>
     <div class="row"><label>Sample Rate <select id="exp-sr"><option selected>44100</option><option>48000</option></select> Hz</label></div>
     <label class="radio-row"><input type="checkbox" id="exp-normalize" checked><span>Loudness normalize (peak −0.5 dB)</span></label>
     <div id="exp-note" class="muted small"></div>
-    <div class="honest">v1 में सिर्फ MP3 और WAV एक्सपोर्ट है — M4A/FLAC नहीं।</div>
+    <div class="honest">M4A/AAC: browser me offline encode possible nahi hai (native code chahiye) — isliye M4A option list me nahi hai.</div>
   </div>
   <div class="progress"><div class="pbar" id="exp-pbar"></div></div>
   <div id="exp-status" class="status"></div>
@@ -317,7 +336,7 @@
   </div>
   <div class="panel">
     <h4>एक्सपोर्ट डिफ़ॉल्ट</h4>
-    <div class="row"><label>Format <select id="set-def-format"><option value="mp3">MP3</option><option value="wav">WAV</option></select></label></div>
+    <div class="row"><label>Format <select id="set-def-format"><option value="mp3">MP3</option><option value="wav">WAV</option><option value="flac">FLAC</option></select></label></div>
     <div class="row"><label>Bitrate <select id="set-def-bitrate"><option>128</option><option>192</option><option>256</option><option>320</option></select> kbps</label></div>
     <div class="row"><label>Sample Rate <select id="set-def-sr"><option>44100</option><option>48000</option></select> Hz</label></div>
   </div>
@@ -327,9 +346,33 @@
     <button class="btn ghost" id="set-clear-cache">🧹 कैश साफ़ करें</button>
   </div>
   <div class="panel">
+    <h4>🔒 प्राइवेसी</h4>
+    <div class="muted small">
+      <p>• <b>आपका ऑडियो आपके डिवाइस पर ही रहता है।</b> एडिटिंग, FX, मिक्सिंग — सब कुछ on-device होता है, कोई अपलोड नहीं।</p>
+      <p>• <b>Cloud sirf AI Stem Separation ke liye</b> — aur wo bhi sirf आपकी स्पष्ट अनुमति (consent) + ek chhota ad dekhne ke baad. Bina consent koi audio cloud nahi bheja jata.</p>
+      <p>• <b>Turant auto-delete:</b> AI stems ke liye bheja gaya audio processing khatm hote hi server se turant hata diya jata hai — koi copy save nahi hoti.</p>
+      <p>• <b>Ads:</b> AI Stem Separation se pehle ek rewarded video ad (server ka kharcha isi se nikalta hai), aur har 2nd export ke baad ek interstitial ad (max 1 per 5 min). Ads ke bina aapka data kahin nahi jata.</p>
+      <p>• कोई account, कोई tracking — आपकी फ़ाइलें आपकी हैं।</p>
+    </div>
+    <button class="btn ghost block" id="set-privacy-clear">🧹 अस्थायी फ़ाइलें साफ़ करें</button>
+    <div class="muted small">Stem results, stem-mix preview, peaks cache और अस्थायी डेटा हटाता है। सहेजे हुए प्रोजेक्ट सुरक्षित रहते हैं।</div>
+  </div>
+  <div class="panel">
     <h4>अपडेट</h4>
     <button class="btn primary" id="set-check-update">🔄 अपडेट जांचें</button>
     <div id="update-status" class="status"></div>
+  </div>
+  <div class="panel">
+    <h4>🤖 AI Server <span class="beta">AI</span></h4>
+    <p class="muted small">AI Stem Separation (neural, cloud GPU) ke liye. Modal deploy ke baad jo URL mile wahi yahan daalein. Key sirf is device par rehti hai — kahin upload nahi hoti.</p>
+    <div class="row"><label>Modal Endpoint URL <input type="text" id="ai-url" class="textin" placeholder="https://xxx--ruhmix-stems-web.modal.run" inputmode="url" autocomplete="off"></label></div>
+    <div class="row"><label>API Key <input type="password" id="ai-key" class="textin" placeholder="••••••••" autocomplete="off"></label></div>
+    <div class="row"><span id="ai-dot" class="status-dot"></span><span id="ai-status-text" class="muted small">सेट नहीं है</span></div>
+    <div class="btn-row">
+      <button class="btn primary" id="ai-test">🔌 कनेक्शन जांचें</button>
+      <button class="btn ghost" id="ai-save">💾 सहेजें</button>
+    </div>
+    <div id="ai-test-result" class="status"></div>
   </div>
   <div class="panel center">
     <img src="logo.png" alt="RuhMix" class="about-logo">
@@ -380,6 +423,8 @@
 <script src="js/fx.js"></script>
 <script src="js/waveform.js"></script>
 <script src="js/stems.js"></script>
+<script src="js/ads.js"></script>
+<script src="js/ai-stems.js"></script>
 <script src="js/remix.js"></script>
 <script src="js/export.js"></script>
 <script src="js/projects.js"></script>

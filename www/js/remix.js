@@ -12,7 +12,7 @@ RM.remix = (function () {
   // rate: playbackRate multiplier. HONEST NOTE used in UI: slowing down also
   // lowers pitch — tempo and pitch are linked in Web Audio (no independent
   // pitch-shift in v1).
-  const PITCH_NOTE = 'Note: speed badalne se pitch bhi badalti hai — tempo aur pitch linked hain (v1).';
+  const PITCH_NOTE = 'Pitch tempo ke saath badalta hai (independent pitch-shift v1 me nahi).';
 
   const STYLES = [
     { id: 'commercial', name: 'Commercial',
@@ -113,5 +113,143 @@ RM.remix = (function () {
     };
   }
 
-  return { STYLES, get, applyStyle, PITCH_NOTE };
+  /* =====================================================================
+     Stem-based Auto Remix pipeline (Part 2).
+     Used ONLY when a 4-role stem pack is available (RM.stems.packAvailable()):
+       Analyze (BPM/beat, existing detector) -> 4 stems as separate tracks
+       -> BPM/beat sync (style rate + echo synced to beat) -> Arrange
+       (intro/build/outro sections) -> per-stem FX (vocal: reverb, drums:
+       compression, bass: low-boost — style-aware) -> Transitions
+       (crossfades at section boundaries) -> Mix -> Master -> Preview.
+     Without a stem pack the classic single-track preset flow above is used
+     unchanged (no regression).
+     ===================================================================== */
+  const stemPipeline = (function () {
+    const MASTER_BY_STYLE = { edm: 'loud', trap: 'loud', lofi: 'lofi', acoustic: 'clean' };
+
+    // Per-role FX: style chain + role overrides. Unknown/band roles get the
+    // pure style chain.
+    function roleFx(style, role, bpm) {
+      const fx = JSON.parse(JSON.stringify(style.fx));
+      const beat = 60 / (bpm || 120);
+      if (fx.echo.on) fx.echo.time = +(beat * 0.75).toFixed(3); // beat-synced echo
+      if (role === 'vocal') {
+        fx.reverb.on = true;
+        fx.reverb.wet = Math.min(0.85, (fx.reverb.wet || 0.3) + 0.18);
+        fx.eq3 = [fx.eq3[0] - 1, fx.eq3[1] + 2, fx.eq3[2] + 1]; // presence lift
+      } else if (role === 'drums') {
+        fx.comp.on = true;
+        fx.comp.thr = Math.min(fx.comp.thr, -14);
+        fx.comp.ratio = Math.max(fx.comp.ratio, 4);
+        fx.reverb.wet = Math.max(0, (fx.reverb.wet || 0) - 0.12); // drums stay dry-ish
+      } else if (role === 'bass') {
+        fx.eq3 = [fx.eq3[0] + 4, fx.eq3[1], fx.eq3[2] - 1];
+        fx.reverb.on = false; fx.echo.on = false; // keep low end tight
+      }
+      return fx;
+    }
+
+    // Arrangement: per-role section gains [intro, main, outro].
+    function arrangeGains(role) {
+      if (role === 'vocal') return [0.55, 1.0, 0.45];
+      if (role === 'drums') return [0.35, 1.0, 0.55];
+      if (role === 'bass')  return [0.75, 1.0, 0.65];
+      return [0.7, 1.0, 0.6]; // 'other' + band roles
+    }
+
+    // styleId + pack -> Promise<{buffer, bpm, rate, styleId, styleName}>.
+    // onProgress(labelHi, frac).
+    function generate(styleId, pack, opts, onProgress) {
+      opts = opts || {};
+      const style = get(styleId);
+      const roles = (pack && pack.roles ? pack.roles : []).filter((r) => r && r.buffer);
+      if (roles.length < 4) return Promise.reject(new Error('4 stems chahiye — pack adhura hai.'));
+      const OC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      if (!OC) return Promise.reject(new Error('OfflineAudioContext not supported.'));
+      const prog = (label, frac) => { try { if (onProgress) onProgress(label, frac); } catch (e) {} };
+      prog('BPM पहचाना जा रहा है…', 0.02);
+
+      const sr = roles[0].buffer.sampleRate;
+      // resample roles to a common sample rate if needed
+      const prep = roles.map((r) => {
+        if (r.buffer.sampleRate === sr) return Promise.resolve(r.buffer);
+        return RM.audio.resampleBuffer(r.buffer, sr);
+      });
+      return Promise.all(prep).then((bufs) => {
+        const rb = roles.map((r, i) => ({ role: r.role, label: r.label, buffer: bufs[i] }));
+        const bpmP = opts.bpm ? Promise.resolve(opts.bpm)
+          : RM.audio.detectBPM(rb[0].buffer, (p) => prog('BPM पहचाना जा रहा है…', 0.02 + p * 0.12));
+        return bpmP.then((bpm) => {
+          prog('Stems तैयार हो रहे हैं…', 0.16);
+          const rate = (styleId === 'custom' && opts.customTempo) ? opts.customTempo : style.rate;
+          const beat = 60 / bpm;
+          const maxDur = Math.max.apply(null, rb.map((r) => r.buffer.duration));
+          const D = maxDur / rate; // musical duration at style rate
+          const tail = 2.5; // reverb tail
+          const oc = new OC(2, Math.max(1, Math.ceil((D + tail) * sr)), sr);
+          const mixBus = oc.createGain();
+          const master = RM.fx.makeMasterChain(oc, RM.fx.MASTER_PRESETS[MASTER_BY_STYLE[styleId] || 'clean']);
+          mixBus.connect(master.input);
+          master.output.connect(oc.destination);
+
+          // arrangement sections (fractions of D) + transition crossfades
+          const secs = [[0, 0.25 * D], [0.25 * D, 0.8 * D], [0.8 * D, D]];
+          const xf = Math.min(2 * beat, 0.08 * D);
+          const chains = [];
+          rb.forEach((r, ri) => {
+            prog('Stems तैयार हो रहे हैं…', 0.16 + 0.10 * (ri / rb.length));
+            const src = oc.createBufferSource();
+            src.buffer = r.buffer;
+            src.playbackRate.value = rate; // BPM/beat sync via style rate
+            const chain = RM.fx.makeChain(oc);
+            chain.applyPreset(roleFx(style, r.role, bpm));
+            chains.push(chain);
+            const g = oc.createGain(); // arrangement gain
+            const lv = arrangeGains(r.role);
+            g.gain.setValueAtTime(Math.max(0.0001, lv[0]), 0);
+            for (let si = 1; si < 3; si++) {
+              const t = secs[si][0];
+              g.gain.setValueAtTime(Math.max(0.0001, lv[si - 1]), Math.max(0, t - xf));
+              g.gain.linearRampToValueAtTime(Math.max(0.0001, lv[si]), t); // transition
+            }
+            g.gain.setValueAtTime(Math.max(0.0001, lv[2]), Math.max(0, D - 3));
+            g.gain.linearRampToValueAtTime(0.0001, D); // outro fade
+            src.connect(chain.input);
+            chain.output.connect(g);
+            g.connect(mixBus);
+            src.start(0);
+          });
+          prog('Mix ho raha hai…', 0.30);
+          return oc.startRendering().then((rendered) => {
+            prog('Master ho raha hai…', 0.95);
+            chains.forEach((c) => { try { c.dispose(); } catch (e) {} });
+            try { master.dispose(); } catch (e) {}
+            prog('Ho gaya ✓', 1);
+            return { buffer: rendered, bpm, rate, styleId: style.id, styleName: style.name };
+          });
+        });
+      });
+    }
+
+    // One-shot preview player for the stem mix (separate from studio player).
+    let previewPlayer = null;
+    function preview(buffer) {
+      stopPreview();
+      RM.audio.ensureCtx();
+      previewPlayer = RM.audio.makePlayer();
+      previewPlayer.load(buffer);
+      previewPlayer.play(0);
+    }
+    function stopPreview() {
+      if (previewPlayer) {
+        try { previewPlayer.stop(true); previewPlayer.dispose(); } catch (e) {}
+        previewPlayer = null;
+      }
+    }
+    function isPreviewing() { return !!(previewPlayer && previewPlayer.playing); }
+
+    return { generate, preview, stopPreview, isPreviewing };
+  })();
+
+  return { STYLES, get, applyStyle, PITCH_NOTE, stemPipeline };
 })();

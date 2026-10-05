@@ -18,6 +18,7 @@ RM.app = (function () {
       nav_home: 'होम', nav_editor: 'एडिटर', nav_remix: 'रीमिक्स', nav_mixer: 'मिक्सर', nav_more: 'अधिक',
       new_project: 'नया प्रोजेक्ट', auto_remix: 'ऑटो रीमिक्स', slowed: 'स्लोड+रिवर्ब',
       audio_editor: 'ऑडियो एडिटर', stems: 'स्टेम सेपरेटर', recorder: 'वॉइस रिकॉर्डर',
+      ai_stems: 'AI स्टेम सेपरेटर',
       equalizer: 'इक्वलाइज़र', mastering: 'मास्टरिंग', recent: 'हाल के प्रोजेक्ट',
       search: 'खोजें…', import_title: 'ऑडियो इम्पोर्ट', pick_audio: 'ऑडियो चुनें',
       editor_title: 'ऑडियो एडिटर', play: 'चलाएं', pause: 'रोकें', stop: 'बंद करें',
@@ -30,6 +31,7 @@ RM.app = (function () {
       nav_home: 'Home', nav_editor: 'Editor', nav_remix: 'Remix', nav_mixer: 'Mixer', nav_more: 'More',
       new_project: 'New Project', auto_remix: 'Auto Remix', slowed: 'Slowed+Reverb',
       audio_editor: 'Audio Editor', stems: 'Stem Separator', recorder: 'Voice Recorder',
+      ai_stems: 'AI Stem Separator',
       equalizer: 'Equalizer', mastering: 'Mastering', recent: 'Recent Projects',
       search: 'Search…', import_title: 'Import Audio', pick_audio: 'Pick Audio',
       editor_title: 'Audio Editor', play: 'Play', pause: 'Pause', stop: 'Stop',
@@ -104,6 +106,7 @@ RM.app = (function () {
     redoStack: [],
     waveView: null,
     remix: { style: null, bpm: null },
+    stemMix: null,      // stem-pipeline mix buffer (part 2)
     slowed: { speed: 0.8, room: 'church', wet: 0.55, decay: 1.8, echo: 0.25, bass: 4, width: 1.2 },
     mastering: { preset: 'clean', ab: 'after', settings: null },
     exportDefaults: { format: 'mp3', bitrate: 192, sampleRate: 44100 },
@@ -128,7 +131,7 @@ RM.app = (function () {
   state.fx = defaultFx();
 
   /* ================= navigation ================= */
-  const SCREENS = ['home','import','editor','remix','slowed','stems','mixer','fx','master','record','beat','export','projects','settings','pro','more'];
+  const SCREENS = ['home','import','editor','remix','slowed','stems','aistem','mixer','fx','master','record','beat','export','projects','settings','pro','more'];
   function show(name) {
     if (!SCREENS.includes(name)) name = 'home';
     state.screen = name;
@@ -325,8 +328,16 @@ RM.app = (function () {
       renderImportList();
       return buf;
     }).catch(() => {
-      toast((lang === 'hi' ? 'डिकोड नहीं हो पाया: ' : 'Could not decode: ') + name, 3000);
-      return null;
+      const msg = lang() === 'hi'
+        ? 'ऑडियो फ़ाइल डिकोड नहीं हो पाई — फ़ॉर्मेट इस डिवाइस पर सपोर्टेड नहीं हो सकता।'
+        : 'Could not decode the audio file — the format may be unsupported on this device.';
+      return dialog(lang() === 'hi' ? 'डिकोड विफल' : 'Decode failed',
+        `<p>${escapeHtml(msg)}</p><p class="muted">${escapeHtml(name)}</p>`,
+        lang() === 'hi' ? '🔁 पुनः प्रयास' : '🔁 Retry',
+        lang() === 'hi' ? 'रद्द करें' : 'Cancel').then((retry) => {
+          if (retry) return decodeAndAdd(ab, name, size);
+          return null;
+        });
     });
   }
 
@@ -545,6 +556,53 @@ Object.assign(RM.app, (function () {
   const lang = () => { try { return localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) { return 'hi'; } };
   const HI = () => lang() === 'hi';
 
+  /* ============ guarded async ops: friendly Hindi errors + Retry/Cancel ============
+     Har async processing (export, remix generate, stem run, decode) iske andar
+     chalta hai: failure par user-friendly Hindi message + [पुनः प्रयास] [रद्द करें].
+     Generic crash kabhi nahi — har error pakda jaata hai. */
+  function friendlyErr(e) {
+    const m = String((e && e.message) || e || '');
+    if (/cancel/i.test(m)) return null; // user-cancelled: not an error
+    if (/network|fetch failed|failed to fetch|xhr|internet|offline|ERR_INTERNET/i.test(m))
+      return HI() ? 'इंटरनेट कनेक्शन में दिक्कत है। कनेक्शन जांचकर दोबारा कोशिश करें।'
+                  : 'Network problem. Check your connection and retry.';
+    if (/decode|decoding/i.test(m))
+      return HI() ? 'ऑडियो फ़ाइल डिकोड नहीं हो पाई — फ़ॉर्मेट इस डिवाइस पर सपोर्टेड नहीं हो सकता।'
+                  : 'Could not decode the audio file — the format may be unsupported.';
+    if (/memory|allocation|too large|length/i.test(m))
+      return HI() ? 'फ़ाइल बहुत बड़ी है — मेमोरी कम पड़ गई। छोटी फ़ाइल से कोशिश करें।'
+                  : 'File too large — ran out of memory. Try a smaller file.';
+    if (/not supported/i.test(m))
+      return HI() ? 'यह फ़ीचर इस डिवाइस/ब्राउज़र पर सपोर्टेड नहीं है।'
+                  : 'This feature is not supported on this device/browser.';
+    return (HI() ? 'कुछ गड़बड़ हो गई: ' : 'Something went wrong: ') + m;
+  }
+  // title: dialog title. fn: () => Promise<value>. Resolves {ok, result?, cancelled?}.
+  function guarded(title, fn) {
+    const attempt = () => Promise.resolve()
+      .then(fn)
+      .then((result) => ({ ok: true, result }))
+      .catch((e) => {
+        const msg = friendlyErr(e);
+        if (msg === null) return { ok: false, cancelled: true };
+        return A.dialog(title,
+          `<p>${A.escapeHtml(msg)}</p>`,
+          HI() ? '🔁 पुनः प्रयास' : '🔁 Retry',
+          HI() ? 'रद्द करें' : 'Cancel').then((retry) => {
+            if (retry) return attempt();
+            return { ok: false, cancelled: true };
+          });
+      });
+    return attempt();
+  }
+
+  // Flat (bypass) FX preset — for sources that are already mixed/mastered.
+  function flatFx() {
+    const f = A.defaultFx();
+    f.comp.on = false;
+    return f;
+  }
+
   /* ================= editor ================= */
   function selRange() {
     const a = Math.max(0, parseFloat($('ed-sel-a').value) || 0);
@@ -755,6 +813,8 @@ Object.assign(RM.app, (function () {
       grid.appendChild(d);
     });
     $('remix-generate').addEventListener('click', generateRemix);
+    const stemPv = $('remix-stem-preview');
+    if (stemPv) stemPv.addEventListener('click', toggleStemPreview);
     $('remix-preview').addEventListener('click', () => {
       if (!A.needAudio()) return;
       A.ensureStudio(); A.applyFxToChain();
@@ -796,8 +856,11 @@ Object.assign(RM.app, (function () {
     if (!A.needAudio()) return;
     const id = A.state.remix.style || 'commercial';
     const status = $('remix-status');
+    // Part 2: jab 4 stems loaded hon -> stem-based pipeline; bina stems ke
+    // purana preset-flow bilkul waisa hi rahe (koi regression nahi).
+    if (RM.stems.packAvailable()) { generateStemRemix(id, status); return; }
     status.textContent = HI() ? 'BPM पहचाना जा रहा है…' : 'Detecting BPM…';
-    RM.audio.detectBPM(A.state.buffer, (p) => {
+    guarded(HI() ? 'ऑटो रीमिक्स' : 'Auto Remix', () => RM.audio.detectBPM(A.state.buffer, (p) => {
       status.textContent = (HI() ? 'BPM पहचाना जा रहा है… ' : 'Detecting BPM… ') + Math.round(p * 100) + '%';
     }).then((bpm) => {
       A.state.remix.bpm = bpm;
@@ -818,7 +881,69 @@ Object.assign(RM.app, (function () {
       status.innerHTML = `✓ <b>${A.escapeHtml(s.name)}</b> — BPM ${bpm}, tempo ${rate.toFixed(2)}×` +
         (s.note ? `<div class="honest">${A.escapeHtml(s.note)}</div>` : '');
       A.toast(HI() ? 'रीमिक्स तैयार है' : 'Remix ready');
-    }).catch(() => { status.textContent = HI() ? 'BPM पहचान नहीं हो पाई' : 'BPM detection failed'; });
+    })).then((r) => {
+      if (!r.ok) status.textContent = r.cancelled
+        ? (HI() ? 'रद्द कर दिया गया' : 'Cancelled')
+        : (HI() ? 'BPM पहचान नहीं हो पाई' : 'BPM detection failed');
+    });
+  }
+
+  // Stem-based pipeline: 4 stems -> per-stem FX -> arrange -> mix -> master.
+  function generateStemRemix(id, status) {
+    const pack = RM.stems.getStemPack();
+    const srcName = pack.source === 'ai' ? (HI() ? 'AI stems' : 'AI stems') : (HI() ? 'Spectral bands (DSP)' : 'Spectral bands (DSP)');
+    A.stopAll();
+    RM.remix.stemPipeline.stopPreview();
+    status.innerHTML = `<div class="progress"><div class="pbar" id="remix-pbar"></div></div><div id="remix-plabel">${HI() ? 'शुरू हो रहा है…' : 'Starting…'}</div>`;
+    const setP = (label, frac) => {
+      const bar = $('remix-pbar'), lb = $('remix-plabel');
+      if (bar) bar.style.width = Math.round(frac * 100) + '%';
+      if (lb) lb.textContent = label;
+      status.setAttribute('data-stage', label);
+    };
+    guarded(HI() ? 'स्टेम रीमिक्स' : 'Stem Remix', () => {
+      const customTempo = (id === 'custom' && A.state.remix.custom) ? A.state.remix.custom.tempo : null;
+      return RM.remix.stemPipeline.generate(id, pack, { customTempo }, setP).then((res) => {
+        A.state.stemMix = res.buffer;
+        A.state.remix.bpm = res.bpm;
+        RM.remix.stemPipeline.preview(res.buffer);
+        status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — BPM ${res.bpm}, tempo ${res.rate.toFixed(2)}×` +
+          `<div class="honest">🎤 ${A.escapeHtml(srcName)} — 4-स्टेम पाइपलाइन (per-stem FX → arrange → mix → master)</div>` +
+          `<div class="btn-row" style="margin-top:8px"><button class="btn small" id="remix-stem-stop">■ ${HI() ? 'प्रीव्यू रोकें' : 'Stop preview'}</button></div>`;
+        $('remix-stem-stop').addEventListener('click', () => {
+          RM.remix.stemPipeline.stopPreview();
+          status.innerHTML = `✓ <b>${A.escapeHtml(res.styleName)}</b> — ${HI() ? 'तैयार है' : 'ready'}`;
+        });
+        A.toast(HI() ? 'स्टेम रीमिक्स तैयार है' : 'Stem remix ready');
+      });
+    }).then((r) => {
+      if (!r.ok) status.innerHTML = r.cancelled
+        ? (HI() ? 'रद्द कर दिया गया' : 'Cancelled')
+        : (HI() ? 'स्टेम रीमिक्स विफल रहा' : 'Stem remix failed');
+    });
+  }
+
+  // Remix screen badge: stem pack available?
+  function updateRemixStemBadge() {
+    const el = $('remix-stem-badge');
+    if (!el) return;
+    if (RM.stems.packAvailable()) {
+      const pack = RM.stems.getStemPack();
+      const n = pack.source === 'ai' ? (HI() ? 'AI stems (cloud)' : 'AI stems (cloud)') : (HI() ? 'Spectral bands (DSP)' : 'Spectral bands (DSP)');
+      el.innerHTML = `🎤 <b>4 stems loaded</b> — ${A.escapeHtml(n)}: Generate दबाने पर स्टेम-पाइपलाइन चलेगी।`;
+      el.style.display = '';
+      const pv = $('remix-stem-preview');
+      if (pv) pv.style.display = A.state.stemMix ? '' : 'none';
+    } else {
+      el.style.display = 'none';
+      const pv = $('remix-stem-preview');
+      if (pv) pv.style.display = 'none';
+    }
+  }
+  function toggleStemPreview() {
+    if (RM.remix.stemPipeline.isPreviewing()) RM.remix.stemPipeline.stopPreview();
+    else if (A.state.stemMix) { A.stopAll(); RM.remix.stemPipeline.preview(A.state.stemMix); }
+    else A.toast(HI() ? 'पहले Generate दबाएं' : 'Generate first');
   }
 
   /* ================= slowed + reverb studio ================= */
@@ -916,17 +1041,51 @@ Object.assign(RM.app, (function () {
     const eng = RM.stems.ENGINES.find((e) => e.id === id);
     status.innerHTML = `<div class="progress"><div class="pbar" id="stems-pbar"></div></div><div id="stems-plabel">${A.escapeHtml(eng.name)}…</div>`;
     const t0 = Date.now();
-    RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
+    guarded(HI() ? 'स्टेम सेपरेटर' : 'Stem Separator', () => RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
       const bar = $('stems-pbar'), lb = $('stems-plabel');
       if (bar) bar.style.width = Math.round(p * 100) + '%';
       if (lb) lb.textContent = (label || eng.name) + ' ' + Math.round(p * 100) + '%';
-    }).then((stems) => {
+    })).then((r) => {
+      if (!r.ok) {
+        if (!r.cancelled) status.innerHTML = `<div class="err">${HI() ? 'विफल रहा' : 'Failed'}</div>`;
+        return;
+      }
+      const stems = r.result;
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
       status.innerHTML = `<div class="ok">${HI() ? 'हो गया' : 'Done'} (${secs}s) — ${stems.length} stems</div><div class="honest">${A.escapeHtml(eng.note)}</div>`;
       stems.forEach((s, i) => addStemRow(s, i));
+      // 4-band spectral split -> honestly-labelled 4-role pack for Auto Remix testing
+      if (id === 'spectral' && stems.length === 4) {
+        const b = document.createElement('button');
+        b.className = 'btn primary block';
+        b.style.marginTop = '10px';
+        b.textContent = HI() ? '⚡ Auto Remix में इस्तेमाल करें (4 bands)' : '⚡ Use in Auto Remix (4 bands)';
+        b.addEventListener('click', () => {
+          try {
+            RM.stems.setStemPack({
+              source: 'dsp-spectral',
+              roles: [
+                { role: 'low',     label: stems[0].name + ' (band)', buffer: stems[0].buffer },
+                { role: 'lowmid',  label: stems[1].name + ' (band)', buffer: stems[1].buffer },
+                { role: 'presence',label: stems[2].name + ' (band)', buffer: stems[2].buffer },
+                { role: 'air',     label: stems[3].name + ' (band)', buffer: stems[3].buffer },
+              ],
+            });
+            A.toast(HI() ? '4 bands Auto Remix के लिए तैयार ✓' : '4 bands ready for Auto Remix ✓');
+            A.show('remix');
+          } catch (e) {
+            A.toast((HI() ? 'विफल: ' : 'Failed: ') + (e.message || e), 3000);
+          }
+        });
+        results.appendChild(b);
+        const note = document.createElement('div');
+        note.className = 'honest';
+        note.textContent = HI()
+          ? 'नोट: ये frequency bands हैं — true instrument isolation नहीं। AI stems (vocal/drums/bass/other) आने पर वही इस्तेमाल होंगे।'
+          : 'Note: these are frequency bands, not true instrument isolation. AI stems (vocal/drums/bass/other) will be used when available.';
+        results.appendChild(note);
+      }
       A.toast(HI() ? 'Stems तैयार हैं' : 'Stems ready');
-    }).catch((e) => {
-      status.innerHTML = `<div class="err">${HI() ? 'विफल: ' : 'Failed: '}${A.escapeHtml(e.message || e)}</div>`;
     });
   }
   function addStemRow(s, i) {
@@ -969,6 +1128,8 @@ Object.assign(RM.app, (function () {
     initEditor, initRemix, initSlowed, initStems,
     updateEditorMeta, renderMarkers, updateTrimShade, stopStemPlayers,
     SLOWED_PRESETS,
+    guarded, friendlyErr, flatFx,
+    generateRemix, toggleStemPreview, updateRemixStemBadge,
   };
   })());
 'use strict';
@@ -982,12 +1143,13 @@ Object.assign(RM.app, (function () {
   const $ = A.$, clamp = RM.audio.clamp;
   const HI = () => { try { return (localStorage.getItem('ruhmix.lang') || 'hi') === 'hi'; } catch (e) { return true; } };
 
-  /* ================= multitrack mixer (5 tracks) ================= */
+  /* ================= multitrack mixer (6 tracks) ================= */
   const mixer = { tracks: [] };
+  const MIXER_TRACK_NAMES = ['VOCAL', 'DRUMS', 'BASS', 'OTHER', 'BEAT', 'FX'];
   function initMixer() {
     const box = $('mixer-tracks');
-    for (let i = 0; i < 5; i++) {
-      const tr = { id: i, name: 'Track ' + (i + 1), buffer: null, player: null, vol: 0.9, pan: 0, mute: false, solo: false };
+    for (let i = 0; i < MIXER_TRACK_NAMES.length; i++) {
+      const tr = { id: i, name: MIXER_TRACK_NAMES[i], buffer: null, player: null, vol: 0.9, pan: 0, mute: false, solo: false };
       mixer.tracks.push(tr);
       const d = document.createElement('div');
       d.className = 'track';
@@ -1083,8 +1245,16 @@ Object.assign(RM.app, (function () {
     });
   }
   // Stems/other screens use this to drop a buffer into the mixer.
+  // AI stems auto-route to their matching slot (Vocal→0, Drums→1,
+  // Bass→2, Other→3); anything else goes to the first free track.
   function sendToMixer(buffer, name) {
-    let tr = mixer.tracks.find((x) => !x.buffer) || mixer.tracks[0];
+    const low = String(name || '').toLowerCase();
+    const SLOT = [['vocal', 0], ['drum', 1], ['bass', 2], ['other', 3]];
+    let tr = null;
+    for (const [kw, idx] of SLOT) {
+      if (low.indexOf(kw) !== -1 && mixer.tracks[idx]) { tr = mixer.tracks[idx]; break; }
+    }
+    if (!tr) tr = mixer.tracks.find((x) => !x.buffer) || mixer.tracks[0];
     tr.buffer = buffer;
     tr.name = (name || 'Audio').slice(0, 28);
     if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
@@ -1357,6 +1527,7 @@ Object.assign(RM.app, (function () {
     if (!box) return;
     box.innerHTML = '';
     const opts = [];
+    if (A.state.stemMix) opts.push({ kind: 'stemmix', label: (HI() ? '🎤 स्टेम मिक्स — ऑटो रीमिक्स' : '🎤 Stem Mix — Auto Remix'), get: () => ({ buffer: A.state.stemMix, rate: 1, fx: A.flatFx(), name: 'stem-mix' }) });
     if (A.state.viewBuffer) opts.push({ kind: 'project', label: (HI() ? 'वर्तमान प्रोजेक्ट' : 'Current project') + ' (' + A.state.fileName + ')', get: () => ({ buffer: A.state.viewBuffer, rate: A.state.project.settings.speed || 1, fx: A.state.fx, name: A.state.fileName }) });
     RM.stems.results.forEach((s) => opts.push({ kind: 'stem', label: 'Stem: ' + s.name, get: () => ({ buffer: s.buffer, rate: 1, fx: A.defaultFx(), name: s.name }) }));
     A.state.imports.forEach((it) => opts.push({ kind: 'import', label: it.name, get: () => ({ buffer: it.buffer, rate: 1, fx: A.defaultFx(), name: it.name }) }));
@@ -1376,11 +1547,19 @@ Object.assign(RM.app, (function () {
   A.refreshExportSource = refreshExportSource;
 
   function initExport() {
-    $('exp-format-mp3').addEventListener('change', syncExpFormat);
-    $('exp-format-wav').addEventListener('change', syncExpFormat);
+    ['exp-format-mp3', 'exp-format-wav', 'exp-format-flac'].forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener('change', syncExpFormat);
+    });
     syncExpFormat();
     $('exp-bitrate').value = A.state.exportDefaults.bitrate;
     $('exp-sr').value = A.state.exportDefaults.sampleRate;
+    // restore saved default format (mp3/wav/flac)
+    try {
+      const fmt = A.state.exportDefaults.format || 'mp3';
+      const radio = document.querySelector(`input[name="expfmt"][value="${fmt}"]`);
+      if (radio) { radio.checked = true; syncExpFormat(); }
+    } catch (e) {}
     $('exp-start').addEventListener('click', doExport);
     $('exp-cancel').addEventListener('click', () => {
       expToken.cancelled = true;
@@ -1394,10 +1573,12 @@ Object.assign(RM.app, (function () {
     });
   }
   function syncExpFormat() {
-    const isMp3 = $('exp-format-mp3').checked;
-    $('exp-bitrate-row').style.display = isMp3 ? '' : 'none';
-    $('exp-note').textContent = isMp3
-      ? (HI() ? 'MP3 — छोटी फ़ाइल, हर जगह चलती है (lamejs, ऑफलाइन)' : 'MP3 — small file, plays everywhere (lamejs, offline)')
+    const fmt = document.querySelector('input[name="expfmt"]:checked');
+    const f = fmt ? fmt.value : 'mp3';
+    $('exp-bitrate-row').style.display = f === 'mp3' ? '' : 'none';
+    $('exp-note').textContent =
+      f === 'mp3' ? (HI() ? 'MP3 — छोटी फ़ाइल, हर जगह चलती है (lamejs, ऑफलाइन)' : 'MP3 — small file, plays everywhere (lamejs, offline)')
+      : f === 'flac' ? (HI() ? 'FLAC — lossless क्वालिटी, WAV से छोटी फ़ाइल (ऑफलाइन एनकोडर)' : 'FLAC — lossless quality, smaller than WAV (offline encoder)')
       : (HI() ? 'WAV — बेस्ट क्वालिटी, बड़ी फ़ाइल (16-bit PCM)' : 'WAV — best quality, larger file (16-bit PCM)');
   }
   function setExpStage(label, frac) {
@@ -1410,12 +1591,14 @@ Object.assign(RM.app, (function () {
     if (!opts || !opts.length) { A.toast(HI() ? 'एक्सपोर्ट के लिए कुछ नहीं है' : 'Nothing to export'); return; }
     const sel = document.querySelector('input[name="expsrc"]:checked');
     const src = opts[sel ? +sel.value : 0].get();
-    const isMp3 = $('exp-format-mp3').checked;
+    const fmtEl = document.querySelector('input[name="expfmt"]:checked');
+    const fmt = fmtEl ? fmtEl.value : 'mp3';
+    const isMp3 = fmt === 'mp3', isFlac = fmt === 'flac';
     const kbps = +$('exp-bitrate').value;
     const sr = +$('exp-sr').value;
     const normalize = $('exp-normalize').checked;
-    const ext = isMp3 ? 'mp3' : 'wav';
-    const mime = isMp3 ? 'audio/mpeg' : 'audio/wav';
+    const ext = isMp3 ? 'mp3' : isFlac ? 'flac' : 'wav';
+    const mime = isMp3 ? 'audio/mpeg' : isFlac ? 'audio/flac' : 'audio/wav';
     const fileName = (src.name || 'ruhmix').replace(/[^\w\- ]+/g, '').trim().slice(0, 40) + '.' + ext || RM.exp.defaultName(ext);
     expToken.cancelled = false;
     $('exp-start').disabled = true;
@@ -1446,6 +1629,15 @@ Object.assign(RM.app, (function () {
           : Promise.resolve(rendered);
         return p2.then((buf) => {
           stage(HI() ? 'एनकोड हो रहा है…' : 'Encoding…', 0.5);
+          if (isFlac) {
+            // FLAC: 16-bit PCM -> pure-JS FLAC encoder (offline, lossless)
+            return RM.audio.floatToInt16(buf, (p) => setExpStage((HI() ? 'तैयार: ' : 'Preparing: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
+              .then((i16) => {
+                stage(HI() ? 'FLAC एनकोड हो रहा है…' : 'Encoding FLAC…', 0.6);
+                return RM.exp.encodeFlac(i16, buf.sampleRate,
+                  (p, label) => setExpStage('FLAC ' + Math.round(p * 100) + '%', 0.6 + p * 0.3), expToken);
+              });
+          }
           if (!isMp3) {
             return RM.audio.encodeWavBuffer(buf, (p) => setExpStage((HI() ? 'एनकोड: ' : 'Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35))
               .then((ab) => new Blob([ab], { type: mime }));
@@ -1464,7 +1656,7 @@ Object.assign(RM.app, (function () {
           delivery.mime = mime;
           A.state.lastDelivery = delivery;
           try {
-            A.state.exportDefaults = { format: isMp3 ? 'mp3' : 'wav', bitrate: kbps, sampleRate: sr };
+            A.state.exportDefaults = { format: fmt, bitrate: kbps, sampleRate: sr };
             localStorage.setItem('ruhmix.exportDefaults', JSON.stringify(A.state.exportDefaults));
           } catch (e) {}
           const nat = RM.audio.native;
@@ -1472,11 +1664,19 @@ Object.assign(RM.app, (function () {
           done((HI() ? '✓ हो गया: ' : '✓ Done: ') + fileName, true);
           $('exp-share').style.display = '';
           A.toast(HI() ? 'एक्सपोर्ट हो गया' : 'Export complete');
+          // Interstitial ad: har 2nd export par (pehle par nahi), max 1 per 5 min.
+          // Fail ho to silent skip — export pe koi asar nahi.
+          try { if (window.RM && RM.ads) RM.ads.notifyExportDone(); } catch (e) {}
         });
       })
       .catch((e) => {
-        if (e && e.message === 'cancelled') done(HI() ? 'रद्द कर दिया गया' : 'Cancelled', false);
-        else done((HI() ? 'विफल: ' : 'Failed: ') + (e.message || e), false);
+        if (e && e.message === 'cancelled') { done(HI() ? 'रद्द कर दिया गया' : 'Cancelled', false); return; }
+        const msg = A.friendlyErr(e);
+        done(HI() ? 'विफल रहा' : 'Failed', false);
+        A.dialog(HI() ? 'एक्सपोर्ट विफल' : 'Export failed',
+          `<p>${A.escapeHtml(msg)}</p>`,
+          HI() ? '🔁 पुनः प्रयास' : '🔁 Retry',
+          HI() ? 'रद्द करें' : 'Cancel').then((retry) => { if (retry) doExport(); });
       });
   }
 
@@ -1541,6 +1741,25 @@ Object.assign(RM.app, (function () {
   }
 
   /* ================= settings ================= */
+  /* ---- temporary data clearing (shared by Storage + Privacy panels) ---- */
+  function clearTempData() {
+    const nat = RM.audio.native;
+    let nativeCleared = false;
+    if (nat.method('clearCache')) { try { nat.call('clearCache'); nativeCleared = true; } catch (e) {} }
+    try {
+      Object.keys(localStorage).filter((k) => k.indexOf('ruhmix.') === 0 && k !== 'ruhmix.projects.v1').forEach((k) => localStorage.removeItem(k));
+    } catch (e) {}
+    RM.stems.clear(); // stem results + 4-role pack
+    RM.remix.stemPipeline.stopPreview();
+    try {
+      [A.state.buffer, A.state.viewBuffer, A.state.stemMix].forEach((b) => { if (b && RM.wave) RM.wave.dropPeaks(b); });
+    } catch (e) {}
+    A.state.stemMix = null;
+    A.state.lastDelivery = null;
+    updateStorageInfo();
+    return nativeCleared;
+  }
+
   function initSettings() {
     $('set-theme').addEventListener('change', (e) => A.setTheme(e.target.value));
     $('set-lang').addEventListener('change', (e) => A.setLang(e.target.value));
@@ -1558,15 +1777,18 @@ Object.assign(RM.app, (function () {
       });
     });
     $('set-clear-cache').addEventListener('click', () => {
-      const nat = RM.audio.native;
-      let nativeCleared = false;
-      if (nat.method('clearCache')) { nat.call('clearCache'); nativeCleared = true; }
-      try {
-        Object.keys(localStorage).filter((k) => k.indexOf('ruhmix.') === 0 && k !== 'ruhmix.projects.v1').forEach((k) => localStorage.removeItem(k));
-      } catch (e) {}
-      RM.stems.clear();
+      const nativeCleared = clearTempData();
       A.toast(nativeCleared ? (HI() ? 'कैश साफ़ हो गया' : 'Cache cleared') : (HI() ? 'अस्थायी डेटा साफ़ हो गया' : 'Temporary data cleared'));
-      updateStorageInfo();
+    });
+    const privClear = $('set-privacy-clear');
+    if (privClear) privClear.addEventListener('click', () => {
+      A.dialog(HI() ? 'अस्थायी फ़ाइलें साफ़ करें?' : 'Clear temporary files?',
+        `<p>${HI() ? 'Stem results, stem-mix preview, peaks cache और अस्थायी ऐप डेटा हट जाएगा। सहेजे हुए प्रोजेक्ट सुरक्षित रहेंगे।' : 'Stem results, stem-mix preview, peaks cache and temporary app data will be removed. Saved projects stay safe.'}</p>`,
+        HI() ? 'साफ़ करें' : 'Clear', HI() ? 'रद्द करें' : 'Cancel').then((ok) => {
+          if (!ok) return;
+          clearTempData();
+          A.toast(HI() ? 'अस्थायी फ़ाइलें साफ़ हो गईं ✓' : 'Temporary files cleared ✓');
+        });
     });
     $('set-check-update').addEventListener('click', () => A.checkUpdate(true));
     updateStorageInfo();
@@ -1612,7 +1834,7 @@ Object.assign(RM.app, (function () {
 
   /* ================= more screen ================= */
   const MORE_LINKS = [
-    ['slowed', '🎛️', 'slowed'], ['stems', '🎤', 'stems'], ['fx', '🎚️', 'equalizer'],
+    ['slowed', '🎛️', 'slowed'], ['stems', '🎤', 'stems'], ['aistem', '🧠', null], ['fx', '🎚️', 'equalizer'],
     ['master', '💎', 'mastering'], ['record', '🎙️', 'recorder'], ['beat', '🥁', null],
     ['export', '📤', 'export_title'], ['projects', '📁', null], ['settings', '⚙️', 'settings_title'],
     ['pro', '⭐', 'pro_title'],
@@ -1620,11 +1842,14 @@ Object.assign(RM.app, (function () {
   function initMore() {
     const grid = $('more-grid');
     MORE_LINKS.forEach(([scr, icon, i18n]) => {
-      const label = { slowed: HI() ? 'स्लोड+रिवर्ब स्टूडियो' : 'Slowed+Reverb Studio', stems: HI() ? 'स्टेम सेपरेटर' : 'Stem Separator', fx: HI() ? 'FX रैक' : 'FX Rack', master: HI() ? 'मास्टरिंग' : 'Mastering', record: HI() ? 'वॉइस रिकॉर्डर' : 'Voice Recorder', beat: HI() ? 'बीट टूल्स' : 'Beat Tools', export: HI() ? 'एक्सपोर्ट' : 'Export', projects: HI() ? 'प्रोजेक्ट्स' : 'Projects', settings: HI() ? 'सेटिंग्स' : 'Settings', pro: 'RuhMix Pro' }[scr];
+      const label = { slowed: HI() ? 'स्लोड+रिवर्ब स्टूडियो' : 'Slowed+Reverb Studio', stems: HI() ? 'स्टेम सेपरेटर' : 'Stem Separator', aistem: HI() ? 'AI स्टेम सेपरेटर' : 'AI Stem Separator', fx: HI() ? 'FX रैक' : 'FX Rack', master: HI() ? 'मास्टरिंग' : 'Mastering', record: HI() ? 'वॉइस रिकॉर्डर' : 'Voice Recorder', beat: HI() ? 'बीट टूल्स' : 'Beat Tools', export: HI() ? 'एक्सपोर्ट' : 'Export', projects: HI() ? 'प्रोजेक्ट्स' : 'Projects', settings: HI() ? 'सेटिंग्स' : 'Settings', pro: 'RuhMix Pro' }[scr];
       const b = document.createElement('button');
       b.className = 'home-card';
       b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label">${label}</div>`;
-      b.addEventListener('click', () => A.show(scr));
+      b.addEventListener('click', () => {
+        if (scr === 'aistem') { RM.aiStems.open(); return; }
+        A.show(scr);
+      });
       grid.appendChild(b);
     });
     $('more-update').addEventListener('click', () => A.checkUpdate(true));
@@ -1637,6 +1862,7 @@ Object.assign(RM.app, (function () {
     ['slowed', '🎛️', 'slowed', null],
     ['editor', '🎚️', 'audio_editor', null],
     ['stems', '🎤', 'stems', null],
+    ['aistem', '🧠', 'ai_stems', null],
     ['record', '🎙️', 'recorder', null],
     ['fx', '🎛️', 'equalizer', null],
     ['master', '💎', 'mastering', null],
@@ -1649,6 +1875,7 @@ Object.assign(RM.app, (function () {
       b.dataset.label = A.t(i18n).toLowerCase();
       b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label" data-i18n="${i18n}">${A.t(i18n)}</div>`;
       b.addEventListener('click', () => {
+        if (scr === 'aistem') { RM.aiStems.open(); return; }
         if (scr === 'import' && !A.state.project) { A.newProject(); return; }
         if ((scr === 'editor' || scr === 'remix' || scr === 'slowed' || scr === 'master') && !A.needAudio()) return;
         A.show(scr);
@@ -1690,6 +1917,7 @@ Object.assign(RM.app, (function () {
       if (name === 'projects') renderProjects();
       if (name === 'settings') updateStorageInfo();
       if (name === 'home') renderHomeRecent();
+      if (name === 'remix') A.updateRemixStemBadge();
     };    A.loadTheme();
     A.setLang((() => { try { return localStorage.getItem('ruhmix.lang') || 'hi'; } catch (e) { return 'hi'; } })());
     // nav
@@ -1716,6 +1944,9 @@ Object.assign(RM.app, (function () {
     // mixer / fx / mastering / beat / export / projects / settings / pro / more
     initMixer(); initFxRack(); initMastering(); initBeat();
     initExport(); initProjects(); initSettings(); initPro(); initMore();
+    RM.aiStems.init();
+    // AdMob: rewarded + interstitial preload (native bridge ho to; warna silent skip)
+    try { if (window.RM && RM.ads) RM.ads.preload(); } catch (e) {}
     // recorder
     $('rec-btn').addEventListener('click', () => {
       if (recBusy()) return;

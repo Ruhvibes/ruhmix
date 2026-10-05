@@ -26,6 +26,11 @@
         android:allowBackup="true"
         android:supportsRtl="true">
 
+        <!-- AdMob App ID (res/values/ads.xml me — Hasnain ka real ID). -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="@string/admob_app_id" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

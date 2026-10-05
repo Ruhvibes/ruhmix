@@ -32,6 +32,18 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.FileProvider;
 
+import com.google.android.gms.ads.AdRequest;
+import com.google.android.gms.ads.FullScreenContentCallback;
+import com.google.android.gms.ads.LoadAdError;
+import com.google.android.gms.ads.MobileAds;
+import com.google.android.gms.ads.OnUserEarnedRewardListener;
+import com.google.android.gms.ads.RequestConfiguration;
+import com.google.android.gms.ads.rewarded.RewardItem;
+import com.google.android.gms.ads.rewarded.RewardedAd;
+import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
+import com.google.android.gms.ads.interstitial.InterstitialAd;
+import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
+
 import org.json.JSONArray;
 
 import java.io.File;
@@ -74,6 +86,172 @@ public class MainActivity extends ComponentActivity {
     private static final String FILEPROVIDER_AUTH = "com.ruhmix.app.fileprovider";
 
     private WebView webView;
+
+    // ---------- AdMob (rewarded video + interstitial) ----------
+    // Ads must NEVER crash the app: every ad call is wrapped in try/catch
+    // and every failure reports back to JS so the feature degrades gracefully.
+    private RewardedAd rewardedAd = null;
+    private String rewardedUnitLoading = null;
+    private InterstitialAd interstitialAd = null;
+
+    /** Initializes AdMob safely (idempotent). */
+    private void initAds() {
+        try {
+            RequestConfiguration conf = new RequestConfiguration.Builder()
+                    .setTagForChildDirectedTreatment(
+                            RequestConfiguration.TAG_FOR_CHILD_DIRECTED_TREATMENT_FALSE)
+                    .setMaxAdContentRating(RequestConfiguration.MAX_AD_CONTENT_RATING_G)
+                    .build();
+            MobileAds.setRequestConfiguration(conf);
+            MobileAds.initialize(this, initializationStatus -> {
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void jsCallback(String js) {
+        try {
+            final WebView wv = webView;
+            if (wv == null) return;
+            runOnUiThread(() -> {
+                try { wv.evaluateJavascript(js, null); } catch (Exception ignored) {}
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static String jsStr(String s) {
+        if (s == null) return "''";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
+    /** Preloads a rewarded + interstitial ad so they show without delay. */
+    private void preloadAds(final String rewardedUnitId, final String interstitialUnitId) {
+        runOnUiThread(() -> {
+            try {
+                loadRewarded(rewardedUnitId, null);
+            } catch (Exception ignored) {
+            }
+            try {
+                loadInterstitial(interstitialUnitId);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void loadRewarded(final String unitId, final Runnable onLoadedShow) {
+        try {
+            if (unitId == null || unitId.isEmpty()) return;
+            rewardedUnitLoading = unitId;
+            AdRequest req = new AdRequest.Builder().build();
+            RewardedAd.load(this, unitId, req, new RewardedAdLoadCallback() {
+                @Override
+                public void onAdLoaded(RewardedAd ad) {
+                    rewardedAd = ad;
+                    if (onLoadedShow != null) {
+                        try { onLoadedShow.run(); } catch (Exception ignored) {}
+                    }
+                }
+
+                @Override
+                public void onAdFailedToLoad(LoadAdError err) {
+                    rewardedAd = null;
+                }
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void loadInterstitial(final String unitId) {
+        try {
+            if (unitId == null || unitId.isEmpty()) return;
+            AdRequest req = new AdRequest.Builder().build();
+            InterstitialAd.load(this, unitId, req, new InterstitialAdLoadCallback() {
+                @Override
+                public void onAdLoaded(InterstitialAd ad) {
+                    interstitialAd = ad;
+                }
+
+                @Override
+                public void onAdFailedToLoad(LoadAdError err) {
+                    interstitialAd = null;
+                }
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Shows a rewarded video ad. JS is always called back exactly once via
+     * RM.ads._onRewarded('earned' | 'closed' | 'failed').
+     */
+    private void showRewarded(final String unitId) {
+        runOnUiThread(() -> {
+            try {
+                if (rewardedAd != null && unitId != null && unitId.equals(rewardedUnitLoading)) {
+                    showRewardedNow(unitId);
+                } else {
+                    // Not preloaded (or different unit): load then show.
+                    loadRewarded(unitId, () -> {
+                        try {
+                            if (rewardedAd != null) showRewardedNow(unitId);
+                            else jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded('failed')");
+                        } catch (Exception ignored) {
+                            jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded('failed')");
+                        }
+                    });
+                    // Safety: if load hangs, the JS side has its own 25s timeout.
+                }
+            } catch (Exception ignored) {
+                jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded('failed')");
+            }
+        });
+    }
+
+    private void showRewardedNow(final String unitId) {
+        final RewardedAd ad = rewardedAd;
+        rewardedAd = null; // one-shot: reload after showing
+        final boolean[] earned = {false};
+        try {
+            ad.setFullScreenContentCallback(new FullScreenContentCallback() {
+                @Override
+                public void onAdDismissedFullScreenContent() {
+                    jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded(" +
+                            jsStr(earned[0] ? "earned" : "closed") + ")");
+                    try { loadRewarded(unitId, null); } catch (Exception ignored) {}
+                }
+
+                @Override
+                public void onAdFailedToShowFullScreenContent(com.google.android.gms.ads.AdError err) {
+                    jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded('failed')");
+                    try { loadRewarded(unitId, null); } catch (Exception ignored) {}
+                }
+            });
+            ad.show(this, (OnUserEarnedRewardListener) (RewardItem rewardItem) -> {
+                earned[0] = true;
+            });
+        } catch (Exception ignored) {
+            jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded('failed')");
+            try { loadRewarded(unitId, null); } catch (Exception ignored2) {}
+        }
+    }
+
+    /** Shows a preloaded interstitial if one is ready; silently skips otherwise. */
+    private void showInterstitial(final String unitId) {
+        runOnUiThread(() -> {
+            try {
+                final InterstitialAd ad = interstitialAd;
+                interstitialAd = null; // one-shot: reload after showing
+                if (ad != null) {
+                    ad.show(MainActivity.this);
+                }
+            } catch (Exception ignored) {
+            } finally {
+                // Keep one warm for next time; failure is silent by design.
+                try { loadInterstitial(unitId); } catch (Exception ignored) {}
+            }
+        });
+    }
     private ValueCallback<Uri[]> filePathCallback;
     private boolean audioPermDeniedBefore = false;
     private boolean micPermDeniedBefore = false;
@@ -137,6 +315,7 @@ public class MainActivity extends ComponentActivity {
         s.setUseWideViewPort(true);
 
         webView.addJavascriptInterface(new NativeBridge(), "Android");
+        initAds();
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
@@ -615,6 +794,28 @@ public class MainActivity extends ComponentActivity {
      * The JS bridge, called from JavaScript as Android.pickAudio() etc.
      */
     private class NativeBridge {
+
+        // ---------- AdMob bridge (rewarded + interstitial) ----------
+        @JavascriptInterface
+        public void preloadAds(final String rewardedUnitId, final String interstitialUnitId) {
+            try { MainActivity.this.preloadAds(rewardedUnitId, interstitialUnitId); }
+            catch (Exception ignored) {}
+        }
+
+        @JavascriptInterface
+        public void showRewarded(final String unitId) {
+            try { MainActivity.this.showRewarded(unitId); }
+            catch (Exception ignored) {
+                try { jsCallback("window.RM&&RM.ads&&RM.ads._onRewarded('failed')"); }
+                catch (Exception ignored2) {}
+            }
+        }
+
+        @JavascriptInterface
+        public void showInterstitial(final String unitId) {
+            try { MainActivity.this.showInterstitial(unitId); }
+            catch (Exception ignored) {}
+        }
 
         @JavascriptInterface
         public void pickAudio() {

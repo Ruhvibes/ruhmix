@@ -1,0 +1,16 @@
+# RuhMix AI Server
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+python-multipart>=0.0.9
+pydantic>=2.6,<3
+python-dotenv>=1.0
+# PyTorch — pip's default wheel includes CUDA (used with the nvidia/cuda base image).
+# For a CPU-only host install torch from the CPU index instead:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2,<3
+# Demucs (Meta, MIT license) — pulls torchaudio; htdemucs = 4-stem model
+demucs>=4.0.1
+
+# --- test-only (not needed at runtime) ---
+# httpx>=0.27
+# pytest>=8

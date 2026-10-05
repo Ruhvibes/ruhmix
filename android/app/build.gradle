@@ -11,7 +11,7 @@ android {
         applicationId 'com.ruhmix.app'
         minSdk 26
         targetSdk 34
-        versionCode 1
+        versionCode 2
         versionName '1.0'
     }
 
@@ -48,6 +48,10 @@ dependencies {
     implementation 'androidx.activity:activity:1.9.0'
     // Explicit (already cached transitively): FileProvider for the share sheet.
     implementation 'androidx.core:core:1.13.0'
+    // AdMob: rewarded video (AI Stem Separation gate) + interstitial (post-export).
+    implementation 'com.google.android.gms:play-services-ads:23.2.0'
+    // Force modern Fragment (lint InvalidFragmentVersionForActivityResult fix).
+    implementation 'androidx.fragment:fragment:1.8.0'
 }
 
 // kotlin-stdlib:1.8.22 (pulled in by androidx) already contains the

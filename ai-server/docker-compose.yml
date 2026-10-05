@@ -1,0 +1,32 @@
+name: ruhmix-ai
+
+services:
+  ruhmix-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ruhmix-ai-server:latest
+    container_name: ruhmix-ai
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    env_file:
+      - .env
+    environment:
+      JOBS_DIR: /data/jobs
+    volumes:
+      - ruhmix-jobs:/data/jobs
+      # Lets the server persist its first-run generated API_KEY back to the
+      # host .env (same file compose reads via env_file).
+      - ./.env:/app/.env
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  ruhmix-jobs:
+    name: ruhmix-jobs

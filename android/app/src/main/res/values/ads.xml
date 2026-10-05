@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- AdMob App ID — Hasnain ka REAL ID (RuhMix app, AdMob console se). -->
+    <string name="admob_app_id">ca-app-pub-1457912071506893~1344547777</string>
+</resources>

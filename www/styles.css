@@ -187,6 +187,9 @@ body.light #ed-wave { background: #e8ecf6; }
   border-radius: 10px; height: 14px; overflow: hidden; margin: 10px 0; }
 .pbar { height: 100%; width: 0%; background: var(--grad);
   border-radius: 10px; transition: width 0.15s; }
+/* Indeterminate (server-side processing — % fake nahi dikhate) */
+.pbar.indet { width: 40% !important; animation: pbar-slide 1.4s ease-in-out infinite; }
+@keyframes pbar-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
 .big-num { font-size: 42px; font-weight: 800; margin: 8px 0;
   background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 /* ======================= pro ======================= */
@@ -231,3 +234,15 @@ body.light #bottomnav { background: rgba(255, 255, 255, 0.96); }
 }
 .foot-note { text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0 10px; }
 .about-logo { width: 72px; height: 72px; border-radius: 50%; margin-bottom: 6px; }
+
+/* ======================= AI stems (neural, server) ======================= */
+.ai-card { border: 1px solid var(--purple); }
+.status-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+  background: #888; margin-right: 8px; vertical-align: middle; flex: none; }
+.status-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.status-dot.err { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+.divider { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--muted); font-size: 13px; }
+.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.setup-steps { margin: 8px 0 12px 20px; font-size: 14px; }
+.setup-steps li { margin: 6px 0; }
+.mono { font-family: monospace; word-break: break-all; }

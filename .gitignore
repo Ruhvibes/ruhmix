@@ -1,5 +1,14 @@
-android/build/
+# Build outputs
+RuhMix.apk
 android/app/build/
-android/.gradle/
-*.iml
-.DS_Store
+# Precious keystore — NEVER commit
+keystore/
+*.jks
+# Python
+__pycache__/
+*.pyc
+ai-server/.venv/
+ai-server/.env
+# Gradle
+.gradle/
+local.properties

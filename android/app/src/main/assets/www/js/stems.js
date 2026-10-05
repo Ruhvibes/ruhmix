@@ -317,6 +317,34 @@ RM.stems = (function () {
   /* ================= public API ================= */
   const results = []; // last extraction: [{name, buffer, engine}]
 
+  /* ---- 4-role stem pack registry ----
+     A "stem pack" is exactly 4 audio roles that Auto Remix can consume as
+     separate tracks. Roles from AI/cloud separation: 'vocal', 'drums',
+     'bass', 'other'. Roles from the DSP spectral engine are frequency
+     bands ('low','lowmid','presence','air') — labelled honestly, never
+     passed off as instrument isolation.
+     A future cloud/AI module registers its 4 stems via setStemPack(). */
+  let stemPack = null; // {source:'ai'|'dsp-spectral', createdAt, roles:[{role,label,buffer}]}
+  function setStemPack(pack) {
+    if (!pack || !Array.isArray(pack.roles) || pack.roles.length !== 4)
+      throw new Error('Stem pack me exactly 4 roles chahiye.');
+    pack.roles.forEach((r, i) => {
+      if (!r || !r.buffer || !r.buffer.getChannelData) throw new Error(`Role ${i + 1} me audio buffer nahi hai.`);
+    });
+    stemPack = {
+      source: pack.source || 'ai',
+      createdAt: Date.now(),
+      roles: pack.roles.map((r) => ({ role: r.role || ('stem' + (pack.roles.indexOf(r) + 1)), label: r.label || r.role || 'Stem', buffer: r.buffer })),
+    };
+    return stemPack;
+  }
+  function getStemPack() { return stemPack; }
+  function packAvailable() {
+    return !!(stemPack && stemPack.roles.length === 4 &&
+      stemPack.roles.every((r) => r.buffer && r.buffer.getChannelData));
+  }
+  function clearStemPack() { stemPack = null; }
+
   function run(engineId, buffer, onProgress) {
     results.length = 0;
     let p;
@@ -334,7 +362,8 @@ RM.stems = (function () {
   function clear() {
     results.forEach((s) => { s.buffer = null; });
     results.length = 0;
+    clearStemPack();
   }
 
-  return { ENGINES, run, results, clear };
+  return { ENGINES, run, results, clear, setStemPack, getStemPack, packAvailable, clearStemPack };
 })();
