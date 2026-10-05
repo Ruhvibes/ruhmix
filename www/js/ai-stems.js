@@ -36,6 +36,18 @@ RM.aiStems = (function () {
   const T = (hi, en) => (HI() ? hi : en);
 
   const LS_KEY = 'rmx_ai_server';
+  const LS_BACKEND = 'rmx_ai_backend'; // 'dsp' | 'hf' | 'modal' — DEFAULT 'dsp'
+  function getBackend() {
+    try {
+      const b = localStorage.getItem(LS_BACKEND);
+      if (b === 'hf' || b === 'modal' || b === 'dsp') return b;
+    } catch (e) {}
+    return 'dsp';
+  }
+  function setBackend(b) {
+    if (b !== 'hf' && b !== 'modal' && b !== 'dsp') return;
+    try { localStorage.setItem(LS_BACKEND, b); } catch (e) {}
+  }
   const STEMS = [
     { id: 'vocals', name: 'Vocal (AI)',  trackIdx: 0 },
     { id: 'drums',  name: 'Drums (AI)',  trackIdx: 1 },
@@ -118,6 +130,19 @@ RM.aiStems = (function () {
     const setup = $('aistem-setup'), main = $('aistem-main');
     if (!setup || !main) return;
     abortAll(true); // stop anything from a previous visit
+    if (RM.hfStems) RM.hfStems.abortAll(true);
+    renderBackendPicker();
+    const be = getBackend();
+    if (be === 'hf' && RM.hfStems) {
+      RM.hfStems.renderInto(setup, main);
+      return;
+    }
+    if (be === 'dsp') {
+      setup.style.display = ''; main.style.display = 'none';
+      renderDspChoice();
+      return;
+    }
+    // Modal (existing flow)
     if (!getCfg()) {
       setup.style.display = ''; main.style.display = 'none';
       renderSetup();
@@ -127,11 +152,48 @@ RM.aiStems = (function () {
     }
   }
 
-  /* ================= setup screen (no server configured) ================= */
+  /* ================= backend selector (3 options) ================= */
+  function backendDefs() {
+    return [
+      { id: 'dsp',   icon: '✂️', label: T('DSP Beta', 'DSP Beta'),       sub: T('turant, bina server', 'instant, no server') },
+      { id: 'hf',    icon: '🤗', label: T('Hugging Face', 'Hugging Face'), sub: T('FREE AI', 'FREE AI') },
+      { id: 'modal', icon: '☁️', label: T('Modal', 'Modal'),             sub: T('card chahiye', 'needs card') },
+    ];
+  }
+  function renderBackendPicker() {
+    const box = $('aistem-backend');
+    if (!box) return;
+    const cur = getBackend();
+    box.innerHTML = `<div class="muted small" style="margin-bottom:4px">${T('Backend chunein:', 'Choose backend:')}</div><div class="btn-row" id="aib-row"></div>`;
+    const row = $('aib-row');
+    backendDefs().forEach((d) => {
+      const b = document.createElement('button');
+      b.className = 'btn small' + (d.id === cur ? ' primary' : '');
+      b.innerHTML = `${d.icon} ${A.escapeHtml(d.label)}<br><span class="muted" style="font-size:11px">${A.escapeHtml(d.sub)}</span>`;
+      b.addEventListener('click', () => { setBackend(d.id); render(); });
+      row.appendChild(b);
+    });
+  }
+
+  /* ================= DSP Beta choice (default backend) ================= */
+  function renderDspChoice() {
+    $('aistem-setup').innerHTML = `
+      <div class="panel">
+        <h4>✂️ DSP Beta — bina server, turant</h4>
+        <p class="muted small">${T('Ye on-device DSP technique hai — neural AI nahi. Natijon me bleed ho sakta hai. Koi upload, koi server, koi ad nahi.',
+               'This is an on-device DSP technique — not neural AI. Results may have bleed. No upload, no server, no ad.')}</p>
+        <button class="btn primary big block" id="ais-go-dsp-main">${T('DSP Stem Separation kholein', 'Open DSP Stem Separation')}</button>
+      </div>`;
+    $('ais-go-dsp-main').addEventListener('click', () => A.show('stems'));
+  }
+
+  /* ================= setup screen (Modal: no server configured) ================= */
   function renderSetup() {
     $('aistem-setup').innerHTML = `
       <div class="panel">
-        <h4>🧠 AI Stem Separation</h4>
+        <h4>☁️ Modal — AI Stem Separation</h4>
+        <p class="muted small">⚠️ ${T('Is backend ke liye card chahiye (Modal account). Bina card ke Hugging Face wala FREE option use karein.',
+               'This backend needs a card (Modal account). Without a card, use the FREE Hugging Face option.')}</p>
         <p>${T('AI Stem Separation ke liye server setup zaroori hai. Ye feature neural AI model se kaam karta hai, jo server par chalta hai — bina server ke ye kaam nahi karega.',
                'AI Stem Separation needs a server setup. This feature uses a neural AI model that runs on the server — it will not work without one.')}</p>
         <ol class="setup-steps">
@@ -140,16 +202,8 @@ RM.aiStems = (function () {
           <li>${T('Settings → AI Server में डालें और कनेक्शन जाँचें।', 'Paste them in Settings → AI Server and test the connection.')}</li>
         </ol>
         <button class="btn primary big block" id="ais-go-settings">${T('Settings kholein', 'Open Settings')}</button>
-      </div>
-      <div class="divider"><span>${T('या', 'or')}</span></div>
-      <div class="panel">
-        <h4>${T('Bina server ke basic separation', 'Basic separation without server')} <span class="beta">Beta (DSP)</span></h4>
-        <p class="muted small">${T('Ye on-device DSP technique hai — neural AI nahi. नतीजों में bleed ho sakta hai.',
-               'This is an on-device DSP technique — not neural AI. Results may have bleed.')}</p>
-        <button class="btn block" id="ais-go-dsp">${T('Bina server ke basic separation (Beta DSP)', 'Basic separation without server (Beta DSP)')}</button>
       </div>`;
     $('ais-go-settings').addEventListener('click', () => A.show('settings'));
-    $('ais-go-dsp').addEventListener('click', () => A.show('stems'));
   }
 
   /* ================= main screen ================= */
@@ -581,6 +635,14 @@ RM.aiStems = (function () {
   }
 
   function testConnection() {
+    const be = getBackend();
+    if (be === 'hf') { testHfConnection(); return; }
+    if (be === 'dsp') {
+      setAiStatus('', T('✂️ DSP Beta — test ki zaroorat nahi', '✂️ DSP Beta — no test needed'));
+      const res = $('ai-test-result');
+      if (res) res.innerHTML = '';
+      return;
+    }
     const urlIn = $('ai-url'), keyIn = $('ai-key');
     const url = (urlIn ? urlIn.value : '').trim().replace(/\/+$/, '');
     const key = keyIn ? keyIn.value : '';
@@ -624,30 +686,128 @@ RM.aiStems = (function () {
     });
   }
 
-  function refreshSettingsInputs() {
-    const urlIn = $('ai-url'), keyIn = $('ai-key');
-    if (!urlIn || !keyIn) return;
-    const cfg = getCfg();
-    if (cfg) {
-      urlIn.value = cfg.url;
-      keyIn.value = cfg.key || '';
-      setAiStatus('', T('सहेजा हुआ — कनेक्शन जाँचें', 'Saved — test the connection'));
-    } else {
-      setAiStatus('', T('सेट नहीं है', 'Not set'));
+  /* HF test: /gradio_api/info se API name verify hota hai (koi key nahi). */
+  function testHfConnection() {
+    if (!RM.hfStems) return;
+    const url = $('ai-hf-url').value.trim().replace(/\/+$/, '');
+    const api = ($('ai-hf-api').value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
+    const res = $('ai-test-result');
+    if (res) res.innerHTML = '';
+    if (!url) {
+      setAiStatus('err', T('Pehle Space URL daalein', 'Enter the Space URL first'));
+      return;
     }
+    if (!/^https?:\/\//i.test(url)) {
+      setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+      return;
+    }
+    RM.hfStems.setCfg(url, api);
+    setAiStatus('', T('जाँच हो रही है… (soya Space jagte me 1-2 min le sakta hai)', 'Checking… (a sleeping Space can take 1-2 min to wake)'));
+    RM.hfStems.testSpace(url, api).then((r) => {
+      setAiStatus('ok', T('Space mil gaya ✓ (API: /' + r.api + ')', 'Space reachable ✓ (API: /' + r.api + ')'));
+      if (res) res.innerHTML = `<div class="ok">${T('कनेक्शन सफल — Hugging Face AI taiyaar hai. Outputs: ' + r.outputs + ' (Vocal + Instrumental).',
+        'Connection successful — Hugging Face AI is ready. Outputs: ' + r.outputs + ' (Vocal + Instrumental).')}</div>`;
+    }).catch((e) => {
+      const kind = e && e.kind;
+      if (kind === 'asleep') {
+        setAiStatus('err', T('Space jag raha hai — 1-2 min me dobara try karein', 'Space is waking up — retry in 1-2 min'));
+        if (res) res.innerHTML = `<div class="err">${T('Space abhi jag raha hai. 1-2 minute rukkar "कनेक्शन जांचें" dobara dabayein.',
+          'The Space is waking up. Wait 1-2 minutes and press "Test Connection" again.')}</div>`;
+      } else if (kind === 'badapi') {
+        const names = (e.found && e.found.length ? e.found.join(', ') : '—');
+        setAiStatus('err', T('API name galat hai', 'Wrong API name'));
+        if (res) res.innerHTML = `<div class="err">${T('Ye API name Space pe nahi mila. Space page pe "View API" se sahi naam dekhein. Mile: ' + names,
+          'This API name was not found on the Space. Check the correct name via "View API" on the Space page. Found: ' + names)}</div>`;
+      } else {
+        setAiStatus('err', T('Space se connect nahi ho pa raha', 'Cannot reach the Space'));
+        if (res) res.innerHTML = `<div class="err">${T('Space se connect nahi ho pa raha. URL aur internet check karein.',
+          'Cannot reach the Space. Check the URL and your internet connection.')}</div>`;
+      }
+    });
+  }
+
+  function refreshSettingsInputs() {
+    const be = getBackend();
+    const hfF = $('ai-hf-fields'), moF = $('ai-modal-fields');
+    if (hfF) hfF.style.display = be === 'hf' ? '' : 'none';
+    if (moF) moF.style.display = be === 'modal' ? '' : 'none';
+    if (be === 'hf') {
+      const urlIn = $('ai-hf-url'), apiIn = $('ai-hf-api');
+      if (!urlIn || !apiIn || !RM.hfStems) return;
+      const cfg = RM.hfStems.getCfg();
+      urlIn.value = cfg ? cfg.url : '';
+      apiIn.value = cfg ? cfg.apiName : RM.hfStems.DEFAULT_API;
+      setAiStatus('', cfg
+        ? T('सहेजा हुआ — कनेक्शन जाँचें', 'Saved — test the connection')
+        : T('सेट नहीं है', 'Not set'));
+    } else if (be === 'modal') {
+      const urlIn = $('ai-url'), keyIn = $('ai-key');
+      if (!urlIn || !keyIn) return;
+      const cfg = getCfg();
+      if (cfg) {
+        urlIn.value = cfg.url;
+        keyIn.value = cfg.key || '';
+        setAiStatus('', T('सहेजा हुआ — कनेक्शन जाँचें', 'Saved — test the connection'));
+      } else {
+        setAiStatus('', T('सेट नहीं है', 'Not set'));
+      }
+    } else {
+      setAiStatus('', T('✂️ DSP Beta — settings ki zaroorat nahi', '✂️ DSP Beta — no settings needed'));
+    }
+  }
+
+  function renderSettingsBackendPicker() {
+    const box = $('ai-backend-picker');
+    if (!box) return;
+    const cur = getBackend();
+    box.innerHTML = '';
+    backendDefs().forEach((d) => {
+      const b = document.createElement('button');
+      b.className = 'btn small' + (d.id === cur ? ' primary' : '');
+      b.innerHTML = `${d.icon} ${A.escapeHtml(d.label)}<br><span class="muted" style="font-size:11px">${A.escapeHtml(d.sub)}</span>`;
+      b.addEventListener('click', () => {
+        setBackend(d.id);
+        renderSettingsBackendPicker();
+        refreshSettingsInputs();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function saveSettings() {
+    const be = getBackend();
+    if (be === 'hf') {
+      if (!RM.hfStems) return;
+      const url = $('ai-hf-url').value.trim().replace(/\/+$/, '');
+      const api = ($('ai-hf-api').value.trim() || RM.hfStems.DEFAULT_API).replace(/^\/+/, '');
+      if (!url) { setAiStatus('err', T('Pehle Space URL daalein', 'Enter the Space URL first')); return; }
+      if (!/^https?:\/\//i.test(url)) {
+        setAiStatus('err', T('URL http(s):// se shuru hona chahiye', 'The URL must start with http(s)://'));
+        return;
+      }
+      RM.hfStems.setCfg(url, api);
+      setAiStatus('', T('सहेजा गया ✓', 'Saved ✓'));
+      A.toast(T('Hugging Face settings सहेजी गईं', 'Hugging Face settings saved'));
+      return;
+    }
+    if (be === 'dsp') {
+      A.toast(T('DSP Beta me kuch save karne ki zaroorat nahi', 'Nothing to save for DSP Beta'));
+      return;
+    }
+    const urlIn = $('ai-url'), keyIn = $('ai-key');
+    const url = urlIn.value.trim().replace(/\/+$/, '');
+    if (!url) { setAiStatus('err', T('Pehle Server URL daalein', 'Enter the server URL first')); return; }
+    setCfg(url, keyIn.value);
+    setAiStatus('', T('सहेजा गया ✓', 'Saved ✓'));
+    A.toast(T('AI Server settings सहेजी गईं', 'AI server settings saved'));
   }
 
   function initSettings() {
     const urlIn = $('ai-url'), keyIn = $('ai-key');
     if (!urlIn || !keyIn) return;
+    renderSettingsBackendPicker();
     refreshSettingsInputs();
-    $('ai-save').addEventListener('click', () => {
-      const url = urlIn.value.trim().replace(/\/+$/, '');
-      if (!url) { setAiStatus('err', T('Pehle Server URL daalein', 'Enter the server URL first')); return; }
-      setCfg(url, keyIn.value);
-      setAiStatus('', T('सहेजा गया ✓', 'Saved ✓'));
-      A.toast(T('AI Server settings सहेजी गईं', 'AI server settings saved'));
-    });
+    $('ai-save').addEventListener('click', saveSettings);
     $('ai-test').addEventListener('click', testConnection);
   }
 
@@ -669,7 +829,7 @@ RM.aiStems = (function () {
   }
 
   return {
-    init, open, getCfg, testConnection,
+    init, open, getCfg, testConnection, getBackend, setBackend,
   };
 })();
 

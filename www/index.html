@@ -154,7 +154,7 @@
   <!-- AI (neural, server) — the ONLY flow allowed to say "AI" -->
   <div class="engine-card ai-card">
     <div class="ec-name">🧠 AI Stem Separation <span class="beta">AI • SERVER</span></div>
-    <div class="ec-desc">Neural AI model (server) se Vocal / Drums / Bass / Other — studio-quality separation.</div>
+    <div class="ec-desc">Backend chunein: ✂️ DSP Beta (turant, bina server) • 🤗 Hugging Face (FREE AI, 2 stems: Vocal + Instrumental) • ☁️ Modal (card chahiye).</div>
     <button class="btn primary block" id="btn-ai-stem">AI Se Alag Karein</button>
   </div>
   <!-- DSP engines: Beta (DSP) — neural AI nahi -->
@@ -166,10 +166,11 @@
   <div id="stems-results"></div>
 </section>
 
-<!-- ======================= 6b. AI STEMS (neural, server) ======================= -->
+<!-- ======================= 6b. AI STEMS (DSP Beta • Hugging Face • Modal) ======================= -->
 <section class="screen" id="screen-aistem">
   <h2>🧠 AI Stem Separation</h2>
-  <p class="muted">Neural AI (server) • Vocal / Drums / Bass / Other</p>
+  <p class="muted">✂️ DSP Beta • 🤗 Hugging Face (FREE) • ☁️ Modal</p>
+  <div id="aistem-backend" style="margin-bottom:10px"></div>
   <div id="aistem-setup" style="display:none"></div>
   <div id="aistem-main" style="display:none"></div>
 </section>
@@ -349,9 +350,9 @@
     <h4>🔒 प्राइवेसी</h4>
     <div class="muted small">
       <p>• <b>आपका ऑडियो आपके डिवाइस पर ही रहता है।</b> एडिटिंग, FX, मिक्सिंग — सब कुछ on-device होता है, कोई अपलोड नहीं।</p>
-      <p>• <b>Cloud sirf AI Stem Separation ke liye</b> — aur wo bhi sirf आपकी स्पष्ट अनुमति (consent) + ek chhota ad dekhne ke baad. Bina consent koi audio cloud nahi bheja jata.</p>
+      <p>• <b>Cloud sirf AI Stem Separation ke liye</b> — aur wo bhi sirf आपकी स्पष्ट अनुमति (consent) ke baad. Bina consent koi audio cloud nahi bheja jata. Modal wala option ad dekhne ke baad chalta hai; Hugging Face wala option bilkul free hai (koi ad nahi).</p>
       <p>• <b>Turant auto-delete:</b> AI stems ke liye bheja gaya audio processing khatm hote hi server se turant hata diya jata hai — koi copy save nahi hoti.</p>
-      <p>• <b>Ads:</b> AI Stem Separation se pehle ek rewarded video ad (server ka kharcha isi se nikalta hai), aur har 2nd export ke baad ek interstitial ad (max 1 per 5 min). Ads ke bina aapka data kahin nahi jata.</p>
+      <p>• <b>Ads:</b> Modal AI Stem Separation se pehle ek rewarded video ad (server ka kharcha isi se nikalta hai), aur har 2nd export ke baad ek interstitial ad (max 1 per 5 min). Ads ke bina aapka data kahin nahi jata.</p>
       <p>• कोई account, कोई tracking — आपकी फ़ाइलें आपकी हैं।</p>
     </div>
     <button class="btn ghost block" id="set-privacy-clear">🧹 अस्थायी फ़ाइलें साफ़ करें</button>
@@ -364,9 +365,20 @@
   </div>
   <div class="panel">
     <h4>🤖 AI Server <span class="beta">AI</span></h4>
-    <p class="muted small">AI Stem Separation (neural, cloud GPU) ke liye. Modal deploy ke baad jo URL mile wahi yahan daalein. Key sirf is device par rehti hai — kahin upload nahi hoti.</p>
-    <div class="row"><label>Modal Endpoint URL <input type="text" id="ai-url" class="textin" placeholder="https://xxx--ruhmix-stems-web.modal.run" inputmode="url" autocomplete="off"></label></div>
-    <div class="row"><label>API Key <input type="password" id="ai-key" class="textin" placeholder="••••••••" autocomplete="off"></label></div>
+    <p class="muted small">AI Stem Separation ke liye backend chunein. DSP Beta me koi settings nahi chahiye.</p>
+    <div id="ai-backend-picker" class="btn-row" style="margin-bottom:8px"></div>
+    <div id="ai-hf-fields" style="display:none">
+      <p class="muted small">🤗 <b>Hugging Face — FREE AI</b> (daily limit ~6-10 gaane, koi ad nahi). Apna duplicated Space URL yahan daalein.</p>
+      <div class="row"><label>Space URL <input type="text" id="ai-hf-url" class="textin" placeholder="https://username-music-separation.hf.space" inputmode="url" autocomplete="off"></label></div>
+      <p class="muted small">💡 Hint: apne duplicated Space ka URL (jaise https://username-music-separation.hf.space).</p>
+      <div class="row"><label>API Name <input type="text" id="ai-hf-api" class="textin" placeholder="inference" autocomplete="off"></label></div>
+      <p class="muted small">💡 Space page pe "View API" se naam dekhein (default: inference).</p>
+    </div>
+    <div id="ai-modal-fields" style="display:none">
+      <p class="muted small">☁️ <b>Modal — iske liye card chahiye</b> (future). Modal deploy ke baad jo URL mile wahi yahan daalein. Key sirf is device par rehti hai — kahin upload nahi hoti.</p>
+      <div class="row"><label>Modal Endpoint URL <input type="text" id="ai-url" class="textin" placeholder="https://xxx--ruhmix-stems-web.modal.run" inputmode="url" autocomplete="off"></label></div>
+      <div class="row"><label>API Key <input type="password" id="ai-key" class="textin" placeholder="••••••••" autocomplete="off"></label></div>
+    </div>
     <div class="row"><span id="ai-dot" class="status-dot"></span><span id="ai-status-text" class="muted small">सेट नहीं है</span></div>
     <div class="btn-row">
       <button class="btn primary" id="ai-test">🔌 कनेक्शन जांचें</button>
@@ -424,6 +436,7 @@
 <script src="js/waveform.js"></script>
 <script src="js/stems.js"></script>
 <script src="js/ads.js"></script>
+<script src="js/hf-stems.js"></script>
 <script src="js/ai-stems.js"></script>
 <script src="js/remix.js"></script>
 <script src="js/export.js"></script>

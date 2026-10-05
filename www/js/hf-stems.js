@@ -1,0 +1,633 @@
+'use strict';
+/* =====================================================================
+   RuhMix — hf-stems.js
+   Hugging Face Spaces backend (FREE, NO ad) for AI Stem Separation.
+
+   RAW Gradio HTTP API — koi library nahi, sirf plain fetch()/XHR:
+     1. POST {SPACE}/gradio_api/upload     multipart/form-data, field "files"
+        -> ["/tmp/gradio/<hash>/song.mp3"]            (server-side paths)
+     2. POST {SPACE}/gradio_api/call/<api>
+        {"data":[{"path":srvPath,"meta":{"_type":"gradio.FileData"}}]}
+        -> {"event_id":"..."}
+     3. GET  {SPACE}/gradio_api/call/<api>/<event_id>   (SSE, ek hi stream —
+        heartbeat-friendly, koi polling nahi; 5 min timeout; 1 auto-retry)
+        -> "event: complete" block ke "data:" me output FileData list
+     4. Har output download: {SPACE}/gradio_api/file=<server path>
+
+   REAL /gradio_api/info se verified (2026-10-05, Space
+   "abidlabs/music-separation"): named endpoint "/inference", input = 1
+   audio file, outputs = 2 audio files — "Vocals" aur "No Vocals /
+   Instrumental". ISLIYE HF se 2 stems milte hain (4 nahi) — UI ye baat
+   honestly batata hai, "4 stems" ka daava kahin nahi.
+
+   Config localStorage me 'rmx_ai_hf' ke andar { url, apiName } — koi
+   secret/key nahi. Public Space pe bina auth ke chalta hai.
+   Rewarded ad gate SIRF Modal backend ke liye hai — HF bilkul FREE, ad nahi.
+   ===================================================================== */
+window.RM = window.RM || {};
+
+RM.hfStems = (function () {
+  let A = null;
+  let $ = null;
+  const HI = () => { try { return (localStorage.getItem('ruhmix.lang') || 'hi') === 'hi'; } catch (e) { return true; } };
+  const T = (hi, en) => (HI() ? hi : en);
+
+  const LS_KEY = 'rmx_ai_hf';
+  const DEFAULT_API = 'inference';   // /gradio_api/info se verified
+  const SSE_TIMEOUT = 5 * 60 * 1000; // 5 min
+  const UPLOAD_TIMEOUT = 2 * 60 * 1000;
+  const CALL_TIMEOUT = 60 * 1000;
+
+  // Consent text — consent dialog me verbatim dikhaya jata hai.
+  const CONSENT_HF = 'Free AI pe ~30-60 second lag sakta hai, roz ~6-10 gaane ki limit hoti hai. Aapka audio Hugging Face ke free AI server par process hoga; processing khatm hote hi file delete ho jati hai. Is option me koi ad nahi hai — bilkul free.';
+
+  const st = {
+    song: null,
+    consentGiven: false,
+    running: false,
+    xhr: null,
+    abort: null,
+    players: [],
+    results: [],
+    setupEl: null,
+    mainEl: null,
+  };
+
+  /* ================= config (localStorage only, no secrets) ================= */
+  function getCfg() {
+    try {
+      const c = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+      if (c && typeof c.url === 'string' && c.url.trim()) {
+        return {
+          url: c.url.trim().replace(/\/+$/, ''),
+          apiName: (c.apiName || DEFAULT_API).trim().replace(/^\/+/, '') || DEFAULT_API,
+        };
+      }
+    } catch (e) {}
+    return null;
+  }
+  function setCfg(url, apiName) {
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ url: url, apiName: apiName || DEFAULT_API })); } catch (e) {}
+  }
+
+  /* ================= WAV encoder (upload payload) ================= */
+  function bufferToWavBlob(buffer) {
+    const sr = buffer.sampleRate;
+    const nCh = Math.min(2, buffer.numberOfChannels);
+    const len = buffer.length;
+    const chs = [];
+    for (let c = 0; c < nCh; c++) chs.push(buffer.getChannelData(c));
+    const dataBytes = len * nCh * 2;
+    const ab = new ArrayBuffer(44 + dataBytes);
+    const dv = new DataView(ab);
+    let off = 0;
+    const ws = (s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off++, s.charCodeAt(i)); };
+    ws('RIFF'); dv.setUint32(off, 36 + dataBytes, true); off += 4;
+    ws('WAVE'); ws('fmt '); dv.setUint32(off, 16, true); off += 4;
+    dv.setUint16(off, 1, true); off += 2;
+    dv.setUint16(off, nCh, true); off += 2;
+    dv.setUint32(off, sr, true); off += 4;
+    dv.setUint32(off, sr * nCh * 2, true); off += 4;
+    dv.setUint16(off, nCh * 2, true); off += 2;
+    dv.setUint16(off, 16, true); off += 2;
+    ws('data'); dv.setUint32(off, dataBytes, true); off += 4;
+    for (let i = 0; i < len; i++) {
+      for (let c = 0; c < nCh; c++) {
+        let v = chs[c][i];
+        if (v > 1) v = 1; else if (v < -1) v = -1;
+        dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+        off += 2;
+      }
+    }
+    return new Blob([ab], { type: 'audio/wav' });
+  }
+  function safeName(label) {
+    return String(label || 'audio').replace(/[^\w\-. ]+/g, '_').trim().slice(0, 80) || 'audio';
+  }
+
+  /* ================= raw Gradio HTTP client ================= */
+
+  // 1. upload -> server path (XHR taaki % progress mile)
+  function uploadFile(spaceUrl, blob, filename, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      st.xhr = xhr;
+      xhr.open('POST', spaceUrl + '/gradio_api/upload', true);
+      xhr.timeout = UPLOAD_TIMEOUT;
+      xhr.responseType = 'text';
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0 && typeof onProgress === 'function') onProgress(e.loaded / e.total);
+      };
+      xhr.onload = () => {
+        st.xhr = null;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const arr = JSON.parse(xhr.responseText);
+            const first = Array.isArray(arr) ? arr[0] : null;
+            const p = typeof first === 'string' ? first : (first && first.path);
+            if (p) resolve(p); else reject({ kind: 'process' });
+          } catch (e) { reject({ kind: 'process' }); }
+        } else if (xhr.status === 503) {
+          reject({ kind: 'asleep' });
+        } else if (xhr.status === 429) {
+          reject({ kind: 'quota' });
+        } else {
+          reject({ kind: 'connect', status: xhr.status });
+        }
+      };
+      xhr.onerror = () => { st.xhr = null; reject({ kind: 'connect' }); };
+      xhr.ontimeout = () => { st.xhr = null; reject({ kind: 'asleep' }); };
+      xhr.onabort = () => { st.xhr = null; reject({ kind: 'cancel' }); };
+      const fd = new FormData();
+      fd.append('files', blob, filename);
+      try { xhr.send(fd); }
+      catch (e) { st.xhr = null; reject({ kind: 'connect' }); }
+    });
+  }
+
+  // 2. call -> event_id
+  async function startCall(spaceUrl, api, serverPath, signal) {
+    let r;
+    try {
+      r = await fetch(spaceUrl + '/gradio_api/call/' + api, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: [{ path: serverPath, meta: { _type: 'gradio.FileData' } }] }),
+        signal: signal,
+      });
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw { kind: 'cancel' };
+      throw { kind: 'connect' };
+    }
+    if (r.status === 503) throw { kind: 'asleep' };
+    if (r.status === 429) throw { kind: 'quota' };
+    if (!r.ok) throw { kind: 'connect', status: r.status };
+    const j = await r.json();
+    if (!j || !j.event_id) throw { kind: 'process' };
+    return j.event_id;
+  }
+
+  // 3. SSE stream parse — event: complete ke data: me output FileData list
+  function parseSSE(text) {
+    const blocks = String(text || '').split(/\n\n+/);
+    let lastError = null;
+    for (const b of blocks) {
+      const lines = b.split('\n');
+      let ev = '', data = '';
+      for (const ln of lines) {
+        if (ln.indexOf('event:') === 0) ev = ln.slice(6).trim();
+        else if (ln.indexOf('data:') === 0) data += (data ? '\n' : '') + ln.slice(5).trim();
+        else if (data) data += '\n' + ln; // multiline data continuation
+      }
+      if (ev === 'error' || ev === 'unexpected_error') lastError = data || ev;
+      if (ev === 'complete') {
+        try {
+          const arr = JSON.parse(data);
+          return { outputs: arr };
+        } catch (e) { throw { kind: 'process' }; }
+      }
+    }
+    if (lastError) {
+      const m = String(lastError).toLowerCase();
+      if (m.indexOf('quota') >= 0 || m.indexOf('exceed') >= 0 || m.indexOf('limit') >= 0) {
+        throw { kind: 'quota', raw: lastError };
+      }
+      throw { kind: 'process', raw: lastError };
+    }
+    throw { kind: 'process' };
+  }
+
+  // 3b. SSE GET — ek hi stream (heartbeat-friendly), progress status ke saath
+  async function waitResult(spaceUrl, api, eventId, onStatus) {
+    const ctrl = new AbortController();
+    st.abort = ctrl;
+    const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, SSE_TIMEOUT);
+    try {
+      const r = await fetch(spaceUrl + '/gradio_api/call/' + api + '/' + eventId, { signal: ctrl.signal });
+      if (r.status === 503) throw { kind: 'asleep' };
+      if (r.status === 429) throw { kind: 'quota' };
+      if (!r.ok) throw { kind: 'connect', status: r.status };
+      // Stream ko chunk-by-chunk padho taaki estimation/progress dikhe.
+      let text = '';
+      if (r.body && typeof r.body.getReader === 'function') {
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        const seen = {};
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          text += dec.decode(chunk.value, { stream: true });
+          const m = /event:\s*([a-z_]+)/g;
+          let last = null, mm;
+          while ((mm = m.exec(text)) !== null) last = mm[1];
+          if (last && !seen[last]) {
+            seen[last] = true;
+            if (last === 'estimation' && typeof onStatus === 'function') {
+              onStatus(T('⏳ Server line me hain — intezaar karein…', '⏳ Queued on the server — please wait…'));
+            } else if ((last === 'progress' || last === 'generating') && typeof onStatus === 'function') {
+              onStatus(T('🧠 AI stems alag ho rahe hain…', '🧠 AI is separating the stems…'));
+            }
+          }
+        }
+        text += dec.decode();
+      } else {
+        text = await r.text();
+      }
+      return parseSSE(text);
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw { kind: 'timeout' };
+      throw (e && e.kind) ? e : { kind: 'connect' };
+    } finally {
+      clearTimeout(to);
+      st.abort = null;
+    }
+  }
+
+  // 4. output FileData -> download URL
+  function outputUrl(spaceUrl, f) {
+    if (!f) return null;
+    if (f.url && /^https?:\/\//i.test(f.url)) return f.url;
+    if (f.url && f.url.charAt(0) === '/') return spaceUrl + f.url;
+    if (f.path) return spaceUrl + '/gradio_api/file=' + f.path;
+    return null;
+  }
+
+  async function fetchStemBuffer(spaceUrl, f, ctx) {
+    const url = outputUrl(spaceUrl, f);
+    if (!url) throw { kind: 'process' };
+    let r;
+    try { r = await fetch(url); }
+    catch (e) { throw { kind: 'connect' }; }
+    if (!r.ok) throw { kind: 'connect', status: r.status };
+    const ab = await r.arrayBuffer();
+    return new Promise((res, rej) => {
+      try {
+        const p = ctx.decodeAudioData(ab.slice(0), res, rej);
+        if (p && typeof p.then === 'function') p.then(res, rej);
+      } catch (e) { rej(e); }
+    });
+  }
+
+  /* ================= entry / render ================= */
+  function renderInto(setupEl, mainEl) {
+    if (!A) { A = RM.app; $ = A.$; }
+    st.setupEl = setupEl;
+    st.mainEl = mainEl;
+    abortAll(true);
+    const cfg = getCfg();
+    if (!cfg) {
+      setupEl.style.display = ''; mainEl.style.display = 'none';
+      renderSetupHf();
+    } else {
+      setupEl.style.display = 'none'; mainEl.style.display = '';
+      renderMainHf();
+    }
+  }
+
+  /* ================= setup guide (no Space configured) ================= */
+  function renderSetupHf() {
+    st.setupEl.innerHTML = `
+      <div class="panel">
+        <h4>🤗 Hugging Face — FREE AI Setup</h4>
+        <p>${T('Apna khud ka FREE AI server — card nahi chahiye:',
+               'Your own FREE AI server — no card needed:')}</p>
+        <ol class="setup-steps">
+          <li>${T('<b>huggingface.co</b> pe free account banayein (card nahi lagta).',
+                  'Create a free account on <b>huggingface.co</b> (no card needed).')}</li>
+          <li>${T('<b>abidlabs/music-separation</b> Space kholein → <b>⋮ menu → "Duplicate"</b> → hardware <b>ZeroGPU</b> chunein → visibility <b>Public</b> rakhein.',
+                  'Open the <b>abidlabs/music-separation</b> Space → <b>⋮ menu → "Duplicate"</b> → choose hardware <b>ZeroGPU</b> → keep visibility <b>Public</b>.')}</li>
+          <li>${T('Jo URL mile (jaise <span class="mono">https://username-music-separation.hf.space</span>) use <b>Settings → AI Server</b> me daalein.',
+                  'Paste the URL you get (like <span class="mono">https://username-music-separation.hf.space</span>) into <b>Settings → AI Server</b>.')}</li>
+          <li>⚠️ ${T('<b>Honest note:</b> naya account ZeroGPU host karne ke liye <b>30 din purana</b> hona chahiye — tab tak wait karein ya purana account use karein.',
+                     '<b>Honest note:</b> a new account must be <b>30 days old</b> to host on ZeroGPU — wait it out or use an older account.')}</li>
+        </ol>
+        <button class="btn primary big block" id="hf-go-settings">${T('Settings kholein', 'Open Settings')}</button>
+      </div>
+      <div class="divider"><span>${T('ya', 'or')}</span></div>
+      <div class="panel">
+        <h4>${T('Bina server ke basic separation', 'Basic separation without server')} <span class="beta">Beta (DSP)</span></h4>
+        <p class="muted small">${T('On-device DSP technique — neural AI nahi, lekin turant kaam karta hai.',
+               'On-device DSP technique — not neural AI, but works instantly.')}</p>
+        <button class="btn block" id="hf-go-dsp">✂️ ${T('DSP Beta try karein (turant)', 'Try DSP Beta (instant)')}</button>
+      </div>`;
+    $('hf-go-settings').addEventListener('click', () => A.show('settings'));
+    $('hf-go-dsp').addEventListener('click', () => A.show('stems'));
+  }
+
+  /* ================= main screen ================= */
+  function songOptions() {
+    const opts = [];
+    const vb = A.state.viewBuffer || A.state.buffer;
+    if (vb) opts.push({ label: A.state.fileName || T('वर्तमान प्रोजेक्ट', 'Current project'), buffer: vb });
+    (A.state.imports || []).forEach((it) => {
+      if (it && it.buffer) opts.push({ label: it.name, buffer: it.buffer });
+    });
+    return opts;
+  }
+
+  function renderMainHf() {
+    const box = st.mainEl;
+    const opts = songOptions();
+    st.song = opts[0] || null;
+    st.results = [];
+    box.innerHTML = `
+      <div class="panel">
+        <h4>${T('गाना चुनें', 'Select song')}</h4>
+        <div id="ais-songs"></div>
+        <div class="honest">🤗 ${T('Ye FREE AI separation hai — ~30-60 second lag sakta hai, roz ~6-10 gaane ki limit. Koi ad nahi. 2 stems milte hain: Vocal + Instrumental.',
+               'This is FREE AI separation — it may take ~30-60 seconds, with a daily limit of ~6-10 songs. No ads. You get 2 stems: Vocal + Instrumental.')}</div>
+        <button class="btn primary big block" id="ais-start">${T('AI Se Stem Alag Karein', 'Separate Stems with AI')}</button>
+      </div>
+      <div id="ais-progress" style="display:none"></div>
+      <div id="ais-fail" style="display:none"></div>
+      <div id="ais-results"></div>`;
+    const list = $('ais-songs');
+    if (!opts.length) {
+      list.innerHTML = `<div class="empty">${T('कोई ऑडियो नहीं मिला — पहले इम्पोर्ट करें।', 'No audio found — import first.')}</div>`;
+      $('ais-start').disabled = true;
+    }
+    opts.forEach((o, i) => {
+      const b = document.createElement('button');
+      b.className = 'btn block listbtn' + (i === 0 ? ' primary' : '');
+      b.innerHTML = `${A.escapeHtml(o.label)} <span class="muted small">• ${A.fmtTime(o.buffer.duration)}</span>`;
+      b.addEventListener('click', () => {
+        st.song = o;
+        Array.prototype.forEach.call(list.children, (c, j) => c.classList.toggle('primary', j === i));
+      });
+      list.appendChild(b);
+    });
+    $('ais-start').addEventListener('click', startFlowHf);
+  }
+
+  function startFlowHf() {
+    if (st.running) return;
+    if (!st.song || !st.song.buffer) { A.toast(T('Pehle gaana chunein', 'Select a song first')); return; }
+    const cfg = getCfg();
+    if (!cfg) { renderInto(st.setupEl, st.mainEl); return; }
+    // NOTE: HF me koi rewarded ad nahi — free hai.
+    if (st.consentGiven) { runHf(cfg, false); return; }
+    A.dialog('🤗 ' + T('Hugging Face AI Stem Separation', 'Hugging Face AI Stem Separation'),
+      `<p>${A.escapeHtml(CONSENT_HF)}</p>` +
+      `<p class="muted small">Space: <span class="mono">${A.escapeHtml(cfg.url)}</span></p>`,
+      T('सहमत', 'Sahmat'), T('रद्द करें', 'Radd karein')).then((ok) => {
+      if (!ok) return;
+      st.consentGiven = true;
+      runHf(cfg, false);
+    });
+  }
+
+  /* ================= HF flow: upload -> call -> SSE -> download ================= */
+  async function runHf(cfg, autoRetried) {
+    // Purane HF results hatao taaki repeat runs accumulate na hon.
+    for (let i = RM.stems.results.length - 1; i >= 0; i--) {
+      if (RM.stems.results[i].engine === 'hf') RM.stems.results.splice(i, 1);
+    }
+    RM.stems.clearStemPack();
+    let blob;
+    try {
+      blob = bufferToWavBlob(st.song.buffer);
+    } catch (e) {
+      return failHf(T('Audio taiyaar nahi ho saka: ', 'Could not prepare audio: ') + (e && e.message ? e.message : e), 'process');
+    }
+    if (st.song.buffer.duration > 600) {
+      A.toast(T('Badi file hai — upload me samay lag sakta hai', 'Large file — upload may take a while'));
+    }
+    st.running = true;
+    const spaceUrl = cfg.url.replace(/\/+$/, '');
+    const api = (cfg.apiName || DEFAULT_API).replace(/^\/+/, '') || DEFAULT_API;
+    try {
+      // 1. upload
+      showProgress(0, T('Upload ho raha hai…', 'Uploading…'), true);
+      const srvPath = await uploadFile(spaceUrl, blob, safeName(st.song.label) + '.wav', (p) => {
+        if (st.running) showProgress(p, T('Upload ho raha hai', 'Uploading') + ' ' + Math.round(p * 100) + '%', true);
+      });
+      if (!st.running) return;
+      // 2. call
+      showProgress(-1, T('🧠 AI request bheji gayi…', '🧠 AI request sent…'), true);
+      const callCtrl = new AbortController();
+      st.abort = callCtrl;
+      const callTo = setTimeout(() => { try { callCtrl.abort(); } catch (e) {} }, CALL_TIMEOUT);
+      let eventId;
+      try {
+        eventId = await startCall(spaceUrl, api, srvPath, callCtrl.signal);
+      } finally {
+        clearTimeout(callTo);
+        if (st.abort === callCtrl) st.abort = null;
+      }
+      if (!st.running) return;
+      // 3. SSE — server line/progress khud batata hai
+      showProgress(-1, T('🧠 AI process ho raha hai… (~30-60 second)', '🧠 AI is processing… (~30-60 seconds)'), true);
+      const out = await waitResult(spaceUrl, api, eventId, (msg) => {
+        if (st.running) showProgress(-1, msg, true);
+      });
+      if (!st.running) return;
+      const files = (out.outputs || []).filter((f) => f && (f.path || f.url));
+      if (!files.length) throw { kind: 'process' };
+      // 4. stems download + decode
+      const ctx = RM.audio.ensureCtx();
+      const stems = [];
+      const labels = ['Vocal (HF)', 'Instrumental (HF)'];
+      for (let i = 0; i < files.length; i++) {
+        if (!st.running) return;
+        showProgress(-1, T('Stem download ho raha hai', 'Downloading stem') + ` ${i + 1}/${files.length}…`, true);
+        const buf = await fetchStemBuffer(spaceUrl, files[i], ctx);
+        stems.push({ name: labels[i] || (T('Stem ', 'Stem ') + (i + 1) + ' (HF)'), buffer: buf, engine: 'hf' });
+      }
+      finishHf(stems);
+    } catch (e) {
+      if ((e && e.kind === 'cancel') || !st.running) return; // user ne cancel kiya
+      if (!autoRetried && e && (e.kind === 'asleep' || e.kind === 'connect')) {
+        // 1 auto-retry — space jag raha ho to dusri baar lag jata hai.
+        showProgress(-1, T('🔁 Dobara koshish ho rahi hai…', '🔁 Retrying…'), false);
+        setTimeout(() => { if (st.running) runHf(cfg, true); }, 5000);
+        return;
+      }
+      failHf(errToMessage(e), e && e.kind);
+    }
+  }
+
+  function errToMessage(e) {
+    const kind = e && e.kind;
+    if (kind === 'asleep') {
+      return T('Space jag raha hai (pehli baar start hone me 1-2 min lag sakta hai). Thodi der me dobara try karein.',
+               'The Space is waking up (first start can take 1-2 min). Please try again in a bit.');
+    }
+    if (kind === 'quota') {
+      return T('Aaj ki free limit khatm ho gayi lagti hai (roz ~6-10 gaane). Kal dobara try karein ya apna Space duplicate karein.',
+               'The free daily limit seems over (~6-10 songs/day). Try again tomorrow or duplicate your own Space.');
+    }
+    if (kind === 'timeout') {
+      return T('5 minute me jawab nahi aaya (timeout). Chhota gaana try karein ya dobara koshish karein.',
+               'No response in 5 minutes (timeout). Try a shorter song or try again.');
+    }
+    if (kind === 'connect') {
+      return T('Server se connect nahi ho pa raha. Internet aur Space URL check karein.',
+               'Cannot connect to the server. Check your internet and the Space URL.');
+    }
+    return T('AI processing me gadbad hui. Dobara koshish karein.',
+             'Something went wrong during AI processing. Please try again.');
+  }
+
+  /* ================= done: results + mixer ================= */
+  function finishHf(stems) {
+    st.running = false;
+    st.results = stems;
+    stems.forEach((s) => RM.stems.results.push({ name: s.name, buffer: s.buffer, engine: 'hf' }));
+    hideProgress();
+    renderResultsHf(stems);
+    A.toast(T('HF Stems taiyaar hain ✓', 'HF stems are ready ✓'));
+  }
+
+  function renderResultsHf(stems) {
+    const box = $('ais-results');
+    box.innerHTML = `
+      <div class="ok" style="margin:8px 0">✓ ${T('HF Stems taiyaar hain', 'HF stems are ready')} — ${stems.length}</div>
+      <div class="honest">🤗 ${T('Ye 2 stems hain — Vocal + Instrumental (HF Space ka output).',
+               'These are 2 stems — Vocal + Instrumental (the HF Space output).')}</div>
+      <button class="btn primary block" id="ais-to-mixer">${T('Sabhi HF Stems ko Mixer me load karein', 'Load all HF stems into the Mixer')}</button>
+      <div id="ais-rows"></div>`;
+    $('ais-to-mixer').addEventListener('click', () => {
+      stems.forEach((s) => A.sendToMixer(s.buffer, s.name));
+      A.show('mixer');
+    });
+    const rows = $('ais-rows');
+    stems.forEach((s) => rows.appendChild(hfStemRow(s)));
+  }
+
+  function stopHfPlayers() {
+    st.players.forEach((p) => { try { p.stop(true); p.dispose(); } catch (e) {} });
+    st.players = [];
+  }
+
+  function hfStemRow(s) {
+    const d = document.createElement('div');
+    d.className = 'stem-row';
+    d.innerHTML = `
+      <div class="sr-main">
+        <div class="sr-name">${A.escapeHtml(s.name)} <span class="beta">HF</span></div>
+        <div class="sr-meta">${A.fmtTime(s.buffer.duration)} • ${s.buffer.sampleRate} Hz</div>
+      </div>
+      <button class="btn small" data-a="play">▶</button>
+      <button class="btn small ghost" data-a="mix">${T('मिक्सर', 'Mixer')}</button>
+      <button class="btn small ghost" data-a="exp">${T('एक्सपोर्ट', 'Export')}</button>`;
+    let player = null;
+    const btn = d.querySelector('[data-a="play"]');
+    btn.addEventListener('click', () => {
+      if (player && player.playing) { player.pause(); btn.textContent = '▶'; return; }
+      A.stopAll(); stopHfPlayers();
+      RM.audio.ensureCtx();
+      player = RM.audio.makePlayer();
+      st.players.push(player);
+      player.load(s.buffer);
+      player.play(0);
+      btn.textContent = '⏸';
+      player.onended = () => { btn.textContent = '▶'; };
+    });
+    d.querySelector('[data-a="mix"]').addEventListener('click', () => {
+      if (A.sendToMixer(s.buffer, s.name)) A.show('mixer');
+    });
+    d.querySelector('[data-a="exp"]').addEventListener('click', () => {
+      A.state.exportSource = { kind: 'buffer', buffer: s.buffer, name: s.name };
+      A.show('export');
+      A.refreshExportSource();
+    });
+    return d;
+  }
+
+  /* ================= failure panel ================= */
+  function failHf(msg, kind) {
+    st.running = false;
+    stopHfPlayers();
+    hideProgress();
+    const box = $('ais-fail');
+    if (!box) return;
+    box.style.display = '';
+    const retryBtn = `<button class="btn primary" id="ais-retry">${T('🔁 Dobara koshish karein', '🔁 Try again')}</button>`;
+    const cancelBtn = `<button class="btn ghost" id="ais-cancel">${T('रद्द करें', 'Cancel')}</button>`;
+    const dspBtn = (kind === 'connect' || kind === 'asleep' || kind === 'quota' || kind === 'timeout')
+      ? `<button class="btn" id="ais-go-dsp2">✂️ ${T('DSP Beta try karein (turant)', 'Try DSP Beta (instant)')}</button>`
+      : '';
+    box.innerHTML = `
+      <div class="panel">
+        <div class="err" style="margin-bottom:8px">⚠ ${A.escapeHtml(msg)}</div>
+        <div class="btn-row">${retryBtn}${dspBtn}${cancelBtn}</div>
+      </div>`;
+    $('ais-retry').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; startFlowHf(); });
+    $('ais-cancel').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; renderMainHf(); });
+    const dsp = $('ais-go-dsp2');
+    if (dsp) dsp.addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; A.show('stems'); });
+  }
+
+  /* ================= progress / abort ================= */
+  function showProgress(p, label, cancelable) {
+    const box = $('ais-progress');
+    if (!box) return;
+    box.style.display = '';
+    const indet = !(p >= 0);
+    const pct = indet ? 0 : Math.max(0, Math.min(100, Math.round(p * 100)));
+    box.innerHTML = `
+      <div class="panel">
+        <div class="progress"><div class="pbar${indet ? ' indet' : ''}" style="width:${pct}%"></div></div>
+        <div class="status">${A.escapeHtml(label || '')}</div>
+        ${cancelable ? `<button class="btn ghost" id="ais-cancel-up">${T('रद्द करें', 'Cancel')}</button>` : ''}
+      </div>`;
+    if (cancelable) {
+      $('ais-cancel-up').addEventListener('click', () => abortAll(false));
+    }
+  }
+  function hideProgress() {
+    const b = $('ais-progress');
+    if (b) { b.style.display = 'none'; b.innerHTML = ''; }
+  }
+  function abortAll(silent) {
+    if (!A && window.RM && RM.app) { A = RM.app; $ = A.$; } // render() se pehle bhi call ho sakta hai
+    st.running = false;
+    if (st.xhr) { try { st.xhr.abort(); } catch (e) {} st.xhr = null; }
+    if (st.abort) { try { st.abort.abort(); } catch (e) {} st.abort = null; }
+    stopHfPlayers();
+    hideProgress();
+    if (!silent && st.mainEl) renderMainHf();
+  }
+
+  /* ================= Settings test helper ================= */
+  // Settings > AI Server ka "कनेक्शन जांचें" HF ke liye isi ko call karta hai.
+  function testSpace(spaceUrl, apiName) {
+    const url = String(spaceUrl || '').trim().replace(/\/+$/, '');
+    const api = (String(apiName || DEFAULT_API).trim().replace(/^\/+/, '')) || DEFAULT_API;
+    const ctrl = new AbortController();
+    const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 60000);
+    return fetch(url + '/gradio_api/info', { signal: ctrl.signal }).then((r) => {
+      clearTimeout(to);
+      if (r.status === 503) throw { kind: 'asleep' };
+      if (!r.ok) throw { kind: 'connect', status: r.status };
+      return r.json();
+    }).then((info) => {
+      const eps = (info && info.named_endpoints) || {};
+      const key = '/' + api;
+      if (!eps[key]) {
+        const names = Object.keys(eps);
+        throw { kind: 'badapi', found: names };
+      }
+      const returns = eps[key].returns || [];
+      return { ok: true, api: key, outputs: returns.length };
+    }).catch((e) => {
+      clearTimeout(to);
+      if (e && e.name === 'AbortError') throw { kind: 'asleep' };
+      throw (e && e.kind) ? e : { kind: 'connect' };
+    });
+  }
+
+  // Node unit tests ke liye (browser me harmless): gradio client internals export.
+  try {
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = {
+        api: { getCfg, setCfg, renderInto, abortAll, testSpace, DEFAULT_API },
+        internals: { uploadFile, startCall, parseSSE, waitResult, outputUrl, fetchStemBuffer, CONSENT_HF },
+      };
+    }
+  } catch (e) {}
+
+  return {
+    getCfg, setCfg, renderInto, abortAll, testSpace, DEFAULT_API,
+  };
+})();
