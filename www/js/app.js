@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 13 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 14 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -20,7 +20,6 @@ RM.app = (function () {
       audio_editor: 'Audio Editor', stems: 'Stem Separator', recorder: 'Voice Recorder',
       ai_stems: 'AI Stem Separator',
       equalizer: 'Equalizer', mastering: 'Mastering', recent: 'Recent Projects',
-      recent_files: 'Recent Files',
       search: 'Search…', import_title: 'Import Audio', pick_audio: 'Pick Audio',
       editor_title: 'Audio Editor', play: 'Play', pause: 'Pause', stop: 'Stop',
       settings_title: 'Settings', export_title: 'Export', projects_title: 'Projects',
@@ -436,10 +435,19 @@ RM.app = (function () {
     // XHR fallback hardened: correct 'arraybuffer' casing (capital-B 'arrayBuffer'
     // is an invalid enum value and gets silently ignored -> string response),
     // 30s timeout (hang = 'unreadable', never a silent stall), 0-byte -> empty buffer.
-    return fetch(url).then((r) => {
+    // file: scheme par fetch() kabhi kaam nahi karta — sirf console error log
+    // karke reject hota hai. Isliye file: URLs seedha XHR se lao (no console noise).
+    let isFile = false;
+    try { isFile = new URL(url, location.href).protocol === 'file:'; } catch (e) {}
+    const viaFetch = () => fetch(url).then((r) => {
       if (!r.ok) throw new Error('fetch failed: ' + r.status);
       return r.arrayBuffer();
-    }).catch(() => new Promise((resolve, reject) => {
+    });
+    if (isFile) return fetchViaXhr(url);
+    return viaFetch().catch(() => fetchViaXhr(url));
+  }
+  function fetchViaXhr(url) {
+    return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('GET', url, true);
       xhr.responseType = 'arraybuffer';
@@ -466,7 +474,7 @@ RM.app = (function () {
       xhr.onerror = () => settle(reject, new Error('xhr error'));
       xhr.onabort = () => settle(reject, new Error('xhr aborted'));
       try { xhr.send(); } catch (e) { settle(reject, e); }
-    }));
+    });
   }
 
   /* ---------- hardened import error helpers ---------- */
@@ -528,11 +536,6 @@ RM.app = (function () {
     toast(('Decoding: ') + name);
     return tryDecodeStages(ab, name).then((buf) => {
       state.imports.unshift({ name, buffer: buf, size: size || ab.byteLength, type: '' });
-      // Recent files quick access: successful imports with a cached file path
-      // get a quick-open entry on Home (no picker needed next time).
-      try {
-        if (fileUrl && window.RM && RM.recent) RM.recent.track(name, fileUrl, buf.duration, size || ab.byteLength);
-      } catch (e) {}
       // Memory edge: har import poora decoded AudioBuffer pakadta hai
       // (10-min stereo ~100MB). List ko cap karo, warna 20-30 import = OOM.
       const MAX_IMPORTS = 12;
@@ -953,7 +956,11 @@ RM.app = (function () {
         if (manual) toast('App is up to date ✓');
       }
     }).catch(() => {
-      if (box) box.textContent = 'Check failed — check your internet connection';
+      const msg = 'Check failed — check your internet connection';
+      // #update-status Settings screen me hai — More screen se check karne par
+      // wo hidden hota hai, to failure par toast dikhao taaki tap be-asar na lage.
+      if (box && box.offsetParent) box.textContent = msg;
+      else if (manual) toast(msg, 3000);
     });
   }
 
@@ -2204,20 +2211,27 @@ Object.assign(RM.app, (function () {
   }
   A.refreshExportSource = refreshExportSource;
 
+  // Export screen ko Settings me badle gaye defaults se sync karo.
+  // (initExport sirf boot par chalta hai; Settings badalne ke baad export
+  // screen khulne par purane radio/select dikhte the — restart tak stale.)
+  function syncExpDefaults() {
+    try {
+      $('exp-bitrate').value = A.state.exportDefaults.bitrate;
+      $('exp-sr').value = A.state.exportDefaults.sampleRate;
+      const fmt = A.state.exportDefaults.format || 'mp3';
+      const radio = document.querySelector(`input[name="expfmt"][value="${fmt}"]`);
+      if (radio) { radio.checked = true; }
+      syncExpFormat();
+    } catch (e) {}
+  }
+  A.syncExpDefaults = syncExpDefaults;
   function initExport() {
     ['exp-format-mp3', 'exp-format-wav', 'exp-format-flac'].forEach((id) => {
       const el = $(id);
       if (el) el.addEventListener('change', syncExpFormat);
     });
     syncExpFormat();
-    $('exp-bitrate').value = A.state.exportDefaults.bitrate;
-    $('exp-sr').value = A.state.exportDefaults.sampleRate;
-    // restore saved default format (mp3/wav/flac)
-    try {
-      const fmt = A.state.exportDefaults.format || 'mp3';
-      const radio = document.querySelector(`input[name="expfmt"][value="${fmt}"]`);
-      if (radio) { radio.checked = true; syncExpFormat(); }
-    } catch (e) {}
+    syncExpDefaults();
     $('exp-start').addEventListener('click', doExport);
     $('exp-cancel').addEventListener('click', () => {
       expToken.cancelled = true;
@@ -2501,10 +2515,6 @@ Object.assign(RM.app, (function () {
         });
     });
     $('set-check-update').addEventListener('click', () => A.checkUpdate(true));
-    const replay = $('set-replay-intro');
-    if (replay) replay.addEventListener('click', () => {
-      try { RM.onboard.replayIntro(); } catch (e) {}
-    });
     updateStorageInfo();
   }
   function updateStorageInfo() {
@@ -2675,7 +2685,6 @@ Object.assign(RM.app, (function () {
     $('home-new').addEventListener('click', () => A.newProject());
     renderFreeMusic();
     renderHomeRecent();
-    try { if (window.RM && RM.recent) RM.recent.init(); } catch (e) {}
   }
   function renderHomeRecent() {
     const box = $('home-recent');
@@ -2699,10 +2708,10 @@ Object.assign(RM.app, (function () {
   /* ================= init ================= */
   function init() {
     A.onShow = (name) => {
-      if (name === 'export') refreshExportSource();
+      if (name === 'export') { refreshExportSource(); if (A.syncExpDefaults) A.syncExpDefaults(); }
       if (name === 'projects') renderProjects();
       if (name === 'settings') updateStorageInfo();
-      if (name === 'home') { renderHomeRecent(); try { if (window.RM && RM.recent) RM.recent.render(); } catch (e) {} }
+      if (name === 'home') { renderHomeRecent(); }
       if (name === 'remix') A.updateRemixStemBadge();
     };    A.loadTheme();
     A.setLang('en');
@@ -2769,8 +2778,6 @@ Object.assign(RM.app, (function () {
     try { history.replaceState({ screen: 'home' }, '', String(location.href).split('#')[0] + '#home'); } catch (e) {}
     window.addEventListener('popstate', (e) => A.onPopState(e));
     A.show('home');
-    // first-run onboarding + "What's New" on version upgrade (onboarding.js)
-    try { if (window.RM && RM.onboard) RM.onboard.init({ versionCode: A.APP.versionCode }); } catch (e) {}
   }
   function recBusy() {
     // part 1 ka rec object exported nahi; recActive() source of truth hai

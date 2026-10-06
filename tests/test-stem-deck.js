@@ -50,11 +50,6 @@ function record(name, ok, detail) {
   try {
     await page.goto(PAGE_URL, { waitUntil: 'load', timeout: 60000 });
     await page.waitForFunction(() => window.RM && RM.app && RM.app.state, { timeout: 30000 });
-    await page.evaluate(() => {
-      const sk = document.getElementById('ob-skip');
-      if (sk && document.getElementById('ob-ov') && document.getElementById('ob-ov').classList.contains('show')) sk.click();
-    });
-    await new Promise((r) => setTimeout(r, 300));
 
     const ev = (fn, ...args) => page.evaluate(fn, ...args);
 

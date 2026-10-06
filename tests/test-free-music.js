@@ -2,9 +2,9 @@
 /*
  * RuhMix Free Music Library E2E test (Puppeteer + chrome-headless-shell).
  *
- * - Home shows the "Free Music" section: 10 cards (name + style tag + BPM +
+ * - Home shows the "Free Music" section: 6 cards (name + style tag + BPM +
  *   duration + preview button + free-to-use note), subtitle
- *   "10 original tracks — more coming soon".
+ *   "6 original tracks — more coming soon".
  * - Preview button plays/stops in place (no editor load).
  * - Tapping a card loads it into the Editor via the same hardened decode
  *   path as a normal import (fully offline): duration + license line verified.
@@ -24,12 +24,8 @@ const EXPECT = [
   { name: 'Lofi',      bpm: '80',  dur: '0:37', secs: 37.0, tag: 'Chill' },
   { name: 'EDM',       bpm: '128', dur: '0:31', secs: 31.4, tag: 'Energetic' },
   { name: 'Trap',      bpm: '140', dur: '0:35', secs: 35.5, tag: 'Dark' },
-  { name: 'Acoustic',  bpm: '90',  dur: '0:33', secs: 33.0, tag: 'Warm' },
-  { name: 'Synthwave', bpm: '100', dur: '0:34', secs: 34.6, tag: 'Retro' },
   { name: 'Sufi',      bpm: '85',  dur: '0:35', secs: 35.4, tag: 'Emotional' },
-  { name: 'Dance',     bpm: '124', dur: '0:31', secs: 31.6, tag: 'Party' },
   { name: 'Piano',     bpm: '75',  dur: '0:34', secs: 34.0, tag: 'Emotional' },
-  { name: 'Boom Bap',  bpm: '92',  dur: '0:32', secs: 32.3, tag: 'Old School' },
 ];
 const LICENSE = '© Original — Free to use in your projects';
 
@@ -53,24 +49,24 @@ const step = (m) => console.log('STEP:', m);
   );
   await new Promise((r) => setTimeout(r, 800));
 
-  // ---- 1. Free Music section: 10 cards ----------------------------------
+  // ---- 1. Free Music section: 6 cards ----------------------------------
   const cards = await page.$$eval('#free-music .fm-card', (els) =>
     els.map((el) => el.innerText.replace(/\n/g, ' | '))
   );
-  add('home: 10 free-music cards visible', cards.length === 10, cards.length + ' cards');
+  add('home: 6 free-music cards visible', cards.length === 6, cards.length + ' cards');
   EXPECT.forEach((e) => {
     const hit = cards.find((c) => c.includes(e.name) && c.includes(e.bpm + ' BPM') &&
       c.includes(e.dur) && c.includes(e.tag));
     add(`home: "${e.name}" card (${e.tag}, ${e.bpm} BPM, ${e.dur})`, !!hit, hit || 'missing');
   });
   const sub = await page.$eval('.fm-sub', (el) => el.innerText);
-  add('home: honest subtitle (10 tracks, more coming soon)',
-    /10 original tracks/i.test(sub) && /more coming soon/i.test(sub), sub);
+  add('home: honest subtitle (6 tracks, more coming soon)',
+    /6 original tracks/i.test(sub) && /more coming soon/i.test(sub), sub);
   const noHype = await page.evaluate(() =>
     !document.body.innerText.match(/thousands of tracks/i));
   add('home: no false "thousands of tracks" claim', noHype, '');
   const prevBtns = await page.$$eval('#free-music .fm-play', (els) => els.length);
-  add('home: every card has a preview button', prevBtns === 10, prevBtns + ' buttons');
+  add('home: every card has a preview button', prevBtns === 6, prevBtns + ' buttons');
 
   // ---- 2. Preview plays + stops in place --------------------------------
   step('preview start');
@@ -92,8 +88,11 @@ const step = (m) => console.log('STEP:', m);
     const e = EXPECT[i];
     step('load card ' + i);
     await page.$$eval('#free-music .fm-card', (els, idx) => els[idx].click(), i);
+    // NOTE: state.buffer set hota hai sync, lekin ed-meta refreshView() ke
+    // baad async update hota hai — isliye meta me current fileName dikhne
+    // tak wait karo (warna pichhle track ka stale meta padha jata hai).
     await page.waitForFunction(
-      "document.querySelector('#screen-editor').classList.contains('active') && window.RM.app.state.buffer",
+      "document.querySelector('#screen-editor').classList.contains('active') && window.RM.app.state.buffer && window.RM.app.state.fileName && document.getElementById('ed-meta').innerText.includes(window.RM.app.state.fileName)",
       { timeout: 60000 }
     );
     const got = await page.evaluate(() => ({
@@ -156,6 +155,13 @@ const step = (m) => console.log('STEP:', m);
     ' style=' + window.RM.app.state.remix.style));
   await page.waitForFunction(
     "document.getElementById('remix-status').innerText.includes('Tap Preview')",
+    { timeout: 180000, polling: 1000 }
+  );
+  // NOTE: "Tap Preview" status render kickoff ke turant baad likha jata hai;
+  // state.remixBuffer offline render complete hone par set hota hai (35s track
+  // me kai second lag sakte hain) — isliye uske liye alag se wait karo.
+  await page.waitForFunction(
+    "!!window.RM.app.state.remixBuffer",
     { timeout: 180000, polling: 1000 }
   );
   const remixOk = await page.evaluate(() => !!window.RM.app.state.remixBuffer);
