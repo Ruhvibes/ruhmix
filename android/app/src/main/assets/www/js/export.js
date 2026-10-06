@@ -12,9 +12,11 @@
    between stages and during encoding; the native offline render itself
    is one shot (UI says "Rendering… please wait" during it).
 
-   Delivery: tries Android.saveWav (WAV) / Android.saveFile (any), else
-   falls back to a browser download. Share uses Android.shareFile(path,
-   mime) when the native side saved the file, with graceful fallbacks.
+   Delivery: tries Android.saveToMusicLibrary (MediaStore -> Music/RuhMix/,
+   visible in music player apps) first, then Android.saveWav (WAV) /
+   Android.saveFile (any), else falls back to a browser download.
+   Share uses Android.shareAudioUri(uri, mime) for Music-library files and
+   Android.shareFile(path, mime) for cache files, with graceful fallbacks.
    ===================================================================== */
 window.RM = window.RM || {};
 
@@ -452,8 +454,25 @@ RM.exp = (function () {
     });
   }
 
-  // Deliver bytes to the device. Returns {method, name}.
+  // Deliver bytes to the device. Returns {method, name, uri?}.
+  // 1) Public Music library via MediaStore (API 29+) — exports appear in
+  //    music player apps (Music/RuhMix/). Falls back to legacy savers.
   function deliver(blob, fileName, mime, onProgress) {
+    const nat = RM.audio.native;
+    if (nat.method('saveToMusicLibrary')) {
+      return blobToBase64(blob, onProgress).then((b64) => {
+        const r = nat.call('saveToMusicLibrary', b64, fileName, mime);
+        if (typeof r === 'string' && r) {
+          return { method: 'native-music-library', name: fileName, uri: r, path: null };
+        }
+        return deliverFallback(blob, fileName, mime, onProgress);
+      });
+    }
+    return deliverFallback(blob, fileName, mime, onProgress);
+  }
+
+  // Legacy delivery: cache saveFile / saveWav / browser download (unchanged behavior).
+  function deliverFallback(blob, fileName, mime, onProgress) {
     const nat = RM.audio.native;
     // 1) WAV via the classic bridge (RemixLab-compatible shells)
     if (mime === 'audio/wav' && nat.method('saveWav')) {
@@ -483,6 +502,11 @@ RM.exp = (function () {
   // Share the last delivered file.
   function share(delivery, mime) {
     const nat = RM.audio.native;
+    // MediaStore URI from the public Music library (new path) — share directly.
+    if (delivery && delivery.method === 'native-music-library' && delivery.uri && nat.method('shareAudioUri')) {
+      nat.call('shareAudioUri', delivery.uri, mime);
+      return 'native-uri';
+    }
     if (delivery && delivery.path && nat.method('shareFile')) {
       nat.call('shareFile', delivery.path, mime);
       return 'native';

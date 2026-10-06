@@ -6,6 +6,7 @@ import android.app.DownloadManager;
 import android.content.ClipData;
 import android.content.ContentResolver;
 import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -1262,6 +1263,90 @@ public class MainActivity extends ComponentActivity {
             } catch (Exception e) {
                 return "";
             }
+        }
+
+        /**
+         * Saves base64-encoded audio into the PUBLIC Music library (Music/RuhMix/)
+         * via MediaStore, so music player apps can see and play exported files.
+         * Returns the content:// URI string, or "" on failure.
+         * API 29+: no extra permission needed. API < 29: returns "" (caller falls
+         * back to the private-cache saver) — we deliberately do NOT request
+         * WRITE_EXTERNAL_STORAGE.
+         */
+        @JavascriptInterface
+        public String saveToMusicLibrary(final String base64Data, final String fileName, final String mime) {
+            try {
+                if (base64Data == null || base64Data.isEmpty()) return "";
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "";
+                String safe = (fileName == null || fileName.isEmpty() ? "ruhmix-export" : fileName)
+                        .replaceAll("[^A-Za-z0-9._-]", "_");
+                String type = mime == null ? "" : mime.toLowerCase();
+                String mimeOut;
+                if (type.contains("mpeg") || type.contains("mp3")) {
+                    mimeOut = "audio/mpeg";
+                    if (!safe.toLowerCase().endsWith(".mp3")) safe += ".mp3";
+                } else if (type.contains("wav") || type.contains("wave")) {
+                    mimeOut = "audio/wav";
+                    if (!safe.toLowerCase().endsWith(".wav")) safe += ".wav";
+                } else if (type.contains("flac") || type.contains("x-flac")) {
+                    mimeOut = "audio/flac";
+                    if (!safe.toLowerCase().endsWith(".flac")) safe += ".flac";
+                } else {
+                    mimeOut = type.isEmpty() ? "audio/mpeg" : mime;
+                    if (!safe.contains(".")) safe += ".mp3";
+                }
+                ContentResolver cr = getApplicationContext().getContentResolver();
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Audio.Media.DISPLAY_NAME, safe);
+                values.put(MediaStore.Audio.Media.MIME_TYPE, mimeOut);
+                values.put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/RuhMix/");
+                values.put(MediaStore.Audio.Media.IS_MUSIC, 1);
+                values.put(MediaStore.Audio.Media.IS_PENDING, 1);
+                Uri collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+                Uri itemUri = cr.insert(collection, values);
+                if (itemUri == null) return "";
+                try {
+                    byte[] data = Base64.decode(base64Data, Base64.DEFAULT);
+                    OutputStream os = cr.openOutputStream(itemUri);
+                    if (os == null) throw new Exception("no stream");
+                    os.write(data);
+                    os.flush();
+                    os.close();
+                } catch (Exception e) {
+                    try { cr.delete(itemUri, null, null); } catch (Exception ignored) {}
+                    return "";
+                }
+                values.clear();
+                values.put(MediaStore.Audio.Media.IS_PENDING, 0);
+                cr.update(itemUri, values, null, null);
+                return itemUri.toString();
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
+        /**
+         * Shares a MediaStore content:// URI (from saveToMusicLibrary) via the
+         * system share sheet. MediaStore URIs are directly shareable with a
+         * read-permission grant — no FileProvider needed.
+         */
+        @JavascriptInterface
+        public void shareAudioUri(final String uriString, final String mime) {
+            runOnUiThread(() -> {
+                try {
+                    if (uriString == null || uriString.isEmpty()) throw new Exception("empty uri");
+                    Uri uri = Uri.parse(uriString);
+                    Intent i = new Intent(Intent.ACTION_SEND);
+                    i.setType(mime == null || mime.isEmpty() ? "audio/*" : mime);
+                    i.putExtra(Intent.EXTRA_STREAM, uri);
+                    i.setClipData(ClipData.newRawUri("audio", uri));
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(Intent.createChooser(i, "Share via"));
+                } catch (Exception e) {
+                    Toast.makeText(getApplicationContext(), "Could not share the file", Toast.LENGTH_LONG).show();
+                }
+            });
         }
 
         @JavascriptInterface

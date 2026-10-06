@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 21 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 22 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -2421,9 +2421,10 @@ Object.assign(RM.app, (function () {
           } catch (e) {}
           const nat = RM.audio.native;
           if (nat.method('showNotification')) nat.call('showNotification', 'RuhMix', ('Export complete: ') + fileName);
-          done(('✓ Done: ') + fileName, true);
+          const viaMusicLib = delivery && delivery.method === 'native-music-library';
+          done(('✓ Done: ') + fileName + (viaMusicLib ? ' — saved to Music/RuhMix/' : ''), true);
           $('exp-share').style.display = '';
-          A.toast('Export complete');
+          A.toast(viaMusicLib ? 'Saved to Music/RuhMix/ — open your music player!' : 'Export complete');
           // Interstitial ad: har 2nd export par (pehle par nahi), max 1 per 5 min.
           // Fail ho to silent skip — export pe koi asar nahi.
           try { if (window.RM && RM.ads) RM.ads.notifyExportDone(); } catch (e) {}
