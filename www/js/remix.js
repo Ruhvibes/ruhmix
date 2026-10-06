@@ -191,7 +191,7 @@ RM.remix = (function () {
           // Custom style: honour the user's Custom-slider FX in stem mode too
           // (app.js passes opts.customFx; falls back to the flat default).
           const baseFx = (styleId === 'custom' && opts.customFx) ? opts.customFx : style.fx;
-          const beat = 60 / bpm;
+          const beat = 60 / (bpm || 120); // null bpm (silent input) -> 120 fallback
           const maxDur = Math.max.apply(null, rb.map((r) => r.buffer.duration));
           const D = maxDur / rate; // musical duration at style rate
           // Tail: per-role FX keep the style's (beat-synced) echo — its RT60

@@ -1485,8 +1485,8 @@ Object.assign(RM.app, (function () {
       } else {
         A.state.fx = JSON.parse(JSON.stringify(s.fx));
       }
-      // sync echo to detected BPM (quarter note)
-      const beat = 60 / bpm;
+      // sync echo to detected BPM (quarter note); fall back to 120 on undetectable (silent) input
+      const beat = 60 / (bpm || 120);
       if (A.state.fx.echo.on) A.state.fx.echo.time = +(beat * 0.75).toFixed(3);
       A.applyFxToChain();
       A.ensureStudio();
