@@ -1,0 +1,218 @@
+/* =====================================================================
+   RuhMix — v25-theme.css (W1: Premium dark UI)
+   Spec: §23/§24 — black/charcoal, white text, green #00e676 + purple
+   #9d4edd accents, glassmorphism, 12–16px rounded controls,
+   clean professional typography.
+
+   ADDITIVE ONLY. Every rule is scoped under body.v25 (added at boot by
+   v25-shell.js) so existing screens keep working. Dark overrides skip
+   body.light so the light theme keeps its own palette. No existing
+   selectors are redefined in a breaking way — only CSS variables and
+   additive component classes.
+   ===================================================================== */
+
+/* ---- premium dark palette (dark mode only) ---- */
+body.v25:not(.light) {
+  --bg: #0a0a0f;                 /* black */
+  --bg2: #14141c;                /* deep charcoal */
+  --card: #14141c;               /* deep charcoal */
+  --card2: #1b1b26;
+  --line: rgba(255, 255, 255, 0.08);
+  --txt: #ffffff;                /* white text */
+  --muted: #a9a9bd;
+  --blue: #00e676;               /* primary accent -> green */
+  --purple: #9d4edd;             /* secondary accent -> purple */
+  --grad: linear-gradient(135deg, #00e676, #9d4edd);
+  --ok: #00e676;
+  --radius: 14px;
+  background: #0a0a0f;
+  color: #ffffff;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  letter-spacing: 0.1px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ======================= bottom nav ======================= */
+body.v25 .v25-bottomnav {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 90;
+  display: flex;
+  justify-content: space-around;
+  align-items: stretch;
+  padding: 8px 4px calc(8px + env(safe-area-inset-bottom));
+  background: rgba(10, 10, 15, 0.86);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+body.v25 .v25-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 2px 5px;
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  color: #8f8fa3;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+}
+body.v25 .v25-tab:active { background: rgba(255, 255, 255, 0.06); }
+body.v25 .v25-tab-ic { font-size: 21px; line-height: 1.15; }
+body.v25 .v25-tab-lb { white-space: nowrap; }
+body.v25 .v25-tab.active { color: #00e676; }
+body.v25 .v25-tab.active .v25-tab-ic {
+  filter: drop-shadow(0 0 6px rgba(0, 230, 118, 0.65));
+}
+/* center "Create" hero tab */
+body.v25 .v25-tab-hero .v25-tab-ic {
+  background: linear-gradient(135deg, #00e676, #9d4edd);
+  color: #0a0a0f;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px;
+  margin-top: -22px;
+  box-shadow: 0 4px 18px rgba(0, 230, 118, 0.45), 0 2px 10px rgba(157, 78, 221, 0.35);
+  border: 2px solid rgba(255, 255, 255, 0.25);
+}
+body.v25 .v25-tab-hero.active { color: #00e676; }
+/* keep screens clear of the nav */
+body.v25 #screens { padding-bottom: 78px; }
+body.v25 { padding-bottom: 0; }
+
+/* ======================= home dashboard ======================= */
+body.v25 .v25-dash {
+  position: relative;
+  padding: 26px 16px 8px;
+  margin: 0 -16px 6px; /* bleed to screen edges */
+  background:
+    radial-gradient(420px 200px at 50% -60px, rgba(157, 78, 221, 0.22), transparent 70%),
+    radial-gradient(420px 200px at 85% -40px, rgba(0, 230, 118, 0.14), transparent 70%);
+}
+body.v25 .v25-gear {
+  position: absolute;
+  top: 12px; right: 14px;
+  width: 40px; height: 40px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(20, 20, 28, 0.55);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  font-size: 19px;
+  color: #fff;
+  cursor: pointer;
+}
+body.v25 .v25-gear:active { transform: scale(0.94); }
+body.v25 .v25-brand { text-align: center; padding: 6px 0 14px; }
+body.v25 .v25-logo {
+  width: 84px; height: 84px;
+  border-radius: 22px;
+  box-shadow: 0 8px 28px rgba(157, 78, 221, 0.35), 0 4px 14px rgba(0, 230, 118, 0.18);
+}
+body.v25 .v25-name {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  margin-top: 10px;
+  background: linear-gradient(135deg, #ffffff 30%, #00e676 75%, #9d4edd);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+body.v25 .v25-sub {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d9d9e6;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+body.v25 .v25-tag {
+  font-size: 13px;
+  color: #8f8fa3;
+  letter-spacing: 2.5px;
+  margin-top: 6px;
+}
+
+/* glassmorphism action cards */
+body.v25 .v25-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 4px 2px 10px;
+}
+body.v25 .v25-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 14px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(20, 20, 28, 0.60);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+body.v25 .v25-card:active { transform: scale(0.97); }
+body.v25 .v25-card-ic {
+  flex: 0 0 auto;
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 21px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+body.v25 .v25-card-tx { display: flex; flex-direction: column; min-width: 0; }
+body.v25 .v25-card-title { font-size: 14px; font-weight: 700; letter-spacing: 0.2px; }
+body.v25 .v25-card-sub { font-size: 11px; color: #a9a9bd; margin-top: 2px; }
+body.v25 .v25-recent-count { color: #00e676; font-weight: 800; }
+body.v25 .v25-card-wide { grid-column: 1 / -1; }
+/* "Create New Mashup" — green gradient hero */
+body.v25 .v25-card-create {
+  background: linear-gradient(135deg, rgba(0, 230, 118, 0.22), rgba(157, 78, 221, 0.22));
+  border: 1px solid rgba(0, 230, 118, 0.35);
+}
+body.v25 .v25-card-create .v25-card-ic {
+  background: linear-gradient(135deg, #00e676, #00b35c);
+  color: #06130c;
+  font-size: 24px; font-weight: 800;
+  border: 0;
+}
+/* "Quick AI Mashup" — purple/green AI accent */
+body.v25 .v25-card-ai {
+  background: linear-gradient(135deg, rgba(157, 78, 221, 0.25), rgba(0, 230, 118, 0.16));
+  border: 1px solid rgba(157, 78, 221, 0.40);
+}
+body.v25 .v25-card-ai .v25-card-ic {
+  background: linear-gradient(135deg, #9d4edd, #7b2ff7);
+  color: #fff;
+  border: 0;
+}
+
+/* ======================= gentle global upgrades (v25 scope) ======================= */
+body.v25:not(.light) .btn { border-radius: 14px; }
+body.v25:not(.light) .textin,
+body.v25:not(.light) input[type="search"] { border-radius: 12px; }
+body.v25:not(.light) #topbar {
+  background: rgba(10, 10, 15, 0.90);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+body.v25:not(.light) .btn.primary {
+  background: linear-gradient(135deg, #00e676, #00b35c);
+  color: #06130c;
+  font-weight: 700;
+}
+body.v25:not(.light) h1, body.v25:not(.light) h2, body.v25:not(.light) h3 {
+  letter-spacing: 0.2px;
+}

@@ -386,6 +386,21 @@ async function main() {
       if (s.idx !== expected[s.k]) { orderOk = false; detail.push(`seg${s.k}:got S${s.idx + 1}`); }
     });
     ok(orderOk, 'segment energy/Goertzel order = S1,S2,S3,S1,S2,S3', detail.join(' '));
+    // v24-exclusivity: non-scheduled songs' vocals must be (near-)absent in each
+    // slot — the phone-found "dono vocal ek saath" class. The dominance check
+    // above passes as long as the scheduled vocal is merely louder, so a leaked
+    // second vocal slipped through. Assert every non-scheduled signature is
+    // >=12 dB below the scheduled one (center 60% of each slot, crossfades excluded).
+    let exclOk = true; const exclDetail = [];
+    segs.forEach((s) => {
+      const want = expected[s.k], sched = Math.max(1e-12, s.mags[want]);
+      s.mags.forEach((m, i) => {
+        if (i === want) return;
+        const relDb = db(m / sched);
+        if (relDb > -12) { exclOk = false; exclDetail.push(`seg${s.k}:S${i + 1} ${relDb.toFixed(1)}dB`); }
+      });
+    });
+    ok(exclOk, 'vocal exclusivity: non-scheduled vocals >=12dB below scheduled', exclDetail.join(' '));
     const quiet = segs.filter((s) => s.energyDb < -40);
     ok(quiet.length === 0, 'no silent vocal segment (energy floor)', quiet.map((s) => 'seg' + s.k).join(' '));
     // same key everywhere -> pitchShift must be skipped (pipeline convention)

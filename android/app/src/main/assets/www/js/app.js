@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 24 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 25 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -137,7 +137,7 @@ RM.app = (function () {
   state.fx = defaultFx();
 
   /* ================= navigation ================= */
-  const SCREENS = ['home','import','editor','remix','slowed','mashup','stems','aistem','mixer','fx','master','record','export','projects','settings','more'];
+  const SCREENS = ['home','import','editor','remix','slowed','mashup','stems','aistem','mixer','fx','master','record','export','projects','settings','more','studio','v25create'];
   function show(name, fromPop) {
     if (!SCREENS.includes(name)) name = 'home';
     const prev = state.screen;
