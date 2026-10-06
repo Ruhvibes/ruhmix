@@ -49,6 +49,19 @@ RM.v25exportui = (function () {
   var current = null;   // {buffer, meta, name, project, onClose}
   var lastDelivery = null;
   var expToken = { cancelled: false };
+  // v26: §25 copyright acknowledgement is MANDATORY per export session —
+  // the checkbox starts unchecked on every show(); export/share stay
+  // disabled until the user ticks it. Module-level so node tests can
+  // exercise the real gate without a DOM.
+  var crAcked = false;
+  function crChecked() { return crAcked; }
+  function setCrAck(v) { crAcked = !!v; }
+  function resetCrAck() { crAcked = false; }
+  function guardCopyright() {
+    if (crChecked()) return true;
+    toast('Please tick the copyright notice above first');
+    return false;
+  }
 
   /* ---------------- pure helpers (tested) ---------------- */
   function sanitizeBase(name) {
@@ -130,12 +143,15 @@ RM.v25exportui = (function () {
 
   // buffer -> encoded blob -> RM.exp.deliver (Music/RuhMix/). Returns
   // Promise<delivery>. Stages reported via onProgress(frac, label).
-  function exportPipeline(buffer, fmt, deps, onProgress, token) {
+  // xopts (v26, optional): { kbps, sampleRate } from the overlay's selectors —
+  // overrides the stored defaults so nothing the classic screen offered is lost.
+  function exportPipeline(buffer, fmt, deps, onProgress, token, xopts) {
     deps = deps || defaultDeps();
     token = token || { cancelled: false };
     var prog = function (f, label) { try { if (onProgress) onProgress(f, label); } catch (e) {} };
     var def = getDefaults();
-    var kbps = def.bitrate, sr = def.sampleRate;
+    var kbps = (xopts && xopts.kbps) || def.bitrate;
+    var sr = (xopts && xopts.sampleRate) || def.sampleRate;
     var mime = fmt === 'mp3' ? 'audio/mpeg' : fmt === 'wav' ? 'audio/wav' : 'audio/flac';
     var cancelled = function () { return token.cancelled; };
     // Pass-through guard: throws when cancelled, otherwise forwards the value
@@ -241,7 +257,7 @@ RM.v25exportui = (function () {
     var bpm = meta.masterBpm || meta.bpm || '—';
     var key = meta.masterKey || meta.key || '—';
     var n = songCount(meta);
-    var def = getDefaults();
+    var def = uiFmt || getDefaults(); // v26: estimate follows the overlay's selectors
     var rows = [
       ['Duration', fmtDur(dur)],
       ['Tempo', typeof bpm === 'number' ? Math.round(bpm * 10) / 10 + ' BPM' : esc(bpm)],
@@ -265,13 +281,13 @@ RM.v25exportui = (function () {
       '</div>' +
       '<div data-x="qc-status" style="color:#9aa7b2;font-size:13px;">Preparing…</div>' +
       '<div data-x="qc-list" style="margin-top:6px;"></div>' +
+      '<div data-x="qc-skips" style="margin-top:2px;"></div>' +
       '<button data-x="qc-fix" style="display:none;margin-top:8px;width:100%;padding:10px;border-radius:10px;border:none;background:#f5a623;color:#1a1206;font-size:14px;font-weight:800;cursor:pointer;">🔧 Fix Issues</button>' +
       '<div data-x="qc-fixes" style="margin-top:6px;font-size:13px;color:#b8e6c3;"></div>' +
       '</div>';
   }
 
-  function renderQcIssues(box, listBox, fixBtn, result) {
-    var issues = result.issues || [];
+  function renderQcIssues(box, listBox, fixBtn, result) {    var issues = result.issues || [];
     var s = result.summary || { errors: 0, warnings: 0, infos: 0 };
     if (!issues.length) {
       box.innerHTML = '<span style="color:#1db954;font-weight:700;">✓ All clear — no issues found.</span>';
@@ -292,6 +308,27 @@ RM.v25exportui = (function () {
         '</div>';
     }).join('');
     fixBtn.style.display = issues.some(function (x) { return x.autoFixable; }) ? '' : 'none';
+  }
+
+  // v26: skipped checks are shown honestly ("skipped: <reason>") — never
+  // silently skipped. Rendered into the [data-x="qc-skips"] container.
+  var SKIP_LABELS = {
+    'bpm-mismatch': 'BPM match', 'key-mismatch': 'Key match',
+    'vocal-overlap': 'Vocal overlap', 'click': 'Transition clicks',
+    'timing-drift': 'Timing drift',
+  };
+  function renderQcSkips(skipsBox, result) {
+    if (!skipsBox) return;
+    var skips = (result && result.skips) || [];
+    if (!skips.length) { skipsBox.innerHTML = ''; return; }
+    skipsBox.innerHTML =
+      '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #2a3138;">' +
+      '<div style="font-size:12px;color:#9aa7b2;font-weight:700;margin-bottom:4px;">⏭ Skipped checks (not enough info to run — shown, never hidden)</div>' +
+      skips.map(function (s) {
+        var lbl = SKIP_LABELS[s.id] || s.id;
+        return '<div style="font-size:12.5px;color:#9aa7b2;margin:3px 0;">• <b>' + esc(lbl) +
+          '</b> — skipped: ' + esc(s.reason) + '</div>';
+      }).join('') + '</div>';
   }
 
   function runQc() {
@@ -316,6 +353,7 @@ RM.v25exportui = (function () {
       if (!overlay || overlay._qcToken !== qcToken) return;
       current.qc = result;
       renderQcIssues(box, listBox, fixBtn, result);
+      renderQcSkips(overlay.querySelector('[data-x="qc-skips"]'), result);
     }).catch(function (e) {
       if (!overlay || overlay._qcToken !== qcToken) return;
       box.innerHTML = '<span style="color:#ff6b6b;">Check failed: ' + esc(e && e.message) + '</span>';
@@ -384,47 +422,55 @@ RM.v25exportui = (function () {
   }
 
   /* ---------------- export / share / save ---------------- */
+  // v26: read the overlay's bitrate / sample-rate selectors (the classic
+  // screen's options — nothing lost). Persists the choice so the classic
+  // export screen and this overlay stay in sync.
+  function uiExportOpts(fmt) {
+    if (!uiFmt) uiFmt = getDefaults();
+    uiFmt.format = fmt;
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(LS_DEF, JSON.stringify(uiFmt)); } catch (e) {}
+    return { kbps: uiFmt.bitrate, sampleRate: uiFmt.sampleRate };
+  }
+
   function doExport(fmt) {
+    if (!guardCopyright()) return; // §25: mandatory checkbox, per session
     if (!current || !current.buffer) { toast('Nothing to export'); return; }
-    ensureAck(function (ok) {
-      if (!ok || !overlay) return;
-      expToken = { cancelled: false };
-      setBar(0, 'Starting…');
-      var statusEl = overlay.querySelector('[data-x="status"]');
-      var cancelBtn = overlay.querySelector('[data-x="cancel"]');
-      if (cancelBtn) cancelBtn.style.display = '';
-      var setStatus = function (t, isErr) {
-        if (statusEl) { statusEl.textContent = t; statusEl.style.color = isErr ? '#ff6b6b' : '#9aa7b2'; }
-      };
-      exportPipeline(current.buffer, fmt, null, function (f, label) { setBar(f, label); }, expToken)
-        .then(function (delivery) {
-          lastDelivery = delivery;
-          if (cancelBtn) cancelBtn.style.display = 'none';
-          var viaLib = delivery && delivery.method === 'native-music-library';
-          setStatus('✓ Done: ' + delivery.fileName + (viaLib ? ' — saved to Music/RuhMix/' : ''), false);
-          setBar(1, 'Done');
-          toast(viaLib ? 'Saved to Music/RuhMix/ — open your music player!' : 'Export complete');
-          var shareBtn = overlay.querySelector('[data-x="share"]');
-          if (shareBtn) shareBtn.style.display = '';
-          try { if (window.RM && RM.ads) RM.ads.notifyExportDone(); } catch (e) {}
-        })
-        .catch(function (e) {
-          if (cancelBtn) cancelBtn.style.display = 'none';
-          if (e && e.message === 'cancelled') { setStatus('Cancelled', false); setBar(0, 'Cancelled'); return; }
-          setStatus('Export failed: ' + (e && e.message), true);
-        });
-    });
+    if (!overlay) return;
+    var xopts = uiExportOpts(fmt);
+    expToken = { cancelled: false };
+    setBar(0, 'Starting…');
+    var statusEl = overlay.querySelector('[data-x="status"]');
+    var cancelBtn = overlay.querySelector('[data-x="cancel"]');
+    if (cancelBtn) cancelBtn.style.display = '';
+    var setStatus = function (t, isErr) {
+      if (statusEl) { statusEl.textContent = t; statusEl.style.color = isErr ? '#ff6b6b' : '#9aa7b2'; }
+    };
+    exportPipeline(current.buffer, fmt, null, function (f, label) { setBar(f, label); }, expToken, xopts)
+      .then(function (delivery) {
+        lastDelivery = delivery;
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        var viaLib = delivery && delivery.method === 'native-music-library';
+        setStatus('✓ Done: ' + delivery.fileName + (viaLib ? ' — saved to Music/RuhMix/' : ''), false);
+        setBar(1, 'Done');
+        toast(viaLib ? 'Saved to Music/RuhMix/ — open your music player!' : 'Export complete');
+        var shareBtn = overlay.querySelector('[data-x="share"]');
+        if (shareBtn) shareBtn.style.display = '';
+        try { if (window.RM && RM.ads) RM.ads.notifyExportDone(); } catch (e) {}
+      })
+      .catch(function (e) {
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        if (e && e.message === 'cancelled') { setStatus('Cancelled', false); setBar(0, 'Cancelled'); return; }
+        setStatus('Export failed: ' + (e && e.message), true);
+      });
   }
 
   function doShare() {
+    if (!guardCopyright()) return; // §25: mandatory checkbox, per session
     if (!lastDelivery) { toast('Export first, then share'); return; }
-    ensureAck(function (ok) {
-      if (!ok) return;
-      try {
-        var r = RM.exp.share(lastDelivery, lastDelivery.mime);
-        if (r === 'unavailable') toast('Share unavailable on this device');
-      } catch (e) { toast('Share failed'); }
-    });
+    try {
+      var r = RM.exp.share(lastDelivery, lastDelivery.mime);
+      if (r === 'unavailable') toast('Share unavailable on this device');
+    } catch (e) { toast('Share failed'); }
   }
 
   function doSaveProject() {
@@ -448,9 +494,66 @@ RM.v25exportui = (function () {
   }
 
   /* ---------------- show / hide ---------------- */
-  function show(opts) {
+  // v26: per-session export options, seeded from stored defaults at show().
+  var uiFmt = null;
+
+  // v26: §25 copyright notice — verbatim text + mandatory checkbox.
+  function copyrightHtml() {
+    return '<div style="margin-top:14px;border:1px solid #2a3138;border-radius:12px;padding:12px;background:#10141a;">' +
+      '<div style="font-weight:800;font-size:14px;margin-bottom:6px;">⚖️ Copyright Notice</div>' +
+      '<p style="font-size:13px;line-height:1.5;color:#cfd8e0;margin:0 0 6px;">' + esc(NOTICE_1) + '</p>' +
+      '<p style="font-size:13px;line-height:1.5;color:#cfd8e0;font-weight:700;margin:0 0 8px;">' + esc(NOTICE_2) + '</p>' +
+      '<label style="display:flex;gap:8px;align-items:flex-start;font-size:13.5px;cursor:pointer;">' +
+      '<input type="checkbox" data-x="cr-box" style="margin-top:3px;width:18px;height:18px;flex-shrink:0;">' +
+      '<span>I understand — I will only export and share audio I am legally authorized to use.</span></label>' +
+      '</div>';
+  }
+
+  // v26: bitrate + sample-rate selectors — the classic export screen's
+  // options, so nothing is lost by routing through this overlay.
+  function fmtOptsHtml() {
+    var def = uiFmt || getDefaults();
+    function selOpts(vals, cur) {
+      return vals.map(function (v) {
+        return '<option value="' + v + '"' + (String(v) === String(cur) ? ' selected' : '') + '>' + v + '</option>';
+      }).join('');
+    }
+    var selCss = 'background:#222a31;color:#eef2f5;border:1px solid #3a434c;border-radius:8px;padding:6px 8px;';
+    return '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;align-items:center;">' +
+      '<label data-x="br-row" style="font-size:13px;color:#9aa7b2;' + (def.format === 'mp3' ? '' : 'display:none;') + '">Bitrate ' +
+      '<select data-x="bitrate" style="' + selCss + '">' + selOpts([128, 192, 256, 320], def.bitrate) + '</select> kbps</label>' +
+      '<label style="font-size:13px;color:#9aa7b2;">Sample rate ' +
+      '<select data-x="sr" style="' + selCss + '">' + selOpts([44100, 48000], def.sampleRate) + '</select> Hz</label>' +
+      '</div>';
+  }
+
+  function refreshMeta() {
+    if (!overlay) return;
+    var box = overlay.querySelector('[data-x="meta"]');
+    if (box) box.innerHTML = metaRows();
+    try {
+      var def = uiFmt || getDefaults();
+      var brRow = overlay.querySelector('[data-x="br-row"]');
+      if (brRow) brRow.style.display = def.format === 'mp3' ? '' : 'none';
+    } catch (e) {}
+  }
+
+  function show(a, b, c) {
+    var opts;
+    // v26: positional form show(buffer, meta, opts) — used by
+    // RM.mashupExport.sendToExport (the mashup export choke point).
+    // The object form show({buffer, meta, name, ...}) keeps working.
+    if (a && typeof a === 'object' && typeof a.getChannelData === 'function' && typeof a.duration === 'number') {
+      opts = (c && typeof c === 'object') ? c : {};
+      opts.buffer = a;
+      if (b && typeof b === 'object') opts.meta = b;
+    } else {
+      opts = a || {};
+    }
     opts = opts || {};
     hide();
+    resetCrAck(); // §25: checkbox starts unchecked on every show()
+    uiFmt = getDefaults();
     current = {
       buffer: opts.buffer || null,
       meta: opts.meta || {},
@@ -468,8 +571,9 @@ RM.v25exportui = (function () {
       '<div style="font-size:20px;font-weight:800;">🎉 Your Mashup Is Ready</div>' +
       '<button data-x="close" style="background:none;border:none;color:#9aa7b2;font-size:22px;cursor:pointer;">✕</button>' +
       '</div>' +
-      '<div style="margin:12px 0 4px;">' + metaRows() + '</div>' +
+      '<div data-x="meta" style="margin:12px 0 4px;">' + metaRows() + '</div>' +
       qcPanelHtml() +
+      copyrightHtml() +
       '<div style="margin:16px 0 6px;background:#222a31;border-radius:10px;height:10px;overflow:hidden;">' +
       '<div data-x="pbar" style="height:100%;width:0%;background:#1db954;border-radius:10px;transition:width .2s;"></div></div>' +
       '<div data-x="plabel" style="font-size:13px;color:#9aa7b2;min-height:18px;margin-bottom:4px;"></div>' +
@@ -479,6 +583,7 @@ RM.v25exportui = (function () {
       '<button data-x="wav" style="' + btnCss(false) + '">⬇ Export WAV</button>' +
       '<button data-x="flac" style="' + btnCss(false) + '">⬇ Export FLAC</button>' +
       '</div>' +
+      fmtOptsHtml() +
       '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;">' +
       '<button data-x="save" style="' + btnCss(false) + '">💾 Save Project</button>' +
       '<button data-x="share" style="display:none;' + btnCss(false) + '">📤 Share</button>' +
@@ -503,6 +608,35 @@ RM.v25exportui = (function () {
     });
     card.querySelector('[data-x="qc-rerun"]').addEventListener('click', runQc);
     card.querySelector('[data-x="qc-fix"]').addEventListener('click', fixQcIssues);
+
+    // v26 §25: mandatory per-session checkbox — export buttons stay
+    // disabled until it is ticked.
+    var crBox = card.querySelector('[data-x="cr-box"]');
+    var expBtns = ['mp3', 'wav', 'flac'].map(function (k) { return card.querySelector('[data-x="' + k + '"]'); });
+    function syncCr() {
+      var on = !!(crBox && crBox.checked);
+      setCrAck(on);
+      expBtns.forEach(function (btn) {
+        if (!btn) return;
+        btn.disabled = !on;
+        btn.style.opacity = on ? '1' : '.45';
+        btn.style.cursor = on ? 'pointer' : 'not-allowed';
+      });
+    }
+    if (crBox) crBox.addEventListener('change', syncCr);
+    syncCr();
+
+    // v26: bitrate / sample-rate selectors feed the estimate + the export.
+    var brSel = card.querySelector('[data-x="bitrate"]');
+    var srSel = card.querySelector('[data-x="sr"]');
+    if (brSel) brSel.addEventListener('change', function () {
+      if (uiFmt && +brSel.value) uiFmt.bitrate = +brSel.value;
+      refreshMeta();
+    });
+    if (srSel) srSel.addEventListener('change', function () {
+      if (uiFmt && +srSel.value) uiFmt.sampleRate = +srSel.value;
+      refreshMeta();
+    });
 
     var finishShow = function () {
       if (!current.buffer) {
@@ -564,6 +698,9 @@ RM.v25exportui = (function () {
       estimateSize: estimateSize, fmtBytes: fmtBytes, fmtDur: fmtDur,
       getDefaults: getDefaults, ackGiven: ackGiven, setAck: setAck,
       songCount: songCount,
+      // v26: §25 mandatory-checkbox gate (module-level, DOM-free)
+      crChecked: crChecked, setCrAck: setCrAck, resetCrAck: resetCrAck,
+      guardCopyright: guardCopyright,
     },
   };
 })();

@@ -2325,6 +2325,9 @@ Object.assign(RM.app, (function () {
   function doExport() {
     const opts = A.state._exportOpts;
     if (!opts || !opts.length) { A.toast('Nothing to export'); return; }
+    // v26 §25: mandatory copyright acknowledgement — no export without it.
+    const ackBox = $('exp-copyright-ack');
+    if (ackBox && !ackBox.checked) { A.toast('Please tick the copyright notice first'); return; }
     const sel = document.querySelector('input[name="expsrc"]:checked');
     const src = opts[sel ? +sel.value : 0].get();
     const fmtEl = document.querySelector('input[name="expfmt"]:checked');
@@ -2958,7 +2961,7 @@ Object.assign(RM.app, (function () {
   /* ================= init ================= */
   function init() {
     A.onShow = (name) => {
-      if (name === 'export') { refreshExportSource(); if (A.syncExpDefaults) A.syncExpDefaults(); }
+      if (name === 'export') { refreshExportSource(); if (A.syncExpDefaults) A.syncExpDefaults(); const ab = $('exp-copyright-ack'); if (ab) ab.checked = false; /* v26 §25: required fresh each visit */ }
       if (name === 'projects') renderProjects();
       if (name === 'settings') updateStorageInfo();
       if (name === 'home') { renderHomeRecent(); cdxUpdateNow(); }

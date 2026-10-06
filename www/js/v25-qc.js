@@ -222,8 +222,10 @@ RM.v25qc = (function () {
   function parseKey(k) {
     if (!k || typeof k !== 'string') return null;
     var s = k.trim();
-    var minor = /m$/i.test(s) && !/maj$/i.test(s);
-    var root = s.replace(/m(aj)?$/i, '').replace(/\s+/g, '');
+    // Accept both "Am" and "A minor" / "C major" label styles — the mashup
+    // builders emit the latter via keyLabel(); both map to the same fifth.
+    var minor = (/m$/i.test(s) && !/maj$/i.test(s)) || /\bminor\b/i.test(s);
+    var root = s.replace(/m(aj)?$/i, '').replace(/\s+(major|minor)\s*$/i, '').replace(/\s+/g, '');
     if (!(root in FIFTHS)) return null;
     var f = FIFTHS[root];
     if (minor) f = (f + 9) % 12; // relative major
@@ -250,6 +252,28 @@ RM.v25qc = (function () {
       xfadeSec: (typeof meta.xfadeSec === 'number') ? meta.xfadeSec
         : (typeof meta.xfadeBars === 'number' ? meta.xfadeBars * barLenSec : Math.min(0.5, barLenSec / 2)),
     };
+  }
+
+  /* ---------------- arrangement slot meta (for the builders) ----------------
+     Bar-aligned slot geometry shared by the mega/swap builders — mirrors
+     mashup-arrange.js exactly: G vocal slots, slot g plays song (g % nSongs),
+     slots start after introBars and are barsPerVocal bars long; boundaries
+     are the intro edge, every inter-slot edge, and the outro edge.
+     names: per-song display names (array).
+     Returns { vocalSlots: [{songIdx, name, startSec, endSec}], boundariesSec: [...] } */
+  function slotMeta(nSlots, introBars, barsPerVocal, barLenSec, names) {
+    names = Array.isArray(names) ? names : [];
+    var nSongs = Math.max(1, names.length);
+    var slots = [], bnds = [];
+    for (var g = 0; g < nSlots; g++) {
+      var si = g % nSongs;
+      var st = (introBars + g * barsPerVocal) * barLenSec;
+      slots.push({ songIdx: si, name: names[si] || ('Song ' + (si + 1)), startSec: st, endSec: st + barsPerVocal * barLenSec });
+      if (g > 0) bnds.push(st);
+    }
+    bnds.unshift(introBars * barLenSec);
+    bnds.push((introBars + nSlots * barsPerVocal) * barLenSec);
+    return { vocalSlots: slots, boundariesSec: bnds };
   }
 
   /* ================= THE CHECKS ================= */
@@ -567,55 +591,84 @@ RM.v25qc = (function () {
     });
   }
 
-  /* ================= runCheck ================= */
+  /* ================= runCheck =================
+     v26: every check that cannot run for a build type reports
+     "skipped: <reason>" in result.skips — never a silent skip. Guards only
+     inspect the meta/buffer; the DSP checks themselves are untouched. */
   function runCheck(renderBuf, meta, onProgress) {
     var m = normMeta(meta);
     if (!renderBuf || !renderBuf.length || !renderBuf.getChannelData) {
       return Promise.reject(new Error('runCheck needs a rendered AudioBuffer.'));
     }
-    var issues = [], measurements = {};
+    var issues = [], measurements = {}, skips = [];
     var prog = onProgress ? function (f, label) { try { onProgress(f, label); } catch (e) {} } : null;
+    function markSkipped(id, reason) { skips.push({ id: id, reason: reason }); }
+    function needMasterBpm() {
+      if (!m.masterBpm) return 'no master BPM in the export meta';
+      return null;
+    }
     var seq = [
-      ['BPM match', function () { issues.push.apply(issues, checkBpm(m)); }],
-      ['Key match', function () { issues.push.apply(issues, checkKey(m)); }],
-      ['Vocal overlap', function () { issues.push.apply(issues, checkVocalOverlap(m)); }],
-      ['Clipping (true peak)', function () {
-        return checkClipping(renderBuf).then(function (r) {
-          issues.push.apply(issues, r.issues); measurements.truePeak = r.tp.peak; measurements.digitalClip = r.tp.digitalClip;
-        });
-      }],
-      ['Stereo phase', function () {
-        return checkPhase(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.lrCorr = r.corr; });
-      }],
-      ['Bass balance', function () {
-        return checkBass(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.bassShare = r.share; });
-      }],
-      ['Harshness', function () {
-        return checkHarsh(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.harshShare = r.share; });
-      }],
-      ['Volume jumps', function () {
-        return checkVolumeJumps(renderBuf, m).then(function (r) {
-          issues.push.apply(issues, r.issues); measurements.barRmsDb = r.rms; measurements._jumps = r.jumps;
-        });
-      }],
-      ['Transition clicks', function () {
-        return checkClicks(renderBuf, m).then(function (r) { issues.push.apply(issues, r.issues); measurements._clicks = r.clicks; });
-      }],
-      ['Timing drift', function () {
-        return checkTimingDrift(renderBuf, m).then(function (r) { issues.push.apply(issues, r.issues); measurements.driftMs = r.drift; });
-      }],
-      ['Separation artifacts', function () {
-        return checkSepArtifacts(renderBuf).then(function (r) {
-          issues.push.apply(issues, r.issues);
-          var med = function (a) {
-            if (!a || !a.length) return 0;
-            var s = a.slice().sort(function (x, y) { return x - y; });
-            return s[Math.floor(s.length / 2)];
-          };
-          measurements.hfCrestMed = med(r.hfCrest);
-          measurements.bbCrestMed = med(r.bbCrest);
-        });
-      }],
+      ['BPM match', 'bpm-mismatch',
+        function () { return (m.masterBpm && m.songs.length) ? null : 'no master BPM or song list in the export meta'; },
+        function () { issues.push.apply(issues, checkBpm(m)); }],
+      ['Key match', 'key-mismatch',
+        function () { return (m.masterKey && m.songs.length) ? null : 'no master key or song list in the export meta'; },
+        function () { issues.push.apply(issues, checkKey(m)); }],
+      ['Vocal overlap', 'vocal-overlap',
+        function () { return m.vocalSlots.length ? null : 'no vocal arrangement in the export meta'; },
+        function () { issues.push.apply(issues, checkVocalOverlap(m)); }],
+      ['Clipping (true peak)', 'clipping', null,
+        function () {
+          return checkClipping(renderBuf).then(function (r) {
+            issues.push.apply(issues, r.issues); measurements.truePeak = r.tp.peak; measurements.digitalClip = r.tp.digitalClip;
+          });
+        }],
+      ['Stereo phase', 'phase', null,
+        function () {
+          return checkPhase(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.lrCorr = r.corr; });
+        }],
+      ['Bass balance', 'bass', null,
+        function () {
+          return checkBass(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.bassShare = r.share; });
+        }],
+      ['Harshness', 'harsh', null,
+        function () {
+          return checkHarsh(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.harshShare = r.share; });
+        }],
+      ['Volume jumps', 'volume-jump', null,
+        function () {
+          return checkVolumeJumps(renderBuf, m).then(function (r) {
+            issues.push.apply(issues, r.issues); measurements.barRmsDb = r.rms; measurements._jumps = r.jumps;
+          });
+        }],
+      ['Transition clicks', 'click',
+        function () { return m.boundariesSec.length ? null : 'no arrangement boundaries in the export meta — no slot transitions to scan'; },
+        function () {
+          return checkClicks(renderBuf, m).then(function (r) { issues.push.apply(issues, r.issues); measurements._clicks = r.clicks; });
+        }],
+      ['Timing drift', 'timing-drift',
+        function () {
+          var noBpm = needMasterBpm();
+          if (noBpm) return noBpm;
+          var nBars = Math.floor(renderBuf.length / renderBuf.sampleRate / m.barLenSec);
+          return nBars >= 4 ? null : 'mix is shorter than 4 bars — the drift scan needs a longer mix';
+        },
+        function () {
+          return checkTimingDrift(renderBuf, m).then(function (r) { issues.push.apply(issues, r.issues); measurements.driftMs = r.drift; });
+        }],
+      ['Separation artifacts', 'sep-artifacts', null,
+        function () {
+          return checkSepArtifacts(renderBuf).then(function (r) {
+            issues.push.apply(issues, r.issues);
+            var med = function (a) {
+              if (!a || !a.length) return 0;
+              var s = a.slice().sort(function (x, y) { return x - y; });
+              return s[Math.floor(s.length / 2)];
+            };
+            measurements.hfCrestMed = med(r.hfCrest);
+            measurements.bbCrestMed = med(r.bbCrest);
+          });
+        }],
     ];
     var i = 0;
     function next() {
@@ -627,9 +680,16 @@ RM.v25qc = (function () {
           else summary.infos++;
         });
         if (prog) prog(1, 'Done');
-        return { issues: issues, summary: summary, measurements: measurements };
+        return { issues: issues, summary: summary, measurements: measurements, skips: skips };
       }
-      var label = seq[i][0], fn = seq[i][1]; i++;
+      var label = seq[i][0], issueId = seq[i][1], guard = seq[i][2], fn = seq[i][3]; i++;
+      var why = null;
+      try { why = guard ? guard() : null; } catch (e) { why = null; }
+      if (why) {
+        markSkipped(issueId, why);
+        if (prog) prog(i / seq.length * 0.95, 'Smart check: ' + label + '… (skipped)');
+        return Promise.resolve().then(next);
+      }
       if (prog) prog(i / seq.length * 0.95, 'Smart check: ' + label + '…');
       var r;
       try { r = fn(); } catch (e) { r = Promise.reject(e); }
@@ -851,6 +911,7 @@ RM.v25qc = (function () {
     runCheck: runCheck,
     fixAll: fixAll,
     issueLabel: issueLabel,
+    slotMeta: slotMeta,
     TP_CEIL: TP_CEIL,
     // test hooks (pure DSP pieces)
     _t: {

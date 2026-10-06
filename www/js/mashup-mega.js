@@ -195,6 +195,12 @@ RM.mashupMega = (function () {
     return out;
   }
 
+  // v26: detectKey() returns {key, mode} — QC parseKey() wants "C"/"Am".
+  function qcKeyStr(k) {
+    if (!k || typeof k.key !== 'string' || !k.key) return null;
+    return k.key + (/minor/i.test(String(k.mode || '')) ? 'm' : '');
+  }
+
   /* ================= the pipeline ================= */
 
   async function build(songs, opts, onProgress, onStep) {
@@ -236,6 +242,7 @@ RM.mashupMega = (function () {
     var perSongTags = [];
     var engineTags = [];
     var masterBpm = BPM_FALLBACK, masterKey = null, sampleRate = 0;
+    var qcSongs = []; // v26: per-song QC meta {name, bpm, key, stretched}
 
     /* ---- Step 1: per-song vocal pipeline (SEQUENTIAL) ---- */
     for (var i = 0; i < N; i++) {
@@ -355,6 +362,9 @@ RM.mashupMega = (function () {
         }
       }
 
+      // v26: QC meta — songs 2..N are stretched onto the master grid (the
+      // bpm-mismatch scan skips stretched songs); song 1 IS the master.
+      qcSongs.push({ name: entry.name, bpm: Math.round(bpm * 100) / 100, key: qcKeyStr(keyRes), stretched: i > 0 });
       // Trim to the bars the arrangement needs (memory: 8 full vocals
       // would be ~700 MB on a phone; trimmed segments are ~15 MB each).
       vocal = trimToBars(vocal, sampleRate, masterBpm, cycles * BARS_PER_VOCAL + 1);
@@ -431,10 +441,23 @@ RM.mashupMega = (function () {
     if (anyFailed) engineLabel += ' (neural unavailable)';
     engineTags.push(engineLabel);
 
+    // v26: QC arrangement meta — bar-aligned slot geometry shared with
+    // mashup-arrange.js (slot g plays song g%N after the 4-bar intro).
+    var qcArr = (window.RM && RM.v25qc && typeof RM.v25qc.slotMeta === 'function')
+      ? RM.v25qc.slotMeta(cycles * N, INTRO_BARS, BARS_PER_VOCAL, 240 / masterBpm,
+                          vocalSegs.map(function (v) { return v.name; }))
+      : { vocalSlots: [], boundariesSec: [] };
+
     var meta = {
       bpm1: Math.round(masterBpm * 100) / 100,
       targetBpm: Math.round(masterBpm * 100) / 100,
-      songs: N,
+      songs: qcSongs, // v26: ARRAY of {name,bpm,key,stretched} for the QC scans (count = qcSongs.length)
+      songCount: N,   // v26: the old number, kept for the export filename
+      masterBpm: Math.round(masterBpm * 100) / 100,
+      masterKey: qcKeyStr(masterKey),
+      xfadeBars: XFADE_BARS, // v26: real crossfade length for the overlap scan
+      vocalSlots: qcArr.vocalSlots,
+      boundariesSec: qcArr.boundariesSec,
       cycles: cycles,
       totalBars: totalBars,
       vocalOrder: Array.from({ length: cycles * N }, function (_, k) { return k % N; }),

@@ -696,6 +696,16 @@ RM.mashup = (function () {
           semitones: semitones,
           engineTagVocal: tagV,
           engineTagInstr: tagI,
+          // v26: QC arrangement meta — song 1 (vocal) is the unstretched
+          // master clock; song 2 (beat) is stretched to it; the vocal runs
+          // the full mix (no slot transitions in the classic build).
+          masterBpm: Math.round(bpm1 * 10) / 10,
+          songs: [
+            { name: 'Song 1', bpm: Math.round(bpm1 * 10) / 10, key: key1 },
+            { name: 'Song 2', bpm: Math.round(bpm2 * 10) / 10, key: key2, stretched: true },
+          ],
+          vocalSlots: [{ songIdx: 0, name: 'Song 1', startSec: 0, endSec: outBuf.duration }],
+          boundariesSec: [],
           durationSec: Math.round(outBuf.duration * 10) / 10,
         },
       };
@@ -1081,6 +1091,13 @@ RM.mashup = (function () {
             proMix: true, // v22: arrangement + sidechain + glue + bus comp (DSP)
             introBars: PRO_INTRO_BARS,
             outroBars: PRO_OUTRO_BARS,
+            // v26: QC arrangement meta — the vocal sits after the 4-bar beat
+            // intro and runs songLen (no slot transitions in the auto build;
+            // auto does not detect key, so the key scan reports a skip).
+            masterBpm: Math.round(songBpm * 10) / 10,
+            songs: [{ name: 'Song 1', bpm: Math.round(songBpm * 10) / 10, key: null }],
+            vocalSlots: [{ songIdx: 0, name: 'Song 1', startSec: introLen / sr, endSec: (introLen + songLen) / sr }],
+            boundariesSec: [],
             durationSec: Math.round(outBuf.duration * 10) / 10,
           },
         };

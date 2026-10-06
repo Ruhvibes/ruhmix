@@ -637,6 +637,12 @@ RM.mashupSwap = (function () {
     return chain.then(function () {
       throwIfCancelled(token);
       prog('Done', 1);
+      // v26: QC arrangement meta — 4 alternating 8-bar slots after the 4-bar
+      // intro (the buildTimeline path and the built-in fallback share this
+      // geometry); song 2 is stretched to song 1's BPM (the master clock).
+      var qcSlots = (window.RM && RM.v25qc && typeof RM.v25qc.slotMeta === 'function')
+        ? RM.v25qc.slotMeta(4, SWAP_INTRO_BARS, SWAP_SEG_BARS, 240 / bpm1, ['Song 1', 'Song 2'])
+        : { vocalSlots: [], boundariesSec: [] };
       return {
         buffer: outBuf,
         engineTags: { song1: tag1, song2: tag2 }, // honest provider tags
@@ -644,6 +650,13 @@ RM.mashupSwap = (function () {
           bpm1: Math.round(bpm1 * 10) / 10,
           bpm2: Math.round(bpm2 * 10) / 10,
           targetBpm: Math.round(bpm1 * 10) / 10, // master = Song 1's BPM
+          masterBpm: Math.round(bpm1 * 10) / 10, // v26: QC master clock
+          songs: [ // v26: ARRAY for the QC scans (key labels are keyLabel() style — QC parses them)
+            { name: 'Song 1', bpm: Math.round(bpm1 * 10) / 10, key: key1 },
+            { name: 'Song 2', bpm: Math.round(bpm2 * 10) / 10, key: key2, stretched: true },
+          ],
+          vocalSlots: qcSlots.vocalSlots, // v26
+          boundariesSec: qcSlots.boundariesSec, // v26
           style: 'swap',
           styleId: picked && picked.id,
           styleName: picked && picked.name,
