@@ -398,6 +398,12 @@ RM.mashupMega = (function () {
         xfadeBars: XFADE_BARS,
         introBars: INTRO_BARS,
         outroBars: OUTRO_BARS,
+        // v24 W4 R3: DSP vocalcut stems are full-center mixes — duck the
+        // beat -2 dB under any non-neural song's slots so the embedded
+        // kick stops fighting the synth beat. Clean neural vocals: no duck.
+        beatDuckDb: perSongTags.map(function (t) {
+          return String(t || '') === 'neural stems' ? 0 : -2;
+        }),
         onProgress: function (label, frac) {
           prog(onProgress, label || 'Arranging…', 0.65 + (frac || 0) * 0.30);
         },

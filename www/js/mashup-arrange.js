@@ -12,14 +12,17 @@
 
    Crossfade design (fixed 8-bar grid — the codebase has no downbeat
    detection, so the grid is the spec): slots sit back-to-back, 8 bars
-   each — the crossfade NEVER adds time. At every slot boundary a 1-bar
-   crossfade is realised as a 0.5-bar equal-power fade-out (outgoing
-   vocal) + 0.5-bar equal-power fade-in (incoming vocal), using the
-   sin/cos equal-power curve family of mashup-dsp.js's fadeInOut. Gains
-   hit exact zeros at the boundary — click-free. (A true overlapping
-   crossfade is mathematically incompatible with the fixed
-   cycles×(N×8)-bar duration: overlapping shifts content earlier and
-   shrinks the timeline by one bar per transition.)
+   each — the crossfade NEVER adds time. At every slot boundary the
+   crossfade is `xfadeBars` long (caller-configurable; swap and mega pass
+   0.5 — v23's tight DJ handoff, 0.25-bar equal-power fade-out + 0.25-bar
+   equal-power fade-in — and the code default is 1 bar, 0.5 + 0.5),
+   realised as an equal-power fade-out (outgoing vocal) + equal-power
+   fade-in (incoming vocal) using the sin/cos equal-power curve family
+   of mashup-dsp.js's fadeInOut. Gains hit exact zeros at the boundary —
+   click-free. (A true overlapping crossfade is mathematically
+   incompatible with the fixed cycles×(N×8)-bar duration: overlapping
+   shifts content earlier and shrinks the timeline by one bar per
+   transition.)
 
    Pro polish — the SAME DSP math as mashup.js v22 proMixAuto. Those
    internals are NOT exported on RM.mashup, so they are re-implemented
@@ -35,8 +38,8 @@
      • vocal glue: small-room reverb (15% wet) + subtle dotted-8th
        feedback delay, applied to the placed rotation so reverb tails
        cross the transitions — then the +3 dB balance is re-locked
-     • master: gentle 2:1 bus compression (slow 30 ms attack) → hard
-       peak limit 0.98 — loud and clean
+     • master: gentle 2:1 bus compression (slow 30 ms attack) → 30 Hz
+       high-pass → v24 true-peak limiter (0.71 = -3 dBTP) — loud and clean
      • arrangement fades: 1-bar fade-in, 2-bar fade-out (v22 shape)
 
    Duration (samples) = (introBars + cycles × N × barsPerVocal +
@@ -49,6 +52,7 @@
              masterBpm, sampleRate,
              cycles = 2, barsPerVocal = 8, xfadeBars = 1,
              introBars = 4, outroBars = 4, vocalBoostDb = 3,
+             beatDuckDb = [0, -2],  // v24 W4 R3: per-song beat duck (dB)
              onProgress(label, frac), token }
        Also accepts the positional form
        buildTimeline(vocalSegs, beatBuf, opts) with opts aliases
@@ -75,7 +79,6 @@ window.RM = window.RM || {};
 RM.mashupArrange = (function () {
   /* ---- tunables: identical to mashup.js v22 — do not drift ---- */
   var TARGET_RMS = 0.126;          // ≈ −18 dBFS — beat reference level
-  var PEAK_LIMIT = 0.98;          // hard peak ceiling
   var DUCK_MAX_DB = 3;            // sidechain depth
   var DUCK_ATTACK_SEC = 0.010;
   var DUCK_RELEASE_SEC = 0.250;
@@ -139,7 +142,8 @@ RM.mashupArrange = (function () {
   /* =====================================================================
      Pro-polish DSP — consistent copies of mashup.js v22 internals
      (roomWet ← proRoomWet, delayWet ← proDelayWet,
-     busCompress ← proBusCompress, hardPeakLimit, linFade ← proFade,
+     busCompress ← proBusCompress, softPeakLimit (v24 soft tanh, -1 dBTP),
+     linFade ← proFade,
      rmsArr ← proRmsArr). Same constants, same formulas.
      The sidechain in the pipeline is the fused equivalent of v22's
      proEnvelope + proDuckCurve (identical recurrence, single pass).
@@ -229,28 +233,43 @@ RM.mashupArrange = (function () {
     }
   }
 
-  // Hard peak limit at PEAK_LIMIT — nothing above the digital ceiling.
-  function hardPeakLimit(buf) {
-    var peak = 0;
-    var chans = [];
-    for (var c = 0; c < buf.numberOfChannels; c++) {
-      var d = buf.getChannelData(c);
-      chans.push(d);
-      for (var i = 0; i < d.length; i++) {
-        var a = Math.abs(d[i]);
-        if (a > peak) peak = a;
-      }
-    }
-    if (peak > PEAK_LIMIT) {
-      for (var k = 0; k < chans.length; k++) {
-        var dd = chans[k];
-        for (var j = 0; j < dd.length; j++) {
-          if (dd[j] > PEAK_LIMIT) dd[j] = PEAK_LIMIT;
-          else if (dd[j] < -PEAK_LIMIT) dd[j] = -PEAK_LIMIT;
-        }
+  // True-peak gain limiter (v24: replaces hardPeakLimit). Measures the true
+  // peak at 4x oversampling, then applies one pure gain — never clips, never
+  // flat-tops, no waveshaping. The ceiling is a TRUE peak, so post-MP3 decode
+  // stays under -1 dBTP. Drop-in, same signature.
+  var TP_CEIL = 0.71; // -3 dBTP true-peak ceiling -> post-MP3 decode stays under -1 dBTP
+  function truePeak4x(d) {
+    var peak = 0, i, a, b, m1, m2, m3;
+    for (i = 0; i < d.length; i++) {
+      a = Math.abs(d[i]); if (a > peak) peak = a;
+      if (i + 1 < d.length) {
+        b = Math.abs(d[i + 1]);
+        m1 = (a * 3 + b) * 0.25; if (m1 > peak) peak = m1;
+        m2 = (a + b) * 0.5;      if (m2 > peak) peak = m2;
+        m3 = (a + b * 3) * 0.25; if (m3 > peak) peak = m3;
       }
     }
     return peak;
+  }
+  function softPeakLimit(buf) {
+    var peak = 0, c, d, i, tp;
+    for (c = 0; c < buf.numberOfChannels; c++) {
+      d = buf.getChannelData(c);
+      tp = truePeak4x(d); if (tp > peak) peak = tp;
+    }
+    if (peak <= TP_CEIL) return peak;
+    var g = TP_CEIL / peak;
+    for (c = 0; c < buf.numberOfChannels; c++) {
+      d = buf.getChannelData(c);
+      for (i = 0; i < d.length; i++) d[i] *= g;
+    }
+    return peak; // pre-limit true peak (mirrors old signature)
+  }
+
+  // v24: 1st-order 30 Hz high-pass on the summed mix BEFORE the soft limiter.
+  function highPass30(d, sr) {
+    var rc = 1 / (2 * Math.PI * 30), dt = 1 / sr, a = rc / (rc + dt), y = 0, p = 0, x;
+    for (var i = 0; i < d.length; i++) { x = d[i]; y = a * (y + x - p); p = x; d[i] = y; }
   }
 
   // Linear fade on d[start .. start+len): dirIn=true fades 0→1, else 1→0.
@@ -339,11 +358,26 @@ RM.mashupArrange = (function () {
     if (!isFinite(boostDb)) boostDb = 3; // v21/v22 spec: +3 dB
     var vocalBoost = Math.pow(10, boostDb / 20); // 1.4125 at +3 dB
 
+    /* v24 W4 R3: per-song beat duck for DSP-fallback vocals (dB per song
+       index, 0 = no duck). DSP vocalcut stems are full-center mixes
+       (vocal+kick+bass+snare); dipping the beat ~-2 dB under those slots
+       keeps the embedded kick from fighting the synth beat — clash down,
+       clarity up. Gain automation only: applied to the BEAT, never the
+       vocal. Callers pass e.g. [0, -2, 0] when song 2's vocal is DSP. */
+    var duckDbArr = Array.isArray(o.beatDuckDb) ? o.beatDuckDb : [];
+    var duckGainSong = [];
+    for (var di = 0; di < N; di++) {
+      var ddb = Number(duckDbArr[di]);
+      duckGainSong.push(isFinite(ddb) && ddb < 0 ? Math.pow(10, ddb / 20) : 1);
+    }
+    var anyDuck = duckGainSong.some(function (x) { return x !== 1; });
+
     /* ---- geometry: fixed 8-bar grid, bar-aligned boundaries ----
        total = intro + cycles×N×barsPerVocal + outro bars.
-       The 1-bar crossfade = 0.5-bar equal-power fade-out + 0.5-bar
-       equal-power fade-in at each slot boundary — it overlaps the
-       boundary but never moves it, so xfades add no time. */
+       The crossfade (xfadeBars, default 1) = half its length as an
+       equal-power fade-out + half as an equal-power fade-in at each slot
+       boundary — it overlaps the boundary but never moves it, so xfades
+       add no time. */
     var barLen = Math.max(1, Math.round((240 / bpm) * sr)); // samples/bar
     var slotLen = barsPerVocal * barLen;                    // samples/vocal
     var G = cycles * N;                                     // total vocal slots
@@ -504,7 +538,16 @@ RM.mashupArrange = (function () {
     });
 
     /* ---- 5. vocal glue (v22): dotted-8th delay + small-room reverb per
-       channel, then re-lock the +3 dB balance (wet energy shifts it). */
+       channel, then re-lock the +3 dB balance (wet energy shifts it).
+       v24 W4 R2: glue is computed PER SLOT, not over the whole track.
+       The reverb/delay wet tails (~1 s) used to smear across every
+       handoff so briefly BOTH singers were audible ("dono vocal ek
+       saath"). Each slot now gets a fresh delay line + reverb state, so
+       tails live and die INSIDE their own slot and never leak into the
+       next singer's entrance. Pro feel is intact — every slot still gets
+       its full dotted-8th + small-room glue. The LAST slot keeps the
+       outro in its segment so its tail still rings naturally into the
+       beat-only outro. */
     chain = chain.then(function () {
       throwIfCancelled(token);
       prog('Gluing vocals…', 0.57);
@@ -514,15 +557,38 @@ RM.mashupArrange = (function () {
       for (var c = 0; c < 2; c++) {
         throwIfCancelled(token);
         var dry = vocalTrack.getChannelData(c);
-        var dWet = delayWet(dry, sr, delaySec);
-        var rWet = roomWet(dry, sr);
-        var rDry = rmsArr(dry) || 1;
-        var gD = DELAY_WET * (rDry / (rmsArr(dWet) || 1));
-        var gR = VERB_WET * (rDry / (rmsArr(rWet) || 1));
-        for (var i = 0; i < dry.length; i++)
-          dry[i] = dry[i] + gD * dWet[i] + gR * rWet[i];
-        dWet = null;
-        rWet = null;
+        var wetD = new Float32Array(dry.length); // delay wet (per-slot)
+        var wetR = new Float32Array(dry.length); // reverb wet (per-slot)
+        for (var g = 0; g < G; g++) {
+          throwIfCancelled(token);
+          var sStart = introLen + g * slotLen;
+          // Last slot owns the outro too — its tail rings out naturally.
+          var sEnd = (g === G - 1) ? dry.length : introLen + (g + 1) * slotLen;
+          var segLen = sEnd - sStart;
+          if (segLen > 0) {
+            var seg = new Float32Array(segLen);
+            seg.set(dry.subarray(sStart, sEnd));
+            // Fresh delay/reverb state per slot: tails cannot cross the
+            // boundary — they are generated and consumed inside the slot.
+            var dW = delayWet(seg, sr, delaySec);
+            var rW = roomWet(seg, sr);
+            var rDry = rmsArr(seg) || 1;
+            var gD = DELAY_WET * (rDry / (rmsArr(dW) || 1));
+            var gR = VERB_WET * (rDry / (rmsArr(rW) || 1));
+            for (var i = 0; i < segLen; i++) {
+              wetD[sStart + i] += gD * dW[i];
+              wetR[sStart + i] += gR * rW[i];
+            }
+            dW = null;
+            rW = null;
+            seg = null;
+          }
+          prog('Gluing vocals…', 0.57 + 0.05 * (c + (g + 1) / G));
+        }
+        for (var j = 0; j < dry.length; j++)
+          dry[j] = dry[j] + wetD[j] + wetR[j];
+        wetD = null;
+        wetR = null;
         prog('Gluing vocals…', 0.57 + 0.05 * (c + 1));
       }
       throwIfCancelled(token);
@@ -567,8 +633,13 @@ RM.mashupArrange = (function () {
           if (amt > 1) amt = 1;
           amt = amt * amt;
           var gg = 1 - (1 - duckLin) * amt;
-          b0[i] = b0[i] * gg + v0[i];
-          b1[i] = b1[i] * gg + v1[i];
+          // v24 W4 R3: DSP-fallback slot duck — beat only, never the vocal.
+          var dg = 1;
+          if (anyDuck && i >= introLen && i < introLen + vocalLen) {
+            dg = duckGainSong[(((i - introLen) / slotLen) | 0) % N] || 1;
+          }
+          b0[i] = b0[i] * gg * dg + v0[i];
+          b1[i] = b1[i] * gg * dg + v1[i];
         }
         prog('Mixing…', 0.70 + 0.10 * (i / totalLen));
         if (i < totalLen) return tick().then(duckChunk);
@@ -593,7 +664,7 @@ RM.mashupArrange = (function () {
       return tick();
     });
 
-    /* ---- 8. master: gentle 2:1 bus compression → hard limit 0.98 ---- */
+    /* ---- 8. master: gentle 2:1 bus compression → 30 Hz HP → true-peak limit 0.71 ---- */
     chain = chain.then(function () {
       throwIfCancelled(token);
       prog('Mastering…', 0.90);
@@ -604,7 +675,9 @@ RM.mashupArrange = (function () {
       prog('Mastering…', 0.96);
       return tick();
     }).then(function () {
-      hardPeakLimit(beatTrack); // existing limiter: hard ceiling 0.98
+      highPass30(beatTrack.getChannelData(0), sr); // v24: 30 Hz HP before limiter
+      highPass30(beatTrack.getChannelData(1), sr);
+      softPeakLimit(beatTrack); // v24: true-peak gain limiter, TP_CEIL 0.71 (-3 dBTP)
       var outBuf = beatTrack;
       beatTrack = null;
       prog('Done', 1);

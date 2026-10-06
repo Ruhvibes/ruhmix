@@ -28,7 +28,7 @@
         equal-power crossfade + outro 4, cycles=2. The arrange module also
         owns the pro polish (sidechain/glue/comp/limiter); the fallback
         keeps the hard requirements — +3 dB vocal-over-bed balance (v21
-        spec), arrangement fades, hard peak limit 0.98.
+        spec), arrangement fades, v24 true-peak limit (0.71 = -3 dBTP).
      5. Cancel: throwIfCancelled() between stages; a user cancel always
         rethrows {kind:'cancelled'} — never wrapped, never DSP-fallbacked.
 
@@ -73,7 +73,7 @@ RM.mashupSwap = (function () {
   var VOCAL_OVER_BED_DB = 3;         // v21 spec: active singer +3 dB
   var VOCAL_BOOST = Math.pow(10, VOCAL_OVER_BED_DB / 20); // 1.4125
   var BED_RMS = 0.126;               // ≈ -18 dBFS beat reference
-  var PEAK_LIMIT = 0.98;             // hard ceiling, never clips
+  var TP_CEIL = 0.71;                // v24 true-peak ceiling (-3 dBTP)
   var BPM_FALLBACK = 100;            // honest fallback when detection fails
   var MAX_SEMITONES = 6;             // pitch-shift clamp (natural vocals)
 
@@ -236,7 +236,7 @@ RM.mashupSwap = (function () {
   // arrangement the spec asks for: intro 4 + alternate 8-bar segments
   // with a 1-bar equal-power crossfade + outro 4, cycles=2. Balance keeps
   // the v21 spec (active singer +3 dB over the beat, re-locked on the
-  // beat's ACHIEVED rms), arrangement fades, hard peak limit 0.98.
+  // beat's ACHIEVED rms), arrangement fades, v24 true-peak limit (0.71).
   // Pro polish (sidechain/glue/comp) belongs to the arrange module.
   function tick() { return new Promise(function (res) { setTimeout(res, 0); }); }
 
@@ -256,24 +256,43 @@ RM.mashupSwap = (function () {
     return out;
   }
 
-  function hardPeakLimit(buf) {
-    var chans = [];
-    for (var c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c));
-    var peak = 0;
-    chans.forEach(function (d) {
-      for (var i = 0; i < d.length; i++) {
-        var a = Math.abs(d[i]);
-        if (a > peak) peak = a;
+  // True-peak gain limiter (v24: replaces hardPeakLimit). Measures the true
+  // peak at 4x oversampling, then applies one pure gain — never clips, never
+  // flat-tops, no waveshaping. The ceiling is a TRUE peak, so post-MP3 decode
+  // stays under -1 dBTP. Drop-in, same signature.
+  function truePeak4x(d) {
+    var peak = 0, i, a, b, m1, m2, m3;
+    for (i = 0; i < d.length; i++) {
+      a = Math.abs(d[i]); if (a > peak) peak = a;
+      if (i + 1 < d.length) {
+        b = Math.abs(d[i + 1]);
+        m1 = (a * 3 + b) * 0.25; if (m1 > peak) peak = m1;
+        m2 = (a + b) * 0.5;      if (m2 > peak) peak = m2;
+        m3 = (a + b * 3) * 0.25; if (m3 > peak) peak = m3;
       }
-    });
-    if (peak > PEAK_LIMIT) {
-      chans.forEach(function (d) {
-        for (var j = 0; j < d.length; j++) {
-          if (d[j] > PEAK_LIMIT) d[j] = PEAK_LIMIT;
-          else if (d[j] < -PEAK_LIMIT) d[j] = -PEAK_LIMIT;
-        }
-      });
     }
+    return peak;
+  }
+  function softPeakLimit(buf) {
+    var peak = 0, c, d, i, tp;
+    for (c = 0; c < buf.numberOfChannels; c++) {
+      d = buf.getChannelData(c);
+      tp = truePeak4x(d); if (tp > peak) peak = tp;
+    }
+    if (peak <= TP_CEIL) return peak;
+    var g = TP_CEIL / peak;
+    for (c = 0; c < buf.numberOfChannels; c++) {
+      d = buf.getChannelData(c);
+      for (i = 0; i < d.length; i++) d[i] *= g;
+    }
+    return peak; // pre-limit true peak (mirrors old signature)
+  }
+
+  // v24: 1st-order 30 Hz high-pass on the summed mix BEFORE the soft limiter
+  // (phone speakers bottom out on sub-bass; musical bass untouched).
+  function highPass30(d, sr) {
+    var rc = 1 / (2 * Math.PI * 30), dt = 1 / sr, a = rc / (rc + dt), y = 0, p = 0, x;
+    for (var i = 0; i < d.length; i++) { x = d[i]; y = a * (y + x - p); p = x; d[i] = y; }
   }
 
   function fallbackTimeline(dsp, vocalSegs, beatBuf, bpm, sr, onTick) {
@@ -309,10 +328,15 @@ RM.mashupSwap = (function () {
               for (var i = 0; i < segLen; i++) td[start + i] += ex[i];
             } else {
               // 1-bar equal-power crossfade over the singer boundary.
+              // v24 W4 R5: the fade-OUT leg rides the PREVIOUS segment's
+              // actual tail samples [start-xLen, start). The old code read
+              // td[start+n] — still zeros there (writes end at start-1) —
+              // so nothing faded out: a hard cut + click at the boundary.
               for (var n = 0; n < xLen; n++) {
                 var wIn = Math.sin(halfPi * n / xLen);
                 var wOut = Math.cos(halfPi * n / xLen);
-                td[start + n] = td[start + n] * wOut + ex[n] * wIn;
+                td[start - xLen + n] *= wOut; // outgoing: real samples
+                td[start + n] += ex[n] * wIn; // incoming: eq-power fade-in
               }
               for (var m = xLen; m < segLen; m++) td[start + m] += ex[m];
             }
@@ -348,7 +372,9 @@ RM.mashupSwap = (function () {
           }
           md[0] = 0; md[totalLen - 1] = 0; // exact zeros: click-free edges
         }
-        hardPeakLimit(mix);
+        highPass30(mix.getChannelData(0), sr); // v24: 30 Hz HP before limiter
+        highPass30(mix.getChannelData(1), sr);
+        softPeakLimit(mix); // v24: true-peak gain limiter, TP_CEIL 0.71 (-3 dBTP)
         if (typeof onTick === 'function') { try { onTick(0.97); } catch (e) {} }
         return tick();
       })
@@ -502,7 +528,12 @@ RM.mashupSwap = (function () {
     chain = chain
       .then(function () { return stage('Matching tempo…', 0.60); })
       .then(function () {
-        stretchRatio2 = bpm1 / bpm2; // timeStretch clamps to [0.5, 2.0]
+        // v24 W4 R1: was inverted (bpm1/bpm2) — the codebase convention is
+        // ratio = ownBPM / targetBPM (mashup.js tempoTarget, mega:329), so
+        // Song 2's vocal (bpm2) stretched onto the master grid (bpm1) needs
+        // bpm2/bpm1. Inverted, a 140 BPM vocal over a 100 BPM beat played at
+        // ~196 BPM-equivalent and never sat on the 8-bar grid.
+        stretchRatio2 = bpm2 / bpm1; // WSOLA timeStretch clamps to [0.5, 2.0]
         var p = dsp.timeStretch(vocal2, stretchRatio2, function (q) {
           prog('Matching tempo…', 0.60 + q * 0.07);
         });
@@ -555,11 +586,19 @@ RM.mashupSwap = (function () {
           typeof RM.mashupArrange.buildTimeline === 'function';
         if (useArrange) {
           arrangeBy = 'RM.mashupArrange.buildTimeline';
+          // v24 W4 R3: DSP vocalcut stems are full-center mixes
+          // (vocal+kick+bass+snare) — duck the beat -2 dB under any
+          // non-neural singer's slot so the embedded kick stops fighting
+          // the synth beat. Neural stems are clean vocals: no duck.
+          var duckForTag = function (t) {
+            return String(t || '') === 'neural stems' ? 0 : -2;
+          };
           var opts = {
             bpm: bpm1, sr: sr,
             introBars: SWAP_INTRO_BARS, outroBars: SWAP_OUTRO_BARS,
             segBars: SWAP_SEG_BARS, xfadeBars: SWAP_XFADE_BARS,
             cycles: SWAP_CYCLES, vocalBoostDb: VOCAL_OVER_BED_DB,
+            beatDuckDb: [duckForTag(tag1), duckForTag(tag2)],
             onProgress: function (label, frac) { prog('Arranging vocals…', 0.81 + (frac || 0) * 0.17); },
             token: token,
           };
@@ -633,12 +672,20 @@ RM.mashupSwap = (function () {
 
   return {
     build: build, // RM.mashupSwap.build(buf1, buf2, onProgress, token)
+    // v24 W4: node-test hook only (browser-harmless) — lets the W4
+    // regression test assert the fallback crossfade rides real samples.
+    _test: { fallbackTimeline: fallbackTimeline },
   };
 })();
 
 // Node unit tests (browser-harmless).
 try {
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { api: { build: RM.mashupSwap.build } };
+    module.exports = {
+    api: {
+      build: RM.mashupSwap.build,
+      _test: (RM.mashupSwap._test || {}), // fallbackTimeline for node tests
+    },
+  };
   }
 } catch (e) {}

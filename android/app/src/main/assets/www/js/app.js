@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 23 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 24 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -2084,10 +2084,10 @@ Object.assign(RM.app, (function () {
     $('mst-normalize').addEventListener('click', () => {
       if (!A.needAudio()) return;
       A.toast('Normalizing…');
-      RM.audio.normalizeBuffer(A.state.viewBuffer, 0.9441, (p) => {
+      RM.audio.normalizeBuffer(A.state.viewBuffer, 0.71, (p) => {
         $('mst-status').textContent = Math.round(p * 100) + '%';
       }).then(() => {
-        $('mst-status').textContent = '✓ Loudness normalized (peak −0.5 dB)';
+        $('mst-status').textContent = '✓ Loudness normalized (peak −3 dB)';
         A.refreshView();
       });
     });
@@ -2382,7 +2382,7 @@ Object.assign(RM.app, (function () {
         try { if (chain) chain.dispose(); } catch (e) {}
         stage('Rendering… please wait', 0.35);
         const p2 = normalize
-          ? RM.audio.normalizeBuffer(rendered, 0.9441, (p) => setExpStage(('Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
+          ? RM.audio.normalizeBuffer(rendered, 0.71, (p) => setExpStage(('Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
           : Promise.resolve(rendered);
         return p2.then(() => {
           // NOTE: normalizeBuffer normalizes IN PLACE and resolves to the peak

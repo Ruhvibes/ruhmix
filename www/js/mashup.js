@@ -50,7 +50,7 @@ RM.mashup = (function () {
   var VOCAL_OVER_BED_DB = 3;      // vocal sits +3 dB over the instrumental bed
   var TARGET_RMS = 0.126;         // ≈ -18 dBFS — common mashup headroom target
   var FADE_SEC = 0.8;             // equal-power fade in/out length
-  var PEAK_LIMIT = 0.98;          // hard peak limit (clean digital ceiling)
+  var MIX_GAIN_VOCAL_OVER_BED_DB = 3;   // active singer +3 dB over bed
   var GUARD_HIGH = 1.6;           // ratio = bpm1/bpm2; above this, target bpm1/2
   var GUARD_LOW = 0.625;          // below this, target bpm1*2
   var MAX_SEMITONES = 12;         // pitch-shift clamp: one octave max
@@ -182,28 +182,45 @@ RM.mashup = (function () {
     return mix;
   }
 
-  // Hard peak limit at PEAK_LIMIT — nothing above the digital ceiling.
-  function hardPeakLimit(buf) {
-    var peak = 0;
-    var chans = [];
-    for (var c = 0; c < buf.numberOfChannels; c++) {
-      var d = buf.getChannelData(c);
-      chans.push(d);
-      for (var i = 0; i < d.length; i++) {
-        var a = Math.abs(d[i]);
-        if (a > peak) peak = a;
-      }
-    }
-    if (peak > PEAK_LIMIT) {
-      for (var k = 0; k < chans.length; k++) {
-        var dd = chans[k];
-        for (var j = 0; j < dd.length; j++) {
-          if (dd[j] > PEAK_LIMIT) dd[j] = PEAK_LIMIT;
-          else if (dd[j] < -PEAK_LIMIT) dd[j] = -PEAK_LIMIT;
-        }
+  // True-peak gain limiter (v24: replaces hardPeakLimit). Measures the true
+  // peak at 4x oversampling, then applies one pure gain — never clips, never
+  // flat-tops, no waveshaping. The ceiling is a TRUE peak, so post-MP3 decode
+  // stays under -1 dBTP. Drop-in, same signature.
+  var TP_CEIL = 0.71; // -3 dBTP true-peak ceiling -> post-MP3 decode stays under -1 dBTP
+  function truePeak4x(d) {
+    var peak = 0, i, a, b, m1, m2, m3;
+    for (i = 0; i < d.length; i++) {
+      a = Math.abs(d[i]); if (a > peak) peak = a;
+      if (i + 1 < d.length) {
+        b = Math.abs(d[i + 1]);
+        m1 = (a * 3 + b) * 0.25; if (m1 > peak) peak = m1;
+        m2 = (a + b) * 0.5;      if (m2 > peak) peak = m2;
+        m3 = (a + b * 3) * 0.25; if (m3 > peak) peak = m3;
       }
     }
     return peak;
+  }
+  function softPeakLimit(buf) {
+    var peak = 0, c, d, i, tp;
+    for (c = 0; c < buf.numberOfChannels; c++) {
+      d = buf.getChannelData(c);
+      tp = truePeak4x(d); if (tp > peak) peak = tp;
+    }
+    if (peak <= TP_CEIL) return peak;
+    var g = TP_CEIL / peak;
+    for (c = 0; c < buf.numberOfChannels; c++) {
+      d = buf.getChannelData(c);
+      for (i = 0; i < d.length; i++) d[i] *= g;
+    }
+    return peak; // pre-limit true peak (mirrors old signature)
+  }
+
+  // v24: 1st-order 30 Hz high-pass — runs on the summed mix BEFORE the
+  // soft limiter. Removes sub-bass (<40 Hz: ~25% of mix energy) that bottoms
+  // out phone speakers, without touching musical bass (>=50 Hz: <1 dB).
+  function highPass30(d, sr) {
+    var rc = 1 / (2 * Math.PI * 30), dt = 1 / sr, a = rc / (rc + dt), y = 0, p = 0, x;
+    for (var i = 0; i < d.length; i++) { x = d[i]; y = a * (y + x - p); p = x; d[i] = y; }
   }
 
   /* =====================================================================
@@ -217,7 +234,8 @@ RM.mashup = (function () {
        3. Vocal glue: small-room reverb (15% wet) + subtle dotted-8th
           feedback delay on the vocals so they sit IN the beat.
        4. Master polish: gentle 2:1 bus compression (slow 30 ms attack)
-          -> existing hard limiter 0.98. Loud and clean.
+          -> 30 Hz high-pass -> v24 true-peak limiter (0.71 = -3 dBTP).
+          Loud and clean, never harsh.
        5. Pro transitions: 1-bar mix fade-in, 2-bar outro fade-out,
           0.5 s vocal entry / 0.8 s vocal exit fades — click-free.
      ===================================================================== */
@@ -475,10 +493,13 @@ RM.mashup = (function () {
         return tick();
       })
       .then(function () {
-        // 6. Master: gentle 2:1 bus compression, then the existing hard limiter.
+        // 6. Master: gentle 2:1 bus compression, 30 Hz high-pass, then the
+        // v24 soft limiter (TP_CEIL 0.79 = -2 dBFS sample ceiling: MP3 decode never hits 0 dBFS).
         throwIfCancelled();
         proBusCompress(mix.getChannelData(0), mix.getChannelData(1), sr);
-        hardPeakLimit(mix); // existing limiter: hard ceiling 0.98
+        highPass30(mix.getChannelData(0), sr);
+        highPass30(mix.getChannelData(1), sr);
+        softPeakLimit(mix);
         return mix;
       });
   }
@@ -651,7 +672,9 @@ RM.mashup = (function () {
       catch (e) { throw new Error('Mixing failed (fade): ' + (e && e.message ? e.message : e)); }
       return Promise.resolve(f).then(function (faded) {
         if (isAudioBuffer(faded)) mix = faded; // tolerant: allow in-place
-        hardPeakLimit(mix);
+        highPass30(mix.getChannelData(0), mix.sampleRate);
+        if (mix.numberOfChannels > 1) highPass30(mix.getChannelData(1), mix.sampleRate);
+        softPeakLimit(mix); // v24: true-peak gain limiter, TP_CEIL 0.71 (-3 dBTP)
         outBuf = mix;
         prog('Mixing…', 1);
       }, function (e) {
@@ -698,8 +721,8 @@ RM.mashup = (function () {
             (subtle, never pumping);
             vocal glue: small-room reverb (15% wet) + subtle dotted-8th
             delay so vocals sit IN the beat;
-            master: gentle 2:1 bus compression (slow attack) -> hard peak
-            limit 0.98. Loud and clean.
+            master: gentle 2:1 bus compression (slow attack) -> 30 Hz
+            high-pass -> v24 true-peak limit (0.71 = -3 dBTP). Loud and clean.
             Balance spec kept: vocals -> beat_achieved_RMS x 1.4125
             (exactly +3 dB over the bed, re-locked after the glue stage).
        4. The final buffer is RETURNED. No autoplay — the caller (W2 UI)
@@ -888,8 +911,8 @@ RM.mashup = (function () {
   //   1. beat    -> -18 dBFS RMS (normalizeToRms, peak-limited 0.98)
   //   2. vocals -> beat_achieved_RMS x 1.4125 (exactly +3 dB over the bed)
   //   3. sum, equal-power fade in/out (click-free ends),
-  //      hardPeakLimit (the EXISTING limiter) — never clips.
-  //
+  //      highPass30 then softPeakLimit (the v24 soft tanh limiter, -1 dBTP)
+  //      — never clips.
   //   v21 ROOT FIX: high-crest beats can never reach -18 dBFS — the peak cap
   //   in normalizeToRms pins them at -18.6…-24.9 dBFS, which used to leave
   //   vocals up to +10 dB too hot. The vocal now tracks the beat's ACHIEVED

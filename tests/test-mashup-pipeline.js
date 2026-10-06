@@ -10,7 +10,7 @@
      - sample-rate mismatch -> resampled to vocal (Song A) rate
      - semitone clamp to ±12, pitchShift skipped when 0
      - +3 dB vocal over bed, 0.8s equal-power fade-in starts at 0,
-       hard peak limit 0.98
+       v24 soft peak limit (tanh, ≤ 0.89) + 30 Hz HP before it
      - custom stems provider: tags captured in meta
      - invalid inputs -> meaningful errors, no partial state
    ===================================================================== */
@@ -202,19 +202,61 @@ async function main() {
   // duration = min(vocal, stretched instr); instr len scaled by 1/stretch
   ok(approx(r.buffer.duration, r.meta.durationSec, 0.11), 'durationSec matches buffer');
 
-  // hard-limiter path: skip normalization so the raw mix (0.5 + 0.5*1.4125
-  // = 1.206) must be hard-clipped to exactly 0.98, never above.
+  // v24 soft-limiter path (replaces the old hard clip at 0.98): the 30 Hz
+  // high-pass runs BEFORE the soft limiter on the summed mix, so the stub's
+  // all-DC "hot" mix (0.5 + 0.5*1.4125 = 1.206 DC) is stripped as inaudible
+  // headroom waste — assert that — then drive the REAL shipped softPeakLimit
+  // + highPass30 (extracted from www/js/mashup.js) with a hot AC mix and
+  // assert the v24 contract: output peak ≤ 0.89, zero flat-tops.
   const savedNorm = RM.mashupDSP.normalizeToRms;
   RM.mashupDSP.normalizeToRms = (b) => Promise.resolve(b);
   const rL = await RM.mashup.build(mkSong(128, { key: 'C', mode: 'major' }),
                                    mkSong(100, { key: 'A', mode: 'minor' }));
   RM.mashupDSP.normalizeToRms = savedNorm;
   const lch = rL.buffer.getChannelData(0);
-  const mid = lch[Math.floor(lch.length * 0.5)];
-  ok(approx(mid, 0.98, 0.005), 'hot mix hard-clipped to 0.98', mid);
   let lpeak = 0;
   for (let i = 0; i < lch.length; i++) lpeak = Math.max(lpeak, Math.abs(lch[i]));
-  ok(lpeak <= 0.98001 && lpeak >= 0.97, 'limiter ceiling holds', lpeak);
+  ok(lpeak < 0.05, 'v24: 30 Hz HP strips DC before the soft limiter', lpeak);
+
+  const msrc = fs.readFileSync(path.join(__dirname, '..', 'www', 'js', 'mashup.js'), 'utf8');
+  const grab = (name) => {
+    const s = msrc.indexOf('function ' + name + '(');
+    let i = msrc.indexOf('{', s), depth = 0;
+    for (; i < msrc.length; i++) {
+      if (msrc[i] === '{') depth++;
+      else if (msrc[i] === '}') { if (--depth === 0) break; }
+    }
+    return msrc.slice(s, i + 1);
+  };
+  const TP_CEIL = parseFloat(msrc.match(/var TP_CEIL = ([0-9.]+);/)[1]);
+  const truePeak4x = new Function('return (' +
+    grab('truePeak4x').replace(/^function\s*\w*/, 'function') + ');')();
+  const softPeakLimit = new Function('TP_CEIL', 'truePeak4x', 'return (' +
+    grab('softPeakLimit').replace(/^function\s*\w*/, 'function') + ');')(TP_CEIL, truePeak4x);
+  const highPass30 = new Function('return (' +
+    grab('highPass30').replace(/^function\s*\w*/, 'function') + ');')();
+  const ACN = 44100, acBuf = fakeBuffer(2, ACN, 44100, 0);
+  for (let c = 0; c < 2; c++) {
+    const d = acBuf.getChannelData(c);
+    for (let i = 0; i < ACN; i++)
+      d[i] = 0.95 * Math.sin(2 * Math.PI * 61 * i / 44100) + 0.95 * Math.sin(2 * Math.PI * 440 * i / 44100);
+  }
+  let pre = 0;
+  for (let i = 0; i < ACN; i++) pre = Math.max(pre, Math.abs(acBuf.getChannelData(0)[i]));
+  ok(pre > 1.3, 'v24: hot AC mix pre-limit peak > 1.3', pre.toFixed(3));
+  highPass30(acBuf.getChannelData(0), 44100);
+  highPass30(acBuf.getChannelData(1), 44100);
+  softPeakLimit(acBuf);
+  const ad = acBuf.getChannelData(0);
+  let apeak = 0;
+  for (let i = 0; i < ACN; i++) apeak = Math.max(apeak, Math.abs(ad[i]));
+  ok(apeak <= TP_CEIL + 1e-6, 'v24: true-peak-limited output peak ≤ ' + TP_CEIL, apeak.toFixed(4));
+  let run = 1, worst = 1;
+  for (let i = 1; i < ACN; i++) {
+    if (Math.abs(ad[i]) === apeak && Math.abs(ad[i - 1]) === apeak) { run++; if (run > worst) worst = run; }
+    else run = 1;
+  }
+  ok(worst <= 1, 'v24: zero flat-top samples (pure-gain true-peak limiter)', 'longest run=' + worst);
   // vocal +3dB: mid would be 0.5+0.5*1.4125=1.206 pre-limit; check the gain
   // math via a below-ceiling mix (scale: bed 0.2 -> 0.2+0.2*1.4125=0.4825).
   ok(true, '(vocal gain 10^(3/20)≈1.4125 verified by construction)');
