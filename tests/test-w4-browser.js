@@ -152,7 +152,7 @@ async function pageTests() {
     const expTarget = ratio > 1.6 ? m.bpm1 / 2 : (ratio < 0.625 ? m.bpm1 * 2 : m.bpm1);
     ok(Math.abs(m.targetBpm - expTarget) < 1, 'S2 half/double guard invariant holds',
        'ratio ' + ratio.toFixed(3) + ' target ' + m.targetBpm);
-    ok(Math.abs(m.stretchRatio - m.targetBpm / m.bpm2) < 0.01, 'S2 stretchRatio = target/bpm2', 'got ' + m.stretchRatio);
+    ok(Math.abs(m.stretchRatio - m.bpm2 / m.targetBpm) < 0.01, 'S2 stretchRatio = bpm2/targetBpm (timeStretch ratio>1 = longer)', 'got ' + m.stretchRatio);
     ok(m.key1 === 'C major', 'S2 key1 = C major (real detectKey)', 'got ' + m.key1);
     ok(m.key2 === 'D major', 'S2 key2 = D major (real detectKey)', 'got ' + m.key2);
     ok(m.semitones === -2, 'S2 semitones = -2 (D down to C)', 'got ' + m.semitones);

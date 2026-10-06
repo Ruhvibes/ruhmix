@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>RuhMix — Professional Music & Remix Studio</title>
 <link rel="stylesheet" href="styles.css">
+<style>
+/* v23: dynamic song slots on the mashup screen */
+.mashup-slot-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.mashup-slot-mid{flex:1;min-width:0}
+.mashup-slot-pick{margin-bottom:2px}
+.mashup-slot-x{flex:0 0 auto}
+</style>
 </head>
 <body>
 <!-- ======================= header ======================= -->
@@ -210,31 +217,55 @@
   <h2>🤖 Auto Mashup</h2>
   <p class="muted">Smart BPM + key matching</p>
   <p id="mashup-engine-tag" class="mashup-tag"></p>
-  <button class="btn big block" id="mashup-pick1">🎤 Song 1 — Vocals</button>
-  <div id="mashup-name1" class="muted">No song selected</div>
 
-  <!-- Beat source: built-in original beats (default) or a second song -->
+  <!-- v23: dynamic song slots — 2 to 8 songs -->
+  <div id="mashup-slots"></div>
+  <div class="row" style="align-items:center;gap:10px">
+    <button class="btn" id="mashup-add">＋ Add Song</button>
+    <span id="mashup-count" class="muted small">Songs: 0/8</span>
+  </div>
+
+  <!-- 1-song mode: built-in original beats (default) -->
   <div class="panel" id="mashup-beatsrc-panel">
     <div class="row"><strong>🎹 Beat source</strong></div>
     <div class="seg" id="mashup-beatsrc-seg" role="group" aria-label="Beat source">
       <button class="btn tog on" id="mashup-src-builtin" data-src="builtin">🎹 Built-in Beats <span class="small">Copyright-Free</span> <span class="beta">Recommended</span></button>
-      <button class="btn tog" id="mashup-src-song2" data-src="song2">🎵 Pick Song 2</button>
     </div>
   </div>
 
-  <!-- Built-in beats: 8 original styles, synthesized in-app (default) -->
+  <!-- Built-in beats: 8 original styles, synthesized in-app (1-song mode) -->
   <div id="mashup-beats-wrap">
     <p class="muted small">🎹 Original Beats — synthesized in RuhMix, 100% copyright-free</p>
     <div class="card-grid" id="mashup-beat-grid"></div>
   </div>
 
-  <!-- Song 2 beat: shown only when "Pick Song 2" is the beat source -->
-  <div id="mashup-song2-wrap" hidden>
-    <button class="btn big block" id="mashup-pick2">🥁 Song 2 — Beat</button>
-    <div id="mashup-name2" class="muted">No song selected</div>
+  <!-- 2-song mode: style cards (Classic vs Vocal Swap) -->
+  <div id="mashup-style-wrap" hidden>
+    <p class="muted small">🎚️ Choose a mashup style</p>
+    <div class="card-grid" id="mashup-style-grid">
+      <div class="beat-card sel" data-mode2="classic" id="mashup-style-classic">
+        <div class="bc-main">
+          <div class="bc-name">🎤 Classic</div>
+          <div class="bc-meta">Song 1 vocals × Song 2 beat</div>
+        </div>
+      </div>
+      <div class="beat-card" data-mode2="swap" id="mashup-style-swap">
+        <div class="bc-main">
+          <div class="bc-name">🔄 Vocal Swap</div>
+          <div class="bc-meta">Vocals alternate between both songs</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3–8 song Mega mode: built-in beat auto-matched -->
+  <div id="mashup-mega-note" class="panel" hidden>
+    <div class="row"><strong>🎹 Built-in copyright-free beat (auto-matched)</strong></div>
+    <p class="muted small" style="margin:4px 0 0">Up to 8 songs — vocals rotate over one consistent original beat.</p>
   </div>
 
   <p class="muted small" id="mashup-honest">Built-in original beat (copyright-free, synthesized in-app) • vocals auto-matched. No fake AI claims.</p>
+  <p class="muted small" id="mashup-min2-hint" hidden>Add at least 2 songs for Classic, Vocal Swap and Mega mashups.</p>
   <button class="btn primary big block" id="mashup-make">✨ Create Auto Mashup</button>
   <button class="btn big block" id="mashup-cancel" hidden>✕ Cancel</button>
   <div id="mashup-progress" hidden>
@@ -569,6 +600,9 @@
 <script src="js/beats-preview.js"></script>
 <script src="js/mashup-dsp.js"></script>
 <script src="js/mashup.js"></script>
+<script src="js/mashup-swap.js"></script>
+<script src="js/mashup-mega.js"></script>
+<script src="js/mashup-arrange.js"></script>
 <script src="js/mashup-stems.js"></script>
 <script src="js/mashup-export.js"></script>
 <script src="js/mashup-screen.js"></script>

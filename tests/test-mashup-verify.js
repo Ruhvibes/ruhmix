@@ -511,12 +511,14 @@ function finish() {
       const meta = res.meta;
       add('9b. build() detects real fixture BPMs', Math.abs(meta.bpm1 - 120) < 2 && Math.abs(meta.bpm2 - 100) < 2,
         `bpm1=${meta.bpm1} bpm2=${meta.bpm2}`);
-      add('9c. build() stretchRatio ≈ 1.2', Math.abs(meta.stretchRatio - 1.2) < 0.02,
+      add('9c. build() stretchRatio ≈ 0.833 (bpm2/target)', Math.abs(meta.stretchRatio - 100/120) < 0.02,
         `stretchRatio=${meta.stretchRatio}`);
-      const minLen = Math.min(b1.length, b2.length);
-      const durErr = Math.abs(data.length - minLen) / minLen;
-      add('9d. build() output duration ≈ min input length', durErr < 0.05 && !hasBad(data),
-        `out=${data.length} minIn=${minLen} err=${(durErr * 100).toFixed(2)}% channels=${res.buffer.numberOfChannels}`);
+      // v23: beat is tempo-matched (b2 stretched by stretchRatio), so expected
+      // output = min(vocalLen, beatLen * stretchRatio) — NOT min raw input.
+      const expLen = Math.min(b1.length, b2.length * meta.stretchRatio);
+      const durErr = Math.abs(data.length - expLen) / expLen;
+      add('9d. build() output duration ≈ min(vocal, beat*stretch)', durErr < 0.05 && !hasBad(data),
+        `out=${data.length} exp=${Math.round(expLen)} err=${(durErr * 100).toFixed(2)}% channels=${res.buffer.numberOfChannels}`);
       add('9e. build() output peak ≤ 1.0', peak(data) <= 1.0,
         `peak=${peak(data).toFixed(4)} (pipeline hard-limits at 0.98)`);
     } catch (e) {

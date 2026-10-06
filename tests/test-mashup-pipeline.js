@@ -132,15 +132,16 @@ function collectProg() {
 async function main() {
   console.log('== tempo guard math ==');
   const cases = [
-    // bpm1, bpm2, expected target, expected stretch
-    [150, 90, 75, 75 / 90],       // ratio 1.667 > 1.6 -> bpm1/2 (double-time feel)
-    [80, 140, 160, 160 / 140],    // ratio 0.571 < 0.625 -> bpm1*2 (half-time)
-    [120, 100, 120, 1.2],         // normal range
+    // bpm1, bpm2, expected target, expected stretch (v23: stretch = bpm2/target —
+    // timeStretch ratio>1 = longer output, so slowing a beat down needs ratio>1)
+    [150, 90, 75, 90 / 75],       // ratio 1.667 > 1.6 -> bpm1/2 (double-time feel)
+    [80, 140, 160, 140 / 160],    // ratio 0.571 < 0.625 -> bpm1*2 (half-time)
+    [120, 100, 120, 100 / 120],   // normal range
     [96, 96, 96, 1.0],           // identical
-    [NaN, 128, 120, 120 / 128],   // invalid bpm1 -> 120 fallback
-    [100, 0, 100, 100 / 120],        // invalid bpm2 -> 120 fallback, ratio 0.833 normal
-    [200, 60, 100, 100 / 60],     // ratio 3.33 extreme -> bpm1/2
-    [60, 200, 120, 0.6],          // ratio 0.3 extreme -> bpm1*2
+    [NaN, 128, 120, 128 / 120],   // invalid bpm1 -> 120 fallback
+    [100, 0, 100, 120 / 100],        // invalid bpm2 -> 120 fallback, ratio 0.833 normal
+    [200, 60, 100, 60 / 100],     // ratio 3.33 extreme -> bpm1/2
+    [60, 200, 120, 200 / 120],    // ratio 0.3 extreme -> bpm1*2
   ];
   for (const [b1, b2, t, s] of cases) {
     dspCalls.pitchShift = 0; dspCalls.timeStretch = [];

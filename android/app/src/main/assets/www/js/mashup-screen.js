@@ -1,10 +1,18 @@
 'use strict';
 /* =====================================================================
-   RuhMix — mashup-screen.js (Worker 3)
+   RuhMix — mashup-screen.js (W1, v23)
    "🤖 Auto Mashup" screen UI. window.RM.mashupScreen module.
 
+   v23: dynamic song slots (2–8). Mode auto-derives from the picked song
+   count:
+     1 song  -> built-in beat flow: RM.mashup.buildAuto(slot1, styleId, onProg, onStep)
+     2 songs -> style cards: 🎤 Classic (RM.mashup.build) or 🔄 Vocal Swap
+                (RM.mashupSwap.build). Beat-source seg + beat grid hidden.
+     3–8     -> Mega mode: RM.mashupMega.build(songs, opts, onProgress, onStep)
+                with a built-in copyright-free beat (auto-matched).
+
    Pick flow: reuses the EXACT #cdx-pick flow (RM.ux.pickMusic() -> import
-   screen). Before routing, pickTarget = 1|2 is set; app.js landing points
+   screen). Before routing, pickTarget = 1..8 is set; app.js landing points
    (handleAudioPicked direct-load + import "Use" button) call
    RM.mashupScreen.onPicked(slot, buffer, name) instead of loadAudioBuffer,
    which lands the decoded AudioBuffer in the mashup slot and returns to
@@ -14,8 +22,9 @@
    Playback: preview starts ONLY from the user's tap on #mashup-play
    (never autoplay), and is always stopped when the mashup screen is left.
 
-   Depends on other workers' files: RM.mashup.build (build engine) and
-   RM.mashupExport.sendToExport (Worker 5) — both called defensively.
+   Depends on other workers' files: RM.mashup.build / buildAuto,
+   RM.mashupSwap.build (W2), RM.mashupMega.build (W4),
+   RM.mashupExport.sendToExport — all called defensively.
    ===================================================================== */
 window.RM = window.RM || {};
 
@@ -24,15 +33,40 @@ window.RM = window.RM || {};
   function A() { return RM.app || null; }
   function $(id) { return document.getElementById(id); }
 
+  var MAX_SONGS = 8, MIN_SLOTS = 2;
+
   var ms = {
-    pickTarget: 0,        // 0 = none, 1 = Song 1 (Vocals), 2 = Song 2 (Beat)
-    slot1: null, slot2: null, // { buffer: AudioBuffer, name: string }
-    result: null,         // { buffer: AudioBuffer, meta: string }
+    pickTarget: 0,        // 0 = none, 1..8 = song slot
+    slots: [],            // [{ buffer: AudioBuffer|null, name: string }], length 2..8
+    mode2: 'classic',     // 'classic' | 'swap' — only used in 2-song mode
+    result: null,         // { buffer: AudioBuffer, meta: object, engine: string }
     pvSrc: null,          // active preview BufferSourceNode
     building: false,
     _wired: false,
     _hook: null,
   };
+  function blankSlots() {
+    var s = [];
+    for (var i = 0; i < MIN_SLOTS; i++) s.push({ buffer: null, name: '' });
+    return s;
+  }
+  ms.slots = blankSlots();
+
+  /* ================= slots ================= */
+
+  // Songs that actually have audio, in slot order.
+  function pickedSongs() {
+    return ms.slots.filter(function (s) { return s && s.buffer; });
+  }
+  function pickedCount() { return pickedSongs().length; }
+
+  // Auto-derived mode: 'builtin' (1 song) | 'style2' (2 songs) | 'mega' (3–8).
+  function mode() {
+    var n = pickedCount();
+    if (n <= 1) return 'builtin';
+    if (n === 2) return 'style2';
+    return 'mega';
+  }
 
   /* ================= picker (exact #cdx-pick flow) ================= */
 
@@ -40,6 +74,7 @@ window.RM = window.RM || {};
     var a = A();
     if (!a) return;
     stopPreview();
+    if (slot < 1 || slot > ms.slots.length) { a.toast('Pick failed — try again'); return; }
     ms.pickTarget = slot;
     try {
       if (RM.ux && typeof RM.ux.pickMusic === 'function') {
@@ -48,27 +83,85 @@ window.RM = window.RM || {};
         a.show('import');
       }
     } catch (e) { ms.pickTarget = 0; return; }
-    a.toast(slot === 1 ? 'Pick Song 1 — Vocals 🎤' : 'Pick Song 2 — Beat 🥁');
+    a.toast('Pick Song ' + slot + ' 🎵');
   }
 
   // Called by app.js (mashupIntercept) with the decoded AudioBuffer + name.
   function onPicked(slot, buffer, name) {
     var a = A();
-    if (!buffer || (slot !== 1 && slot !== 2)) { if (a) a.toast('Pick failed — try again'); ms.pickTarget = 0; return; }
-    var entry = { buffer: buffer, name: name || 'audio' };
-    if (slot === 1) ms.slot1 = entry; else ms.slot2 = entry;
+    if (!buffer || slot < 1 || slot > ms.slots.length) {
+      if (a) a.toast('Pick failed — try again');
+      ms.pickTarget = 0;
+      return;
+    }
+    ms.slots[slot - 1] = { buffer: buffer, name: name || 'audio' };
     ms.pickTarget = 0;
-    renderNames();
+    renderSlots();
+    updateModeUI();
     if (a) {
       a.toast('Song ' + slot + ' selected ✓');
       a.show('mashup');
     }
   }
 
-  function renderNames() {
-    var n1 = $('mashup-name1'), n2 = $('mashup-name2');
-    if (n1) { n1.textContent = ms.slot1 ? ms.slot1.name : 'No song selected'; }
-    if (n2) { n2.textContent = ms.slot2 ? ms.slot2.name : 'No song selected'; }
+  function removeSlot(slot) {
+    var a = A();
+    if (slot < 1 || slot > ms.slots.length) return;
+    if (ms.slots.length <= MIN_SLOTS) return; // keep the base pair
+    stopPreview();
+    ms.slots.splice(slot - 1, 1);
+    if (ms.pickTarget === slot) ms.pickTarget = 0;
+    renderSlots();
+    updateModeUI();
+    if (a) a.toast('Song removed');
+  }
+
+  function addSlot() {
+    var a = A();
+    if (ms.slots.length >= MAX_SONGS) {
+      if (a) a.toast('Maximum ' + MAX_SONGS + ' songs');
+      return;
+    }
+    ms.slots.push({ buffer: null, name: '' });
+    renderSlots();
+    updateModeUI();
+  }
+
+  function renderSlots() {
+    var wrap = $('mashup-slots');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    ms.slots.forEach(function (s, i) {
+      var n = i + 1;
+      var row = document.createElement('div');
+      row.className = 'mashup-slot-row';
+      var pick = document.createElement('button');
+      pick.className = 'btn big block mashup-slot-pick';
+      pick.setAttribute('data-pick', String(n));
+      pick.setAttribute('aria-label', 'Pick Song ' + n);
+      pick.textContent = '🎵 Song ' + n + (s.buffer ? ' ✓' : '');
+      var nm = document.createElement('div');
+      nm.className = 'muted small';
+      nm.textContent = s.buffer ? s.name : 'No song selected';
+      var mid = document.createElement('div');
+      mid.className = 'mashup-slot-mid';
+      mid.appendChild(pick);
+      mid.appendChild(nm);
+      row.appendChild(mid);
+      // ✕ remove (only when more than the base pair exists).
+      var x = document.createElement('button');
+      x.className = 'btn small mashup-slot-x';
+      x.setAttribute('data-remove', String(n));
+      x.setAttribute('aria-label', 'Remove Song ' + n);
+      x.textContent = '✕';
+      if (ms.slots.length <= MIN_SLOTS) x.disabled = true;
+      row.appendChild(x);
+      wrap.appendChild(row);
+    });
+    var cnt = $('mashup-count');
+    if (cnt) cnt.textContent = 'Songs: ' + pickedCount() + '/' + MAX_SONGS;
+    var add = $('mashup-add');
+    if (add) add.disabled = ms.slots.length >= MAX_SONGS;
   }
 
   /* ================= progress ================= */
@@ -87,7 +180,7 @@ window.RM = window.RM || {};
   function setBuildUI(running) {
     ms.building = running;
     var b = $('mashup-make');
-    if (b) b.disabled = running;
+    if (b) b.disabled = running || pickedCount() === 0;
     // v21: Cancel button — the only escape if the neural call stalls.
     var c = $('mashup-cancel');
     if (c) c.hidden = !running;
@@ -98,6 +191,7 @@ window.RM = window.RM || {};
   function fail(msg) {
     var a = A();
     setBuildUI(false);
+    updateCreateState();
     // v21: user Cancel shows a clean "Cancelled." (never an error stack).
     var txt = (msg && msg.kind === 'cancelled') ? 'Cancelled.' : (a.cleanErrMsg(msg) || 'Something went wrong. Please try again.');
     if (a) a.toast(txt);
@@ -116,26 +210,63 @@ window.RM = window.RM || {};
     return parts.join(' • ') || 'Mashup ready';
   }
 
+  // Honest engine label from the real per-call provider tags:
+  // never claim DSP when neural stems were used, or vice versa.
+  // Accepts ALL engineTags schemas (v23 root fix — W8 found swap/mega used
+  // different schemas and always fell through to "Smart DSP engine"):
+  //   classic: meta.engineTagVocal/engineTagInstr or engineTags{vocal,instr}
+  //   swap:    meta.engineTagSong1/engineTagSong2 or engineTags{song1,song2}
+  //   mega:    engineTags = [tag, tag, ...] (array of per-song tags)
+  function honestEngineLabel(res) {
+    var m = (res && res.meta) || {};
+    var et = (res && res.engineTags);
+    var tags = [];
+    function push(t) { if (typeof t === 'string' && t) tags.push(t); }
+    // v21 classic schema + v23 swap meta schema (engineTagSong1/engineTagSong2)
+    push(m.engineTagVocal); push(m.engineTagInstr);
+    push(m.engineTagSong1); push(m.engineTagSong2);
+    if (et && !Array.isArray(et) && typeof et === 'object') {
+      // swap schema {song1,song2} + classic {vocal,instr} — collect every value
+      for (var k in et) { if (Object.prototype.hasOwnProperty.call(et, k)) push(et[k]); }
+    } else if (Array.isArray(et)) {
+      // mega schema: array of per-song tag strings
+      for (var i = 0; i < et.length; i++) push(et[i]);
+    }
+    // HONESTY: the fallback tag 'smart DSP (neural failed)' contains the
+    // word "neural" — it must NOT count as neural (the actual engine was
+    // DSP). Only a real neural success tag ('neural stems') counts.
+    function isNeural(t) { return /neural/i.test(t) && !/neural failed/i.test(t); }
+    var neuralCount = 0;
+    for (var j = 0; j < tags.length; j++) if (isNeural(tags[j])) neuralCount++;
+    if (tags.length > 0 && neuralCount === tags.length) return 'Neural stems engine';
+    if (neuralCount > 0) return 'Smart DSP + neural stems';
+    if (/failed/i.test(tags.join(' '))) return 'Smart DSP engine (neural unavailable)';
+    return 'Smart DSP engine';
+  }
+
   function make() {
     var a = A();
     if (!a || ms.building) return;
-    var src = (BU && BU.beatSource) || 'builtin';
-    if (!ms.slot1) {
-      a.toast('Pick Song 1 — Vocals first 🎤');
-      return;
-    }
-    if (src === 'song2' && !ms.slot2) {
-      a.toast('Pick Song 2 — Beat first 🥁');
-      return;
-    }
-    // Engine contract (W3): RM.mashup.buildAuto(voxBuffer, styleId, onProgress, onStep)
-    // -> Promise<{ buffer, meta }>; W3's engine calls onStep('vocals'|'beat'|'mix'|'done').
+    var songs = pickedSongs();
+    var m = mode();
+    if (m === 'builtin' && !songs[0]) { a.toast('Pick Song 1 first 🎵'); return; }
+    if (m === 'style2' && songs.length < 2) { a.toast('Pick both songs first 🎵'); return; }
+    if (m === 'mega' && songs.length < 3) { a.toast('Add at least 3 songs for a Mega mashup 🎵'); return; }
+
+    // Engine availability checks (defensive — W2/W4 modules may lag).
     var canBuiltin = RM.mashup && typeof RM.mashup.buildAuto === 'function';
-    var canSong2 = RM.mashup && typeof RM.mashup.build === 'function';
-    if ((src === 'builtin' && !canBuiltin) || (src === 'song2' && !canSong2)) {
+    var canClassic = RM.mashup && typeof RM.mashup.build === 'function';
+    var canSwap = RM.mashupSwap && typeof RM.mashupSwap.build === 'function';
+    var canMega = RM.mashupMega && typeof RM.mashupMega.build === 'function';
+    var need =
+      m === 'builtin' ? canBuiltin :
+      m === 'mega' ? canMega :
+      (ms.mode2 === 'swap' ? canSwap : canClassic);
+    if (!need) {
       a.toast('Mashup engine not ready — update the app and retry.');
       return;
     }
+
     stopPreview();
     setBuildUI(true);
     // v21: fresh build — clear any stale cancel flag from a previous run.
@@ -144,9 +275,9 @@ window.RM = window.RM || {};
     setProgress('Analyzing…', 0);
     var done = false;
     var onProg = function (label, frac) { if (!done) setProgress(label, frac); };
-    // Song 2 mode: the classic build() has no onStep — drive the 3-step
+    // Builds without their own onStep (classic/swap): drive the 3-step
     // indicator from progress fractions so it never sits static.
-    var onProgSong2 = function (label, frac) {
+    var onProgSteps = function (label, frac) {
       onProg(label, frac);
       try {
         if (frac >= 1) BU.onStep('done');
@@ -157,48 +288,57 @@ window.RM = window.RM || {};
     };
     Promise.resolve()
       .then(function () {
-        if (src === 'builtin') return RM.mashup.buildAuto(ms.slot1.buffer, BU.selectedStyle, onProg, BU.onStep);
-        return RM.mashup.build(ms.slot1.buffer, ms.slot2.buffer, onProgSong2);
+        if (m === 'builtin') {
+          // 1 song: built-in beat auto flow (existing W3 contract).
+          return RM.mashup.buildAuto(songs[0].buffer, BU.selectedStyle, onProg, BU.onStep);
+        }
+        if (m === 'mega') {
+          // 3–8 songs: Mega mode (W4 contract).
+          var list = songs.map(function (s) { return { buffer: s.buffer, name: s.name }; });
+          return RM.mashupMega.build(list, {}, onProg, BU.onStep);
+        }
+        if (ms.mode2 === 'swap') {
+          // 2 songs, Vocal Swap (W2 contract). token is optional.
+          var token = (RM.mashupStems && typeof RM.mashupStems.makeToken === 'function')
+            ? RM.mashupStems.makeToken() : null;
+          return RM.mashupSwap.build(songs[0].buffer, songs[1].buffer, onProgSteps, token);
+        }
+        // 2 songs, Classic (existing W3 contract).
+        return RM.mashup.build(songs[0].buffer, songs[1].buffer, onProgSteps);
       })
       .then(function (res) {
         done = true;
         try { if (RM.mashupStems && typeof RM.mashupStems.clearCancel === 'function') RM.mashupStems.clearCancel(); } catch (e) {}
         var buf = res && res.buffer ? res.buffer : (res instanceof AudioBuffer ? res : null);
         if (!buf) throw new Error('Mashup build produced no audio.');
-        var m = (res && res.meta) || {};
-        // Honest engine label from the real per-call provider tags (Worker 4):
-        // never claim DSP when neural stems were used, or vice versa.
-        var tagV = m.engineTagVocal || '', tagI = m.engineTagInstr || '';
-        var engineLabel = 'Smart DSP engine';
-        // HONESTY: the fallback tag 'smart DSP (neural failed)' contains the
-        // word "neural" — it must NOT count as neural (the actual engine was
-        // DSP). Only a real neural success tag ('neural stems') counts.
-        var neuralV = /neural/i.test(tagV) && !/neural failed/i.test(tagV),
-            neuralI = /neural/i.test(tagI) && !/neural failed/i.test(tagI);
-        if (neuralV && neuralI) engineLabel = 'Neural stems engine';
-        else if (neuralV || neuralI) engineLabel = 'Smart DSP + neural stems';
-        else if (/failed/i.test(tagV + ' ' + tagI)) engineLabel = 'Smart DSP engine (neural unavailable)';
-        ms.result = {
-          buffer: buf,
-          meta: m,
-          engine: engineLabel,
-        };
-        // Friendly export name: picked song(s) (+ built-in beat style name).
+        var meta = (res && res.meta) || {};
+        ms.result = { buffer: buf, meta: meta, engine: honestEngineLabel(res) };
+        // Friendly export name per mode.
         try {
-          var nm = 'Mashup ' + (ms.slot1.name || 'A') + ' x ';
-          if (src === 'builtin') {
-            var stN = BU.styleById(BU.selectedStyle);
-            nm += (stN && stN.name) ? stN.name + ' Beat' : (BU.selectedStyle ? 'Built-in Beat' : 'Auto Beat');
+          var nm;
+          if (m === 'mega') {
+            nm = 'Mega Mashup (' + songs.length + ' songs)';
+          } else if (m === 'style2' && ms.mode2 === 'swap') {
+            nm = 'Mashup ' + (songs[0].name || 'A') + ' x ' + (songs[1].name || 'B') + ' (Vocal Swap)';
           } else {
-            nm += (ms.slot2.name || 'B');
+            nm = 'Mashup ' + (songs[0].name || 'A') + ' x ';
+            if (m === 'builtin') {
+              var stN = BU.styleById(BU.selectedStyle);
+              nm += (stN && stN.name) ? stN.name + ' Beat' : (BU.selectedStyle ? 'Built-in Beat' : 'Auto Beat');
+            } else {
+              nm += (songs[1].name || 'B');
+            }
           }
           ms.result.meta.name = nm;
           // W5 export uses meta.style for the "RuhMix-mashup-<style>.mp3" filename.
-          ms.result.meta.style = (src === 'builtin') ? (BU.selectedStyle || 'auto') : 'song2';
+          ms.result.meta.style = m === 'mega' ? 'mega'
+            : (ms.mode2 === 'swap' && m === 'style2') ? 'swap'
+            : (m === 'builtin' ? (BU.selectedStyle || 'auto') : 'song2');
         } catch (e) {}
         setBuildUI(false);
-        var meta = $('mashup-meta');
-        if (meta) meta.textContent = formatMeta(m);
+        updateCreateState();
+        var metaEl = $('mashup-meta');
+        if (metaEl) metaEl.textContent = formatMeta(meta);
         var tag = $('mashup-engine-tag');
         if (tag) tag.textContent = '⚙️ ' + ms.result.engine;
         var r = $('mashup-result');
@@ -274,13 +414,16 @@ window.RM = window.RM || {};
   /* ================= W2: beat source + built-in beats + step indicator =========== */
 
   var BU = (RM.BeatsUI = RM.BeatsUI || {});
-  BU.beatSource = 'builtin';   // 'builtin' (default) | 'song2'
+  BU.beatSource = 'builtin';   // v23: 1-song mode always uses built-in beats
   BU.selectedStyle = null;     // RM.Beats style id (W1 module)
 
   var CONSENT_BUILTIN = 'Built-in original beat (copyright-free, synthesized in-app) • vocals auto-matched. No fake AI claims.';
-  var CONSENT_SONG2 = 'Smart DSP vocal isolation • tempo & key auto-matched. No fake AI claims.';
+  var CONSENT_CLASSIC = 'Smart DSP vocal isolation • tempo & key auto-matched. No fake AI claims.';
+  var CONSENT_SWAP = 'Vocals auto-separated (neural AI if configured, else Smart DSP) • vocals alternate between both songs • tempo & key auto-matched. No fake AI claims.';
+  var CONSENT_MEGA = 'Vocals auto-separated (neural AI if configured, else Smart DSP) • vocals rotate over an auto-matched built-in copyright-free beat. No fake AI claims.';
   var STEP2_BUILTIN = '🎹 Creating copyright-free beat…';
-  var STEP2_SONG2 = '🥁 Preparing Song 2 beat…';
+  var STEP2_SWAP = '🔄 Swapping vocals…';
+  var STEP2_MEGA = '🎹 Matching built-in beat…';
 
   function beatStyles() {
     try {
@@ -399,19 +542,12 @@ window.RM = window.RM || {};
     if (bw) bw.hidden = src !== 'builtin';
     if (sw) sw.hidden = src !== 'song2';
     var h = $('mashup-honest');
-    if (h) h.textContent = src === 'builtin' ? CONSENT_BUILTIN : CONSENT_SONG2;
+    if (h) h.textContent = src === 'builtin' ? CONSENT_BUILTIN : CONSENT_CLASSIC;
     var s2li = $('mstep-beat'), s2lb = s2li ? s2li.querySelector('.mstep-label') : null;
-    if (s2lb) s2lb.textContent = src === 'builtin' ? STEP2_BUILTIN : STEP2_SONG2;
-    // v21: source switch pe purana result card clear — warna Preview/Export
-    // purane (doosre flow ke) mashup pe chalta rehta. Sirf UI staleness thi.
-    try { stopPreview(); } catch (e) {}
-    ms.result = null;
-    var r = $('mashup-result');
-    if (r) r.hidden = true;
-    BU.resetSteps();
+    if (s2lb) s2lb.textContent = src === 'builtin' ? STEP2_BUILTIN : STEP2_SWAP;
   };
 
-  /* ---- 3-step indicator: W3's engine calls BU.onStep('vocals'|'beat'|'mix'|'done') ---- */
+  /* ---- 3-step indicator: the engines call BU.onStep('vocals'|'beat'|'mix'|'done') ---- */
 
   var STEP_ORDER = ['vocals', 'beat', 'mix'];
 
@@ -433,14 +569,87 @@ window.RM = window.RM || {};
     });
   };
 
+  /* ================= v23: mode UI (auto-derived) ================= */
+
+  // v23: switching the visible mode clears a stale result — otherwise
+  // Preview/Export would act on a mashup built from a different song set.
+  function clearStaleResult() {
+    try { stopPreview(); } catch (e) {}
+    ms.result = null;
+    var r = $('mashup-result');
+    if (r) r.hidden = true;
+    BU.resetSteps();
+  }
+
+  function updateModeUI() {
+    var m = mode();
+    var isBuiltin = m === 'builtin', isStyle2 = m === 'style2', isMega = m === 'mega';
+    var panel = $('mashup-beatsrc-panel'), beats = $('mashup-beats-wrap');
+    var styles = $('mashup-style-wrap'), mega = $('mashup-mega-note');
+    if (panel) panel.hidden = !isBuiltin;
+    if (beats) beats.hidden = !isBuiltin;
+    if (styles) styles.hidden = !isStyle2;
+    if (mega) mega.hidden = !isMega;
+    var h = $('mashup-honest');
+    if (h) h.textContent = isBuiltin ? CONSENT_BUILTIN
+      : isMega ? CONSENT_MEGA
+      : (ms.mode2 === 'swap' ? CONSENT_SWAP : CONSENT_CLASSIC);
+    var s2lb = (function () {
+      var li = $('mstep-beat');
+      return li ? li.querySelector('.mstep-label') : null;
+    })();
+    if (s2lb) s2lb.textContent = isBuiltin ? STEP2_BUILTIN : (isMega ? STEP2_MEGA : STEP2_SWAP);
+    updateCreateState();
+  }
+
+  // Min-song validation: Create is disabled with 0 songs; 2+-song modes
+  // (classic/swap/mega) additionally require ≥2 songs (defensive, since the
+  // mode auto-derives from the count).
+  function updateCreateState() {
+    var b = $('mashup-make'), hint = $('mashup-min2-hint');
+    if (!b) return;
+    var n = pickedCount();
+    var ok = n >= 1 && !ms.building;
+    if (ok && (mode() === 'style2' || mode() === 'mega') && n < 2) ok = false;
+    b.disabled = !ok;
+    if (hint) hint.hidden = ok;
+  }
+
+  function selectMode2(which) {
+    if (which !== 'classic' && which !== 'swap') return;
+    if (ms.mode2 === which) return;
+    ms.mode2 = which;
+    clearStaleResult();
+    var gc = $('mashup-style-classic'), gs = $('mashup-style-swap');
+    if (gc) gc.classList.toggle('sel', which === 'classic');
+    if (gs) gs.classList.toggle('sel', which === 'swap');
+    var h = $('mashup-honest');
+    if (h) h.textContent = which === 'swap' ? CONSENT_SWAP : CONSENT_CLASSIC;
+    var s2lb = (function () {
+      var li = $('mstep-beat');
+      return li ? li.querySelector('.mstep-label') : null;
+    })();
+    if (s2lb) s2lb.textContent = STEP2_SWAP;
+  }
+
   /* ================= wiring ================= */
 
   function wire() {
     if (ms._wired) return;
     ms._wired = true;
-    var p1 = $('mashup-pick1'), p2 = $('mashup-pick2');
-    if (p1) p1.addEventListener('click', function () { requestPick(1); });
-    if (p2) p2.addEventListener('click', function () { requestPick(2); });
+    // Slot rows are rendered dynamically — delegate pick/remove clicks.
+    var slotsWrap = $('mashup-slots');
+    if (slotsWrap) slotsWrap.addEventListener('click', function (e) {
+      var t = e.target;
+      while (t && t !== slotsWrap && !t.getAttribute) t = t.parentNode;
+      if (!t || t === slotsWrap) return;
+      var pk = t.getAttribute('data-pick');
+      var rm = t.getAttribute('data-remove');
+      if (pk) { requestPick(parseInt(pk, 10)); return; }
+      if (rm) { removeSlot(parseInt(rm, 10)); }
+    });
+    var add = $('mashup-add');
+    if (add) add.addEventListener('click', addSlot);
     var makeB = $('mashup-make');
     if (makeB) makeB.addEventListener('click', make);
     // v21: Cancel — cooperative: aborts the in-flight neural call and lets
@@ -457,13 +666,18 @@ window.RM = window.RM || {};
     if (playB) playB.addEventListener('click', togglePreview);
     var expB = $('mashup-export');
     if (expB) expB.addEventListener('click', doExport);
-    // W2: beat source segmented control + built-in beat cards.
+    // v23: 2-song style cards.
+    var gc = $('mashup-style-classic'), gs = $('mashup-style-swap');
+    if (gc) gc.addEventListener('click', function () { selectMode2('classic'); });
+    if (gs) gs.addEventListener('click', function () { selectMode2('swap'); });
+    // W2: beat source segmented control + built-in beat cards (1-song mode).
     var sb = $('mashup-src-builtin'), ss = $('mashup-src-song2');
     if (sb) sb.addEventListener('click', function () { BU.setBeatSource('builtin'); });
     if (ss) ss.addEventListener('click', function () { BU.setBeatSource('song2'); });
     BU.renderBeats();
-    BU.setBeatSource(BU.beatSource || 'builtin');
-    renderNames();
+    BU.setBeatSource('builtin');
+    renderSlots();
+    updateModeUI();
   }
 
   // Chain onto RM.app.onShow (same pattern as ux-flow.js / ai-stems.js):
@@ -492,7 +706,7 @@ window.RM = window.RM || {};
   // This file loads BEFORE app.js (script order) — poll until RM.app exists,
   // then install the onShow hook with delayed re-asserts (see wrapOnShow).
   function ready(attempts) {
-    if (RM.app && $('mashup-pick1')) {
+    if (RM.app && $('mashup-slots')) {
       wire();
       wrapOnShow();
       setTimeout(wrapOnShow, 600);
@@ -517,9 +731,12 @@ window.RM = window.RM || {};
     // W2/W3: 3-step progress receiver — the engine calls it with
     // 'vocals' | 'beat' | 'mix' | 'done'.
     onStep: function (s) { return BU.onStep(s); },
+    // v23: read-only view of the dynamic slots (1..8) for debugging/tests.
+    getSongs: function () { return pickedSongs().map(function (s) { return { name: s.name }; }); },
   };
   // pickTarget is a live accessor so app.js interception always sees the
   // current value, and onPicked clearing it internally stays in sync.
+  // v23: slots are 1..8 (was 1|2).
   Object.defineProperty(RM.mashupScreen, 'pickTarget', {
     get: function () { return ms.pickTarget; },
     set: function (v) { ms.pickTarget = v ? 1 * v : 0; },

@@ -54,6 +54,14 @@ RM.mashupStems = (function () {
   let activeCallCtrl = null;    // AbortController of the in-flight /call POST
   const NEURAL_CALL_TIMEOUT = 60 * 1000; // matches hf-stems CALL_TIMEOUT
 
+  // v23 neural quota honesty (session-only): the shared public HF Space has
+  // a daily ZeroGPU quota. Once a neural call fails with a quota signal,
+  // later separations in THIS session skip neural entirely and go straight
+  // to DSP (no wasted upload/wait). Never persisted — a fresh app load
+  // starts with quotaExhausted === false again.
+  let quotaExhausted = false;
+  let quotaToastShown = false;  // the honest toast shows exactly once per session
+
   // Per-song neural cache — keyed on the AudioBuffer object identity, so
   // the mashup's Song1-vocal and Song2-instrumental each separate once.
   // WeakMap: buffers are released when the song is unloaded.
@@ -271,6 +279,36 @@ RM.mashupStems = (function () {
   }
 
   /* ================= the provider ================= */
+  // v23: quota signal detector. Internal failures are already normalized
+  // to {kind:'quota'} for HTTP 429 on upload/SSE. Errors coming back from
+  // hf-stems internals (startCall/fetchStemBuffer) or raw HTTP failures
+  // may instead carry a status code or a free-text message, so we scan
+  // those too: 429 / quota / rate-limit / daily-limit / usage-limit /
+  // "too many requests". Anything else (500s, timeouts, offline) is NOT
+  // quota — it stays a one-off failure and neural is retried next time.
+  function isQuotaError(e) {
+    if (!e) return false;
+    if (e.kind === 'quota') return true;
+    let msg = '';
+    try {
+      msg = String((e && e.message) || (e && e.msg) || '');
+    } catch (x) {}
+    let st = '';
+    try {
+      st = String((e && e.status) == null ? '' : e.status);
+    } catch (x) {}
+    return /\b429\b|quota|daily[\s_-]?limit|rate[\s_-]?limit|too many requests|usage[\s_-]?exceeded|limit[\s_-]?exceeded|credits?[\s_-]?exhausted/i
+      .test(msg + ' ' + st);
+  }
+
+  // Defensive app toast (same pattern as mashup-export.js): never throws.
+  function appToast(msg) {
+    try {
+      const A = window.RM && RM.app;
+      if (A && typeof A.toast === 'function') A.toast(msg);
+    } catch (e) {}
+  }
+
   async function provider(audioBuffer, want, onProgress) {
     if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
       throw new Error('mashupStems: valid AudioBuffer required');
@@ -279,13 +317,24 @@ RM.mashupStems = (function () {
 
     // Neural engine: re-check config at call time so a removed Space
     // degrades gracefully instead of hard-failing mid-mashup.
-    if (engine === ENGINE_NEURAL && hfCfg() && hfCleanCall()) {
+    // v23: quotaExhausted skips neural entirely — no wasted upload/wait.
+    if (!quotaExhausted && engine === ENGINE_NEURAL && hfCfg() && hfCleanCall()) {
       try {
         const pair = await separateNeural(audioBuffer, onProgress);
         return { buffer: pair[w], tag: ENGINE_NEURAL };
       } catch (e) {
         // v21: user pressed Cancel — stop the build, don't silently DSP-fallback.
         if (userCancelFlag || (e && e.kind === 'cancelled')) throw { kind: 'cancelled' };
+        // v23: quota hit — remember for the rest of the session and tell
+        // the user ONCE, honestly. (A cancel above rethrows, so a quota
+        // check here can't misfire on a user cancel.)
+        if (isQuotaError(e)) {
+          quotaExhausted = true;
+          if (!quotaToastShown) {
+            quotaToastShown = true;
+            appToast(T('', 'Neural quota finished for today — using Smart DSP (still good!)'));
+          }
+        }
         // Runtime fallback — honest tag: DSP is never sold as neural.
         try {
           const dsp = await dspSeparate(audioBuffer, w, onProgress);
@@ -345,6 +394,7 @@ RM.mashupStems = (function () {
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
         api: { engineTag, describe, refresh, provider,
+               quotaExhausted: () => quotaExhausted === true,
                requestCancel: () => { userCancelFlag = true; },
                clearCancel: () => { userCancelFlag = false; },
                isCancelRequested: () => userCancelFlag === true },
@@ -359,6 +409,10 @@ RM.mashupStems = (function () {
     describe: describe,   // one-line honest description for the UI
     refresh: refresh,     // re-decide engine + re-register
     isRegistered: function () { return registered; },
+    // v23 neural quota honesty (session-only, W2 checks this for the mega
+    // mashup): true once a neural call failed with a quota signal; all
+    // later separations then skip neural and go straight to DSP.
+    quotaExhausted: function () { return quotaExhausted === true; },
     // v21 cooperative cancel (mashup UI Cancel button):
     requestCancel: function () {
       userCancelFlag = true;
