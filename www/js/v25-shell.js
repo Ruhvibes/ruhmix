@@ -35,8 +35,9 @@ RM.v25shell = (function () {
     { id: 'settings', label: 'Settings', icon: '⚙️', screen: 'settings' },
   ];
   // screen -> tab reverse map for active-tab highlight.
-  // 'mashup' (the old auto-mashup screen, still reachable from Home/More)
-  // also highlights the Create tab.
+  // 'mashup' (the old auto-mashup screen) keeps its legacy mapping for any
+  // residual deep link — v29 P2-8: no UI routes there anymore; every
+  // create entry lands on 'v25create'.
   const SCREEN_TO_TAB = { home: 'home', projects: 'projects', mashup: 'create', v25create: 'create', studio: 'studio', settings: 'settings' };
 
   let navEl = null;
@@ -114,12 +115,23 @@ RM.v25shell = (function () {
   }
 
   // Real auto-mashup flow (HONESTY: not a dead button).
-  // w26: the OLD mashup screen (screen-mashup) keeps this entry point —
-  // the Create tab now opens the new W2 Create screen instead.
+  // v29 P2-8: unified create route — the old screen-mashup entry point now
+  // lands on the new v25 Create screen (Classic/Swap/Mega modes cover the
+  // old flow). The old screen's files stay for the de-bloat pass.
   function quickAiMashup() {
+    go('create');
+  }
+
+  // v29 P2-8: every create destination goes through here. 'v25create' uses
+  // the module's show() so its self-built section exists before navigation.
+  function showScreen(scr) {
     const a = A();
     if (!a) return;
-    a.show('mashup');
+    if (scr === 'v25create' && RM.v25create && typeof RM.v25create.show === 'function') {
+      RM.v25create.show();
+      return;
+    }
+    a.show(scr);
   }
 
   function buildCard(id, cls, icon, title, sub) {
@@ -193,8 +205,8 @@ RM.v25shell = (function () {
     const cCreate = buildCard('v25-c-create', 'v25-card-wide v25-card-create', '＋', 'Create New Mashup', 'Vocals × Beat — AI auto-mix');
     cCreate.addEventListener('click', () => go('create'));
 
-    const cQuick = buildCard('v25-c-quick', 'v25-card-wide v25-card-ai', '⚡', 'Quick AI Mashup', 'Auto BPM • auto key • one tap');
-    cQuick.addEventListener('click', quickAiMashup);
+    // v29 P2-8: the duplicate "Quick AI Mashup" card is gone — one create
+    // route (the card above). quickAiMashup() redirects there too.
 
     const cProj = buildCard('v25-c-projects', '', '📁', 'My Projects', 'Saved mashups & edits');
     cProj.addEventListener('click', () => go('projects'));
@@ -225,7 +237,6 @@ RM.v25shell = (function () {
     cMore.addEventListener('click', () => { if (a) a.show('more'); });
 
     grid.appendChild(cCreate);
-    grid.appendChild(cQuick);
     grid.appendChild(cProj);
     grid.appendChild(cRecent);
     grid.appendChild(cImport);
@@ -249,7 +260,8 @@ RM.v25shell = (function () {
     { screen: 'editor',    via: 'more grid' },
     { screen: 'remix',     via: 'more grid' },
     { screen: 'slowed',    via: 'more grid' },
-    { screen: 'mashup',    via: 'more grid' },  // old auto-mashup, kept reachable
+    // v29 P2-8: the old 'mashup' screen is no longer a nav destination —
+    // every create entry routes to 'v25create' (files stay for de-bloat).
     { screen: 'stems',     via: 'more grid' },
     { screen: 'aistem',    via: 'more grid' },
     { screen: 'mixer',     via: 'more grid' },
@@ -274,8 +286,11 @@ RM.v25shell = (function () {
 
   // Destinations the old #bottomnav reached that the v25 nav + More grid
   // did not — added here so no screen is orphaned when #bottomnav retires.
+  // v29 P2-8: "Classic Mashup" no longer opens the old screen-mashup —
+  // it routes to the unified v25 Create screen (whose Classic mode runs
+  // the same 2-song engine).
   const MORE_EXTRA = [
-    { screen: 'mashup', icon: '🎤', label: 'Classic Mashup' },
+    { screen: 'v25create', icon: '🎤', label: 'Classic Mashup' },
     { screen: 'editor', icon: '🎚️', label: 'Editor' },
     { screen: 'remix',  icon: '🎧', label: 'Remix FX' },
     { screen: 'mixer',  icon: '🎛️', label: 'Mixer' },
@@ -284,7 +299,6 @@ RM.v25shell = (function () {
   function augmentMore() {
     const grid = $('more-grid');
     if (!grid) return false;
-    const a = A();
     MORE_EXTRA.forEach((m) => {
       if (grid.querySelector('[data-go="' + m.screen + '"]')) return; // already added
       const b = document.createElement('button');
@@ -298,7 +312,7 @@ RM.v25shell = (function () {
       lb.textContent = m.label;
       b.appendChild(ic);
       b.appendChild(lb);
-      b.addEventListener('click', () => { if (a) a.show(m.screen); });
+      b.addEventListener('click', () => showScreen(m.screen));
       grid.appendChild(b);
     });
     return true;

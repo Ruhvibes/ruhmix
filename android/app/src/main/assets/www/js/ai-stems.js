@@ -419,6 +419,7 @@ RM.aiStems = (function () {
       A.toast(T('', 'Large file — upload may take a while'));
     }
     st.running = true;
+    badgeSep(true);
     const xhr = new XMLHttpRequest();
     st.xhr = xhr;
     xhr.open('POST', cfg.url + '/separate', true);
@@ -451,7 +452,7 @@ RM.aiStems = (function () {
       st.xhr = null;
       fail(T('', 'The server took too long (timeout). Try a shorter song or try again.'), 'connect');
     };
-    xhr.onabort = () => { st.xhr = null; st.running = false; hideProgress(); };
+    xhr.onabort = () => { st.xhr = null; st.running = false; hideProgress(); badgeSep(false); };
     const fd = new FormData();
     fd.append('file', blob, safeName(st.song.label) + '.wav');
     // Upload khatm hote hi server-side processing shuru — animated status.
@@ -533,6 +534,7 @@ RM.aiStems = (function () {
   function finish(stems) {
     st.running = false;
     st.job = null;
+    badgeSep(false);
     st.results = stems;
     // Make AI stems available wherever DSP stems are (mixer load menu, etc.)
     stems.forEach((s) => RM.stems.results.push({ name: s.name, buffer: s.buffer, engine: 'ai' }));
@@ -598,6 +600,7 @@ RM.aiStems = (function () {
   function fail(msg, kind) {
     st.running = false;
     st.job = null;
+    badgeSep(false);
     stopProcessingAnim();
     hideProgress();
     const box = $('ais-fail');
@@ -676,9 +679,19 @@ RM.aiStems = (function () {
     const b = $('ais-progress');
     if (b) { b.style.display = 'none'; b.innerHTML = ''; }
   }
+  // J4-5: back se screen chhodne par bhi upload/process background me chalta
+  // hai — tab persistent badge dikhao (tap = wapas AI screen par).
+  function badgeSep(on) {
+    try {
+      if (!A) return;
+      if (on) { if (A.showSepBadge) A.showSepBadge(T('', '🧠 AI separation running…'), 'aistem'); }
+      else if (A.hideSepBadge) A.hideSepBadge('aistem');
+    } catch (e) {}
+  }
   function abortAll(silent) {
     st.running = false;
     st.job = null;
+    badgeSep(false);
     adGateToken++; // gate me atka ad-callback ab kuch nahi karega
     adGating = false; // gate cancel — dobara start ho sake
     if (st.xhr) { try { st.xhr.abort(); } catch (e) {} st.xhr = null; }
@@ -960,7 +973,10 @@ RM.aiStems = (function () {
       const prevOnShow = A.onShow;
       A.onShow = (name) => {
         try { if (typeof prevOnShow === 'function') prevOnShow(name); } catch (e) {}
-        if (name === 'settings') refreshSettingsInputs();
+        // J4-2: AI screen pe backend switch karke Settings kholo to picker ka
+        // highlight bhi current backend dikhaye (sirf fields refresh karne se
+        // highlight stale rehta tha).
+        if (name === 'settings') { renderSettingsBackendPicker(); refreshSettingsInputs(); }
       };
     } catch (e) {}
   }

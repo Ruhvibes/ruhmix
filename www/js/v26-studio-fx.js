@@ -345,6 +345,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     var cur = fx.cur();
     if (cur && cur !== lastBuf) {
       lastBuf = cur;
+      api._snapInfo = null; // v29 J3 P2-6: buffer swapped under us — drop the note
       resetAutomation();
       rebuildJunctions();
       updateUndoUI();
@@ -467,6 +468,7 @@ __rmRoot.RM = __rmRoot.RM || {};
   }
 
   function resetAutomation() {
+    api._snapInfo = null; // v29 J3 P2-6: new audio — the old snap note is stale
     var fx = FX();
     var dur = fx && fx.cur() ? fx.cur().duration : 60;
     api.autoPoints = [{ t: 0, g: 1 }, { t: dur, g: 1 }];
@@ -560,8 +562,12 @@ __rmRoot.RM = __rmRoot.RM || {};
       acc += secs[i].lenSec;
       var op = document.createElement('option');
       op.value = String(i);
+      // v29 J3 P2-6: when the last transition snapped to a downbeat, the
+      // option names the ACTUAL applied time so the UI agrees with the toast.
+      var snapNote = (api._snapInfo && api._snapInfo.ji === i)
+        ? ' · downbeat ' + fmtTime(api._snapInfo.time) : '';
       op.textContent = '#' + (i + 1) + ' ' + fmtTime(acc) + ' — after \u201C' +
-        secs[i].name + '\u201D \u2192 \u201C' + secs[i + 1].name + '\u201D';
+        secs[i].name + '\u201D \u2192 \u201C' + secs[i + 1].name + '\u201D' + snapNote;
       sel.appendChild(op);
     }
   }
@@ -685,6 +691,10 @@ __rmRoot.RM = __rmRoot.RM || {};
     if (fx.busy()) { say('Studio is busy \u2014 wait for the current job'); return; }
     var pts = api.autoPoints.map(function (p) { return { t: p.t, g: p.g }; });
     if (!pts.length) { say('Add at least one point on the lane first'); return; }
+    // v29 J3 P2-2: idempotent Apply — a neutral (unity) lane is a no-op, so
+    // re-pressing Apply after a bake cannot double-bake the curve.
+    var neutral = pts.every(function (pt) { return Math.abs(pt.g - 1) < 1e-6; });
+    if (neutral) { say('Automation lane is neutral — nothing to apply'); return; }
     var pre = snapshot('Volume automation');
     setProg('Applying volume automation (Smart DSP)\u2026', 0.5);
     var nb;
@@ -695,9 +705,17 @@ __rmRoot.RM = __rmRoot.RM || {};
       say('Automation failed: ' + (e && e.message || e));
       return;
     }
-    var post = { label: 'Volume automation', buf: nb, bpm: pre.bpm, lens: pre.lens, auto: pre.auto };
     fx.apply(nb, {});
     lastBuf = nb;
+    // v29 J3 P2-2: reset the lane after baking (one-apply semantics, same as
+    // pitch). Re-pressing Apply is then a neutral no-op — no double-bake.
+    // The undo entry's post-state carries the neutral lane, so redo never
+    // restores stale points onto already-baked audio.
+    resetAutomation();
+    var post = {
+      label: 'Volume automation', buf: nb, bpm: pre.bpm, lens: pre.lens,
+      auto: api.autoPoints.map(function (p) { return { t: p.t, g: p.g }; }),
+    };
     pushUndo('Volume automation',
       function () { restore(pre); }, function () { restore(post); });
     setProg('', 1);
@@ -724,6 +742,10 @@ __rmRoot.RM = __rmRoot.RM || {};
     // through untouched — a wrong snap is worse than no snap.
     var proceed = function (snap) {
       if (snap && snap.snapped) at = snap.time;
+      // v29 J3 P2-6: remember where the transition REALLY landed so the
+      // junction label (rebuildJunctions) agrees with the toast, not the
+      // old boundary time.
+      api._snapInfo = (snap && snap.snapped) ? { ji: ji, time: snap.time } : null;
       finishTransitionAt(fx, ji, type, bars, at, snap);
     };
     try {
@@ -904,6 +926,8 @@ __rmRoot.RM = __rmRoot.RM || {};
       interpGain: interpGain,
       automationToSections: automationToSections,
       renderAutomation: renderAutomation,
+      applyAutomationUI: applyAutomationUI, // v29 J3 P2-2: idempotency test surface
+      rebuildJunctions: rebuildJunctions, // v29 J3 P2-6: label test surface
       applyTransitionAt: applyTransitionAt,
       isCrossfadeFamily: isCrossfadeFamily,
       listTransitionTypes: listTransitionTypes,

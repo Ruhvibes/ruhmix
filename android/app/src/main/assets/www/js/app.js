@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 28 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 29 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -159,6 +159,7 @@ RM.app = (function () {
     if (!fromPop && prev !== name) pushNavState(name);
     if (name === 'editor' && state.waveView) state.waveView.invalidate();
     try { if (RM.app.onShow) RM.app.onShow(name); } catch (e) {}
+    refreshSepBadge(); // J4-5: screen badalne par badge visibility sync karo
   }
 
   function pushNavState(name) {
@@ -196,6 +197,38 @@ RM.app = (function () {
       return false;
     }
     return true;
+  }
+
+  /* ============ background separation indicator (J4-5) ============
+     Separation (AI/DSP) chal rahi ho aur user back se screen chhod de to
+     kaam background me chalta rehta hai — ab ek persistent mini-badge
+     dikhta hai (tap = wapas us screen par, jahan Cancel bhi hai). Run ke
+     khatm/cancel hone par badge hat jata hai. */
+  let sepBadge = null; // {label, screen}
+  function refreshSepBadge() {
+    let el = $('sep-badge');
+    const showIt = !!(sepBadge && state.screen !== sepBadge.screen);
+    if (!showIt) { if (el) el.style.display = 'none'; return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'sep-badge';
+      el.innerHTML = '<span class="sb-dot"></span><span class="sb-label"></span><span class="sb-go">View ›</span>';
+      el.addEventListener('click', () => { try { if (sepBadge) show(sepBadge.screen); } catch (e) {} });
+      document.body.appendChild(el);
+    }
+    const lb = el.querySelector('.sb-label');
+    if (lb) lb.textContent = sepBadge.label;
+    el.style.display = '';
+  }
+  function showSepBadge(label, screen) {
+    sepBadge = { label: String(label == null ? '' : label), screen };
+    refreshSepBadge();
+  }
+  function hideSepBadge(screen) {
+    // Kisi aur backend ka run chal raha ho to uska badge mat hatao.
+    if (screen && sepBadge && sepBadge.screen !== screen) return;
+    sepBadge = null;
+    refreshSepBadge();
   }
 
   /* ================= studio audio path ================= */
@@ -618,6 +651,11 @@ RM.app = (function () {
     });
     if (!okList.length) {
       if (!failedList.length) toast('Nothing selected');
+      // v29 F1: cancel/empty pick — armed mashup bridge disarm karo (har exit path).
+      if (music.mashupPick) {
+        music.mashupPick = false; music.directLoad = false; music.directBuf = null;
+        notifyPickCancelled();
+      }
       return;
     }
     toast(('Loading… (') + okList.length + ')');
@@ -654,12 +692,26 @@ RM.app = (function () {
     chain.then(() => {
       musicPendingClear();
       const d = music.directBuf;
-      music.directLoad = false; music.directBuf = null;
+      const wasMashup = music.mashupPick;
+      music.directLoad = false; music.directBuf = null; music.mashupPick = false;
       if (d && d.buffer) {
         // Mashup picker: pending pick -> buffer lands in the mashup slot.
         if (mashupIntercept(d.buffer, d.name)) return;
+        if (wasMashup) {
+          // v29 F1: intercept miss (bridge gayab) — user ko kahin yank mat karo;
+          // Create screen pe raho, bridge disarm.
+          notifyPickCancelled();
+          toast('Pick failed — try again');
+          return;
+        }
         // Ultra-simple: song tap -> seedha editor (koi "Use" button nahi)
         loadAudioBuffer(d.buffer, d.name, { name: d.name, size: 0, type: '', lastModified: Date.now() });
+        return;
+      }
+      if (wasMashup) {
+        // v29 F1: decode fail — classified dialog decodeAndAdd me dikh chuka hai;
+        // Create screen pe raho (import pe yank nahi), bridge disarm.
+        notifyPickCancelled();
         return;
       }
       show('import');
@@ -720,7 +772,7 @@ RM.app = (function () {
        {status:'ok', tracks:[{uri,title,artist,durationMs|duration}]} |
        {status:'permission-denied'} | 'permission-denied' | {status:'error', message}
      Bridge na ho to Music tab graceful hide hota hai. */
-  const music = { state: 'idle', tracks: [], query: '', pending: null, error: '', directLoad: false, directBuf: null };
+  const music = { state: 'idle', tracks: [], query: '', pending: null, error: '', directLoad: false, directBuf: null, mashupPick: false };
   function initImportTabs() {
     const tabF = $('tab-files'), tabM = $('tab-music');
     if (!tabF || !tabM) return;
@@ -866,6 +918,15 @@ RM.app = (function () {
     music.pending = null;
     if (music.state === 'ok') renderMusicList();
   }
+  // v29 F1: Create screen ka direct pick. v25-create.requestPick() ye arm karke
+  // phir pickAudio() chalata hai — decode hote hi directBuf -> mashupIntercept
+  // -> bridge -> onPicked, aur user Create screen pe hi rehta hai (import pe yank nahi).
+  // Purana Music-tab flow (importMusicTrack) isko chhoota nahi — uska directLoad alag chalta hai.
+  function armMashupPick() { music.mashupPick = true; music.directLoad = true; music.directBuf = null; }
+  function disarmMashupPick() { music.mashupPick = false; }
+  let pickCancelHook = null;
+  function setPickCancelHook(fn) { pickCancelHook = (typeof fn === 'function') ? fn : null; }
+  function notifyPickCancelled() { try { if (pickCancelHook) pickCancelHook(); } catch (e) {} }
 
   /* ================= voice recorder (bridge) ================= */
   const rec = { recording: false, pending: false, startT: 0, timer: 0, path: null, fallback: null };
@@ -1012,8 +1073,10 @@ RM.app = (function () {
     APP, state, $, toast, dialog, cleanErrMsg, t, setLang, setTheme, loadTheme,
     show, needAudio, ensureStudio, setWidth, widthMatrix, applyFxToChain, defaultFx,
     onPopState, pushNavState,
+    showSepBadge, hideSepBadge,
     newProject, loadAudioBuffer, refreshView, pushOp, undoOp, redoOp, stopAll,
     pickAudio, handleAudioPicked, handleMusicListed, initImportTabs, switchImportTab, decodeAndAdd, fetchFileUrl, renderImportList, fmtTime, fmtSize, escapeHtml, tryDecodeStages,
+    armMashupPick, disarmMashupPick, setPickCancelHook,
     startRecording, stopRecording, recActive, handleRecordingStarted, handleRecordingStopped,
     handleRecordingError, updateRecUI,
     checkUpdate,
@@ -1724,6 +1787,7 @@ Object.assign(RM.app, (function () {
     if (!A.needAudio()) return;
     if (stemBusy) { A.toast('Separation is running — please wait'); return; }
     stemBusy = true;
+    A.showSepBadge('✂️ DSP separation running…', 'stems'); // J4-5
     const runBtns = Array.from(document.querySelectorAll('#stems-grid [data-run]'));
     runBtns.forEach((b) => { b.disabled = true; });
     const status = $('stems-status');
@@ -1734,15 +1798,25 @@ Object.assign(RM.app, (function () {
     const eng = RM.stems.ENGINES.find((e) => e.id === id);
     status.innerHTML = `<div class="load-row"><span class="spinner" aria-hidden="true"></span><span id="stems-plabel">${A.escapeHtml(eng.name)}…</span></div><div class="progress"><div class="pbar" id="stems-pbar"></div></div>`;
     const t0 = Date.now();
-    guarded('Stem Separator', () => RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
-      const bar = $('stems-pbar'), lb = $('stems-plabel');
-      if (bar) bar.style.width = Math.round(p * 100) + '%';
-      if (lb) lb.textContent = (label || eng.name) + ' ' + Math.round(p * 100) + '%';
-    })).then((r) => {
+    let dspFailMsg = ''; // J4-6: generic "Failed" nahi — actual reason dikhao
+    guarded('Stem Separator', () => {
+      dspFailMsg = '';
+      return RM.stems.run(id, A.state.viewBuffer || A.state.buffer, (p, label) => {
+        const bar = $('stems-pbar'), lb = $('stems-plabel');
+        if (bar) bar.style.width = Math.round(p * 100) + '%';
+        if (lb) lb.textContent = (label || eng.name) + ' ' + Math.round(p * 100) + '%';
+      }).catch((e) => {
+        // friendlyErr wahi plain-language mapping hai jo retry dialog me
+        // dikhta hai (decode/memory/network) — use status panel me persist karo.
+        dspFailMsg = friendlyErr(e) || 'Separation was cancelled.';
+        throw e;
+      });
+    }).then((r) => {
       stemBusy = false;
+      A.hideSepBadge('stems'); // J4-5
       runBtns.forEach((b) => { b.disabled = false; });
       if (!r.ok) {
-        if (!r.cancelled) status.innerHTML = `<div class="err">${'Failed'}</div>`;
+        status.innerHTML = `<div class="err">⚠ ${A.escapeHtml(dspFailMsg || 'Separation failed. Please try again.')}</div>`;
         return;
       }
       const stems = r.result;
@@ -2560,12 +2634,6 @@ Object.assign(RM.app, (function () {
      Honest limit: audio BYTES are never stored, so Continue / Export-again
      reuse the in-session mashup result when it's still in memory; otherwise
      they say so plainly instead of crashing or faking it. */
-  function isMashupRow(p) {
-    try {
-      return !!(RM.v25projects && typeof RM.v25projects.isMashup === 'function'
-        && RM.v25projects.isMashup(p));
-    } catch (e) { return false; }
-  }
   function mashupRowMeta(s) {
     const bits = [];
     if (s.songCount) bits.push(s.songCount + (s.songCount === 1 ? ' song' : ' songs'));
@@ -2605,6 +2673,23 @@ Object.assign(RM.app, (function () {
         if (!ok) return;
         const name = (($('dlg-name') && $('dlg-name').value) || '').trim() || p.name;
         if (RM.v25projects.rename(p.id, name)) {
+          A.toast('Project renamed ✓');
+          renderProjects(); renderHomeRecent();
+        } else {
+          A.toast('Rename failed — project not found');
+        }
+      });
+  }
+  // J4-3: regular (non-mashup) editor projects ke liye Rename — RM.proj.rename
+  // sirf naam badalta hai (live editor state leak nahi hota).
+  function renameRegularProject(p) {
+    A.dialog('Rename project',
+      `<input id="dlg-name" class="textin" value="${A.escapeHtml(p.name)}" maxlength="60" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">`,
+      'Rename', 'Cancel').then((ok) => {
+        if (!ok) return;
+        const name = (($('dlg-name') && $('dlg-name').value) || '').trim() || p.name;
+        if (RM.proj.rename(p.id, name)) {
+          try { if (A.state.project && A.state.project.id === p.id) A.state.project.name = name; } catch (e) {}
           A.toast('Project renamed ✓');
           renderProjects(); renderHomeRecent();
         } else {
@@ -2652,7 +2737,7 @@ Object.assign(RM.app, (function () {
     if (!had) {
       A.dialog('Audio unavailable',
         `<p>Audio for <b>${A.escapeHtml(got.project.name)}</b> is not stored on the device, so it can't be re-exported. Rebuild the mashup on the Create screen first.</p>`,
-        'Go to Create', 'Cancel').then((ok) => { if (ok) A.show('mashup'); });
+        'Go to Create', 'Cancel').then((ok) => { if (ok) A.show('v25create'); }); // v29 P2-8: unified Create screen
     }
   }
   function renderProjects() {
@@ -2678,10 +2763,14 @@ Object.assign(RM.app, (function () {
         <div class="ii-main">
           <div class="ii-name">${A.escapeHtml(p.name)}</div>
           <div class="ii-meta">${A.escapeHtml((p.audioRef && p.audioRef.name) || ('No audio'))} • ${p.ops.length} edits • ${dt}</div>
+          <div class="btn-row" style="margin:6px 0 0">
+            <button class="btn small" data-a="rename">✏️ Rename</button>
+          </div>
         </div>
         <button class="btn small" data-a="open">${'Open'}</button>
         <button class="btn small ghost" data-a="del">✕</button>`;
         d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
+        d.querySelector('[data-a="rename"]').addEventListener('click', () => renameRegularProject(p));
         d.querySelector('[data-a="del"]').addEventListener('click', () => {
           A.dialog('Delete?', `<p>${A.escapeHtml(p.name)}</p>`, 'Delete', 'Cancel')
             .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
@@ -2760,8 +2849,19 @@ Object.assign(RM.app, (function () {
     try {
       if (RM.cleanup && RM.cleanup.cleanupTemp) RM.cleanup.cleanupTemp({ reason: 'manual-clear', includeImports: true });
     } catch (e) {}
+    // J4-4: sirf TEMPORARY data saaf karo — user settings (theme, language,
+    // export defaults, FX presets, copyright ack), crash-recovery flag aur
+    // unsaved autosave chhodo. Pehle prefix-based blanket wipe theme reset
+    // kar deta tha aur unsaved work ka autosave silently uda deta tha.
+    const KEEP_KEYS = {
+      'ruhmix.projects.v1': 1, 'ruhmix.projects': 1,
+      'ruhmix.autosave.v1': 1, 'ruhmix.cleanExit.v1': 1,
+      'ruhmix.theme': 1, 'ruhmix.lang': 1, 'ruhmix.exportDefaults': 1,
+      'ruhmix.fxpresets': 1, 'ruhmix.masterApplyExport': 1,
+      'ruhmix.v25.copyrightAck.v1': 1,
+    };
     try {
-      Object.keys(localStorage).filter((k) => k.indexOf('ruhmix.') === 0 && k !== 'ruhmix.projects.v1').forEach((k) => localStorage.removeItem(k));
+      Object.keys(localStorage).filter((k) => k.indexOf('ruhmix.') === 0 && !KEEP_KEYS[k]).forEach((k) => localStorage.removeItem(k));
     } catch (e) {}
     RM.stems.clear(); // stem results + 4-role pack
     RM.remix.stemPipeline.stopPreview();
@@ -2797,7 +2897,7 @@ Object.assign(RM.app, (function () {
     const privClear = $('set-privacy-clear');
     if (privClear) privClear.addEventListener('click', () => {
       A.dialog('Clear temporary files?',
-        `<p>${'Stem results, stem-mix preview, peaks cache and temporary app data will be removed. Saved projects stay safe.'}</p>`,
+        `<p>${'Stem results, stem-mix preview, peaks cache and temporary app data will be removed. Saved projects, your settings and unsaved work (autosave) stay safe.'}</p>`,
         'Clear', 'Cancel').then((ok) => {
           if (!ok) return;
           clearTempData();
@@ -3018,8 +3118,9 @@ Object.assign(RM.app, (function () {
       A.show('export');
     });
     // Auto Mashup home card (Worker 3): direct nav, no audio required.
+    // v29 P2-8: unified create route — lands on the v25 Create screen now.
     const mashBtn = $('home-mashup');
-    if (mashBtn) mashBtn.addEventListener('click', () => A.show('mashup'));
+    if (mashBtn) mashBtn.addEventListener('click', () => A.show('v25create'));
     $('home-search').addEventListener('input', (e) => {
       const q = e.target.value.trim().toLowerCase();
       document.querySelectorAll('#cdx-fxgrid .cdx-fxcard, #cdx-protools .cdx-procard').forEach((c) => {

@@ -199,6 +199,7 @@ RM.stemDeck = (function () {
       const c = {
         stem: s, vol: null, pan: null, gate: null, src: null,
         playing: false, mute: false, solo: false,
+        volV: 1, panV: 0, // J4-1: deck mixer state, baked into exports
         playBtn: card.querySelector('.sc-play'),
       };
       c.vol = ctx.createGain(); c.vol.gain.value = 1;
@@ -231,6 +232,7 @@ RM.stemDeck = (function () {
       const volV = card.querySelector('.sc-volv');
       volIn.addEventListener('input', () => {
         const v = (+volIn.value) / 100;
+        c.volV = v; // J4-1: export me bake hota hai
         volV.textContent = volIn.value + '%';
         try { c.vol.gain.setTargetAtTime(v, ctx.currentTime, 0.02); } catch (e) {}
       });
@@ -238,16 +240,40 @@ RM.stemDeck = (function () {
       const panV = card.querySelector('.sc-panv');
       panIn.addEventListener('input', () => {
         const v = (+panIn.value) / 100;
+        c.panV = v; // J4-1: export me bake hota hai
         panV.textContent = v === 0 ? 'C' : (v < 0 ? 'L' + Math.round(-v * 100) : 'R' + Math.round(v * 100));
         if (c.pan) { try { c.pan.pan.setTargetAtTime(v, ctx.currentTime, 0.02); } catch (e) {} }
       });
-      card.querySelector('.sc-exp').addEventListener('click', () => {
+      const expBtn = card.querySelector('.sc-exp');
+      expBtn.addEventListener('click', async () => {
+        // J4-1: export deck mixer state (Vol/Pan, + Mute/Solo gate) bake karke
+        // karta hai — pehle raw buffer silently export hota tha.
         try {
           const A = window.RM && RM.app;
           if (!A) return;
-          A.state.exportSource = { kind: 'buffer', buffer: s.buffer, name: s.name || m.label };
-          A.show('export');
-          if (A.refreshExportSource) A.refreshExportSource();
+          const anySolo = deckAnySolo(deck);
+          if (!cardAudible(c, anySolo)) {
+            const go = await A.dialog('Export muted stem?',
+              `<p><b>${esc(s.name || m.label)}</b> is muted in the deck` +
+              (c.mute ? '' : ' (another stem is soloed)') +
+              `, so the export would be silent.</p><p>Unmute it to export with sound, or continue to export silence.</p>`,
+              'Export anyway', 'Cancel');
+            if (!go) return;
+          }
+          expBtn.disabled = true;
+          const prevTxt = expBtn.textContent;
+          expBtn.textContent = '…';
+          try {
+            const r = await renderDeckMix([c], anySolo);
+            A.state.exportSource = { kind: 'buffer', buffer: r.buffer, name: s.name || m.label };
+            A.show('export');
+            if (A.refreshExportSource) A.refreshExportSource();
+          } catch (e) {
+            try { A.toast('Could not prepare the stem for export'); } catch (e2) {}
+          } finally {
+            expBtn.disabled = false;
+            expBtn.textContent = prevTxt;
+          }
         } catch (e) {}
       });
       deck.cards.push(c);
@@ -260,7 +286,7 @@ RM.stemDeck = (function () {
       const instBox = document.createElement('div');
       instBox.className = 'panel deck-inst';
       instBox.innerHTML = `
-        <div class="deck-inst-head">🎸 <b>Full Instrumental</b> <span class="muted small">— everything except vocals, one tap</span></div>
+        <div class="deck-inst-head">🎸 <b>Full Instrumental</b> <span class="muted small">— everything except vocals, with your deck Vol/Pan/Mute settings</span></div>
         <div class="btn-row">
           <button class="btn primary" data-a="make">🎸 Make Instrumental</button>
         </div>
@@ -285,9 +311,16 @@ RM.stemDeck = (function () {
         mkBtn.disabled = true;
         mkBtn.textContent = 'Rendering…';
         try {
-          instBuf = await renderInstrumental(nonVocal.map((c) => c.stem));
-          outBox.style.display = '';
-          stopInst();
+          // J4-1: har non-vocal card ka Vol/Pan/Mute/Solo bake karo — pehle
+          // raw buffers unity pe mix hote the (deck settings silent ignore).
+          const r = await renderDeckMix(nonVocal, deckAnySolo(deck));
+          if (!r.audible) {
+            try { if (window.RM && RM.app) RM.app.toast('All non-vocal stems are muted in the deck — nothing to render'); } catch (e2) {}
+          } else {
+            instBuf = r.buffer;
+            outBox.style.display = '';
+            stopInst();
+          }
         } catch (e) {
           try { if (window.RM && RM.app) RM.app.toast('Could not render the instrumental'); } catch (e2) {}
         }
@@ -340,6 +373,47 @@ RM.stemDeck = (function () {
     decks.slice().forEach((d) => { if (d !== deck) { try { d.stop(); } catch (e) {} } });
   }
 
+  /* J4-1: deck mixer state (Vol/Pan/Mute/Solo) offline bake karke render karo.
+     cardAudible live preview ke refreshGates() wali hi solo/mute logic use
+     karta hai, taaki export me wahi sunai de jo deck me sunai de raha tha. */
+  function deckAnySolo(deck) {
+    try { return (deck.cards || []).some((x) => x.solo); } catch (e) { return false; }
+  }
+  function cardAudible(c, anySolo) {
+    return !c.mute && (!anySolo || c.solo);
+  }
+  async function renderDeckMix(cards, anySolo) {
+    const OC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const list = (cards || []).filter((c) => c && c.stem && c.stem.buffer);
+    if (!list.length) throw new Error('no stems');
+    const bufs = list.map((c) => c.stem.buffer);
+    const sr = bufs[0].sampleRate;
+    const len = Math.max.apply(null, bufs.map((b) => b.length));
+    const oc = new OC(2, len, sr);
+    const out = oc.createGain();
+    // Headroom: N stems summed can clip — scale by 1/sqrt(N).
+    out.gain.value = 1 / Math.sqrt(bufs.length);
+    out.connect(oc.destination);
+    let audible = 0;
+    list.forEach((c) => {
+      const vol = (c.volV == null ? 1 : c.volV);
+      const pan = Math.max(-1, Math.min(1, (c.panV == null ? 0 : c.panV)));
+      const on = cardAudible(c, !!anySolo) && vol > 0;
+      if (on) audible++;
+      const g = oc.createGain();
+      g.gain.value = on ? vol : 0;
+      const src = oc.createBufferSource();
+      src.buffer = c.stem.buffer;
+      src.connect(g);
+      const p = oc.createStereoPanner ? oc.createStereoPanner() : null;
+      if (p) { p.pan.value = pan; g.connect(p); p.connect(out); }
+      else g.connect(out);
+      src.start(0);
+    });
+    const buffer = await oc.startRendering();
+    return { buffer, audible };
+  }
+
   /* Mix non-vocal stems at unity into one stereo buffer (offline). */
   async function renderInstrumental(stems) {
     const OC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
@@ -364,7 +438,7 @@ RM.stemDeck = (function () {
   // Node unit tests (browser me harmless).
   try {
     if (typeof module !== 'undefined' && module.exports) {
-      module.exports = { api: { render, stopAllDecks }, internals: { metaFor, renderInstrumental } };
+      module.exports = { api: { render, stopAllDecks }, internals: { metaFor, renderInstrumental, renderDeckMix, cardAudible, deckAnySolo } };
     }
   } catch (e) {}
 

@@ -513,7 +513,62 @@ window.RM = window.RM || {};
   function refreshTarget() {
     if (typeof document === 'undefined') return;
     var el = document.getElementById('v26v-target');
-    if (el) el.textContent = detectTarget().why;
+    if (!el) return; // panel not in the DOM — nothing to refresh
+    el.textContent = detectTarget().why;
+  }
+
+  /* ---- target-label poll: lifecycle-managed (v29 J3 P2-4).
+     The old setInterval(refreshTarget, 2000) ran forever from first inject,
+     even when the Studio screen was never opened. Now the timer arms when
+     the Studio screen is shown and stops (clearInterval) when the user
+     leaves it, via the same RM.app.onShow chaining pattern v25-studio.js
+     uses; each tick also self-clears as a backstop if the screen is hidden
+     (e.g. the hook was clobbered before it could re-assert). */
+  var refreshTimer = null;
+  function studioVisible() {
+    if (typeof document === 'undefined') return false;
+    var scr = document.getElementById('screen-studio');
+    if (scr && scr.classList) return scr.classList.contains('active');
+    var p = document.getElementById('v26-vocal-panel');
+    return !!(p && p.offsetParent !== null);
+  }
+  function armRefresh() {
+    if (refreshTimer || typeof document === 'undefined') return;
+    refreshTimer = setInterval(function () {
+      if (!studioVisible()) { disarmRefresh(); return; } // v29 J3 P2-4: hidden -> stop
+      refreshTarget();
+    }, 2000);
+  }
+  function disarmRefresh() {
+    if (refreshTimer) { try { clearInterval(refreshTimer); } catch (e) {} refreshTimer = null; }
+  }
+  function hookScreenLifecycle(attempts) {
+    if (typeof document === 'undefined') return;
+    var a = (typeof RM !== 'undefined' && RM.app) || null;
+    if (!a) {
+      // RM.app not ready yet — retry briefly.
+      if (attempts > 0) setTimeout(function () { hookScreenLifecycle(attempts - 1); }, 500);
+      return;
+    }
+    if (!V._screenHook) {
+      // Install exactly once and never re-wrap: v25-studio.js wraps AROUND
+      // this hook with its own retries (same chaining pattern), so
+      // re-wrapping after v25 would cycle the chain (H -> stHook -> H...).
+      // Script order is app.js < v25-studio.js < v26-vocal.js and app.js
+      // init() assigns A.onShow before our boot listener runs, so `prev`
+      // below is app.js's real handler — chained, never dropped.
+      var prev = a.onShow;
+      V._screenHook = function (name) {
+        try { if (typeof prev === 'function') prev(name); } catch (e) {}
+        try {
+          if (name === 'studio') { refreshTarget(); armRefresh(); }
+          else disarmRefresh(); // v29 J3 P2-4: leaving Studio stops the 2s poll
+        } catch (e2) {}
+      };
+      a.onShow = V._screenHook;
+    }
+    // Deep link / restored state: Studio already visible — arm now.
+    try { if (studioVisible()) { refreshTarget(); armRefresh(); } } catch (e) {}
   }
 
   function sliderRow(id, label, min, max, step, val, unit, hint) {
@@ -600,8 +655,11 @@ window.RM = window.RM || {};
     else host.appendChild(panel);
     wirePanel();
     refreshTarget();
-    // Keep the target label fresh when the Studio screen is (re)opened.
-    setInterval(refreshTarget, 2000);
+    // v29 J3 P2-4: no more forever-interval — the poll arms when the Studio
+    // screen is shown and clearIntervals when the user leaves it. (The first
+    // tick self-clears if Studio is currently hidden.)
+    hookScreenLifecycle(20);
+    armRefresh();
   }
   function boot() {
     if (typeof document === 'undefined') return;
@@ -611,6 +669,11 @@ window.RM = window.RM || {};
   }
 
   V.KNOBS = KNOBS;
+  V._armRefresh = armRefresh; // v29 J3 P2-4 test hooks
+  V._disarmRefresh = disarmRefresh;
+  V._hookLifecycle = hookScreenLifecycle;
+  V._timerActive = function () { return refreshTimer !== null; };
+  V._studioVisible = studioVisible;
   V.detectTarget = detectTarget;
   V.readOpts = readOpts;
   V.apply = onApply;

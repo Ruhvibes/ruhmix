@@ -128,11 +128,14 @@ var specLo = V.presetRenderSpec('custom', { vocalFocus: 'low' });
 ok(specLo.vocalBoostDb === 1.5, 'vocal focus low → +1.5 dB', 'got ' + specLo.vocalBoostDb);
 var specSm = V.presetRenderSpec('custom', { transition: 'smooth' });
 ok(specSm.xfadeBars === 1, 'transition smooth → xfade 1 bar');
-var specHv = V.presetRenderSpec('custom', { effects: 'heavy' });
-ok(specHv.reverbWet === 2.2 && specHv.delayWet === 1.8, 'effects heavy → reverb 2.2×, delay 1.8×',
+var specHv = V.presetRenderSpec('edm', { effects: 'heavy' });
+ok(specHv.reverbWet === 1.76 && specHv.delayWet === 1.44, 'effects heavy → reverb ×2.2, delay ×1.8 (edm base 0.8)',
    'got ' + specHv.reverbWet + '/' + specHv.delayWet);
-var specMn = V.presetRenderSpec('custom', { effects: 'minimal' });
-ok(specMn.reverbWet === 0.3 && specMn.risers === false, 'effects minimal → reverb 0.3×, no risers');
+var specMn = V.presetRenderSpec('edm', { effects: 'minimal' });
+ok(specMn.reverbWet === 0.24 && specMn.risers === false, 'effects minimal → reverb ×0.3, no risers');
+// v29 P2-4: the Custom preset is dry by design — scaling a 0 base stays 0.
+var specCustomDry = V.presetRenderSpec('custom', { effects: 'heavy' });
+ok(specCustomDry.reverbWet === 0 && specCustomDry.delayWet === 0, 'custom stays dry under any effects setting');
 var specLd = V.presetRenderSpec('custom', { mastering: 'loud' });
 ok(specLd.mastering.ratio === 3 && specLd.mastering.truePeakCeil === 0.80, 'mastering loud → ratio 3, ceil 0.80');
 var specAu = V.presetRenderSpec('edm', { transition: 'auto' });

@@ -157,8 +157,8 @@ async function main() {
       'mashup row meta shows songs/BPM/key');
     const rrows = regularRows();
     ok(rrows.length === 1, 'regular row still rendered');
-    ok(rrows[0]._html.indexOf('data-a="open"') !== -1 && rrows[0]._html.indexOf('data-a="rename"') === -1,
-      'regular row keeps Open+Delete only (untouched)');
+    ok(rrows[0]._html.indexOf('data-a="open"') !== -1 && rrows[0]._html.indexOf('data-a="rename"') !== -1,
+      'regular row has Open+Rename+Delete (v29 J4-3: rename for all project types)');
     void mid;
   }
 

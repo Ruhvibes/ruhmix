@@ -332,7 +332,10 @@ RM.v25arrange = (function () {
     { id: 'custom', name: 'Custom',
       tagline: 'Neutral starting point — your settings rule',
       description: 'No preset colour: every knob follows your Mashup Settings exactly. The Smart default.',
-      params: { tempoShift: 1.00, energyTarget: 0.55, reverbWet: 1.0, delayWet: 1.0, sidechainDb: 2.5, transition: 'smooth', vocalBoostDb: 3, bassDb: 0, brightness: 0, beatStyle: null, risers: false } },
+      // v29 F2 (P2-4): "No preset colour" must mean DRY — reverb, echo and
+      // the sidechain pump are all zero for Custom (they were 1.0/1.0/2.5,
+      // so Custom secretly added space to every build).
+      params: { tempoShift: 1.00, energyTarget: 0.55, reverbWet: 0, delayWet: 0, sidechainDb: 0, transition: 'smooth', vocalBoostDb: 3, bassDb: 0, brightness: 0, beatStyle: null, risers: false } },
   ];
 
   function listPresets() {
@@ -544,7 +547,9 @@ RM.v25arrange = (function () {
       energyTarget: round2(energyTarget),
       reverbWet: round2(p.params.reverbWet * mp.reverbScale),
       delayWet: round2(p.params.delayWet * mp.delayScale),
-      sidechainDb: round2(Math.max(0.5, p.params.sidechainDb + mp.sidechainTrimDb)),
+      // v29 F2: floor is 0, not 0.5 — Custom sets sidechainDb 0 ("no preset
+      // colour") and the old 0.5 floor would have pumped it anyway.
+      sidechainDb: round2(Math.max(0, p.params.sidechainDb + mp.sidechainTrimDb)),
       transition: transition,
       xfadeBars: xfade,
       vocalBoostDb: round2(clamp(p.params.vocalBoostDb + mp.vocalFocusOffsetDb, 1, 6)),

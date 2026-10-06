@@ -70,6 +70,9 @@ window.RM = window.RM || {};
     nextId: 1,
     mode: 'mega',       // w26: 'classic' | 'swap' | 'mega'
     presetId: 'custom', // w26: style preset id (RM.v25arrange; 'custom' = Smart default)
+    settings: null,     // w29 P2-5: §14 Mashup Settings (null = defaults); merged into every render spec
+    settingsOpen: false,// w29 P2-5: settings panel collapsed by default
+    lengthTouched: false, // w29 P2-5: true once the user explicitly sets a length (trim cap only then)
     audSrc: null,       // w26: per-song audition source
     audId: null,        // w26: song id currently auditioning
     _po: null,          // w26: preset build opts for the in-flight create
@@ -180,15 +183,28 @@ window.RM = window.RM || {};
   // presetRenderSpec(presetId, default settings) gives the full merged
   // render spec. Mapping onto the real engines:
   //   pre-build:  mega opts.styleId = spec.beatStyle (null → auto pick);
-  //               extended pipeline: xfadeBars, vocalBoostDb, tempoShift.
-  //   post-build: REAL audible DSP — preset tone (brightness/bass),
-  //               Schroeder reverb + echo (reverbWet/delayWet), risers,
-  //               mastering. Every preset differs from every other in at
-  //               least one post dimension (render-tested, no no-ops).
+  //               the mega/duet engines take NO other preset opts, so the
+  //               remaining headline params are applied post-build;
+  //               extended pipeline: xfadeBars, vocalBoostDb, tempoShift
+  //               (masterBpm scaled pre-build — real).
+  //   post-build: REAL audible DSP — tempoShift via WSOLA time-stretch of
+  //               the mixdown (mega/duet; extended already did it pre-build),
+  //               sidechainDb as a beat-grid-synced pump at the exact dB
+  //               depth, preset tone (brightness/bass), Schroeder reverb +
+  //               echo (reverbWet/delayWet), risers, mastering LAST (so the
+  //               output stays true-peak safe).
+  //               vocalBoostDb is a MIX-TIME param (needs the separated
+  //               vocal + beat): real in the extended pipeline, engine
+  //               default in mega/duet — never faked post-build.
+  //               Every preset differs from every other in at least one
+  //               post dimension (render-tested, no no-ops).
   function presetSpec(presetId) {
     var va = RM.v25arrange;
     if (!va || typeof va.presetRenderSpec !== 'function') return null;
-    try { return va.presetRenderSpec(presetId, null); } catch (e) { return null; }
+    // w29 P2-5: the §14 settings are merged here (was always null, so
+    // mastering/effects/vocal focus were stuck on defaults). Every
+    // consumer of presetSpec/presetBuildOpts now sees the user's choices.
+    try { return va.presetRenderSpec(presetId, getSettings()); } catch (e) { return null; }
   }
 
   function presetBuildOpts(presetId) {
@@ -200,6 +216,7 @@ window.RM = window.RM || {};
       xfadeBars: spec.xfadeBars,
       vocalBoostDb: spec.vocalBoostDb,
       tempoShift: spec.tempoShift,
+      sidechainDb: spec.sidechainDb, // v29 F2: plumbed into the post-chain pump
     };
   }
 
@@ -308,17 +325,97 @@ window.RM = window.RM || {};
   }
 
   // Riser placement from each engine's known arrangement structure.
+  // v29 F2 (P1-3): mega's meta.songs is an ARRAY of per-song objects, not a
+  // number — Number(array) is NaN, so the old code always fell back to n=2
+  // and a 5-song build put the riser at bar 28 instead of bar 76. Read the
+  // real count from meta.songCount (mashup-mega.js), with the array length
+  // and the legacy numeric form as fallbacks.
   function riserPlanForMega(meta) {
     try {
       var m = meta || {};
       var bpm = Number(m.bpm1) || 100;
-      var n = Math.max(2, Math.min(8, Number(m.songs) || 2));
+      var n = Math.max(2, Math.min(8,
+        Number(m.songCount) ||
+        (Array.isArray(m.songs) ? m.songs.length : 0) ||
+        Number(m.songs) || 2));
       var cycles = Math.max(1, Math.min(4, Number(m.cycles) || 2));
       // mega layout: 4-bar intro + cycles*n 8-bar vocal slots + 4-bar outro;
       // the final chorus is the last vocal slot.
       var startBar = 4 + (cycles * n - 1) * 8;
       return { gridBpm: bpm, sections: [{ type: 'finalChorus', startBar: startBar, bars: 8 }] };
     } catch (e) { return null; }
+  }
+  // v29 F2 (P1-2): duet (Classic / Vocal Swap) riser plan. The duet engines
+  // return a finished stereo mixdown, so the plan is derived from the REAL
+  // buffer: totalBars from duration × gridBpm, riser swelling into the
+  // final 8 bars. Never null for a real buffer (addRisers still no-ops
+  // when the preset has risers: false).
+  function riserPlanForDuet(buf, gridBpm) {
+    try {
+      if (!isAudioBuffer(buf)) return null;
+      var bpm = Number(gridBpm);
+      if (!(bpm > 0)) bpm = 100;
+      var dur = Number(buf.duration) || 0;
+      if (!(dur > 0) && buf.length && buf.sampleRate) dur = buf.length / buf.sampleRate;
+      if (!(dur > 0)) return null;
+      var totalBars = Math.max(8, Math.round(dur * bpm / 240));
+      var startBar = Math.max(0, totalBars - 8);
+      return { gridBpm: bpm, sections: [{ type: 'finalChorus', startBar: startBar, bars: 8 }] };
+    } catch (e) { return null; }
+  }
+  // v29 F2 (P1-1): preset tempo multiplier as REAL WSOLA time-stretch of
+  // the mixdown (pitch preserved) — the mega/duet engines take no tempo
+  // opt, so "Slowed + Reverb ×0.85" is applied here. tempoShift < 1 slows
+  // the grid → stretch ratio = 1/tempoShift. Resolves to the ORIGINAL buf
+  // when no stretch is needed or the stretch engine is unavailable — never
+  // rejects, so a preset can never kill a good build.
+  function applyPresetTempo(buf, tempoShift, onProgress) {
+    return Promise.resolve().then(function () {
+      var ts = Number(tempoShift);
+      if (!isAudioBuffer(buf) || !isFinite(ts) || ts <= 0 || Math.abs(ts - 1) < 1e-9) return buf;
+      var ratio = 1 / ts;
+      if (!(ratio >= 0.5 && ratio <= 2.0)) return buf; // outside the engine's sane range
+      var dsp = (typeof RM !== 'undefined' && RM.mashupDSP) || null;
+      if (!dsp || typeof dsp.timeStretch !== 'function') return buf;
+      return dsp.timeStretch(buf, ratio, function (q) {
+        if (typeof onProgress === 'function') {
+          try { onProgress(q, 'Applying style tempo…'); } catch (e) {}
+        }
+      }).then(function (out) {
+        return (out && isAudioBuffer(out)) ? out : buf;
+      }, function () { return buf; });
+    });
+  }
+  // v29 F2 (P1-1): preset sidechain depth as a REAL beat-grid-synced pump
+  // at the exact dB depth. The mix-time sidechain (vocal-envelope duck of
+  // the beat, fixed −3 dB inside buildTimeline) cannot be re-parameterized
+  // without touching the engines, so the post-chain renders the advertised
+  // pump directly on the grid: gain ducks to 10^(−db/20) on every beat and
+  // releases ~96% by the next beat. In place; depth ≤ 0 is a no-op (this is
+  // what keeps Custom dry).
+  function applyPresetPump(buf, sidechainDb, gridBpm) {
+    if (!isAudioBuffer(buf)) return buf;
+    var db = Number(sidechainDb);
+    if (!(db > 0)) return buf;
+    var bpm = Number(gridBpm);
+    if (!(bpm > 0)) return buf;
+    var sr = buf.sampleRate || 44100;
+    var beatLen = Math.max(1, Math.round(60 / bpm * sr));
+    var tau = Math.max(1, 0.30 * beatLen);
+    var minG = Math.pow(10, -db / 20);
+    var range = 1 - minG;
+    // one beat of envelope, reused for every beat and channel
+    var env = new Float32Array(beatLen);
+    for (var t = 0; t < beatLen; t++) {
+      env[t] = minG + range * (1 - Math.exp(-t / tau));
+    }
+    for (var ch = 0; ch < buf.numberOfChannels; ch++) {
+      var d = buf.getChannelData(ch);
+      for (var i = 0; i < d.length; i++) {
+        d[i] *= env[i % beatLen];
+      }
+    }
+    return buf;
   }
   function riserPlanForExtended(masterBpm, songCount) {
     var n = Math.max(2, Math.min(10, Number(songCount) || 2));
@@ -402,6 +499,7 @@ window.RM = window.RM || {};
       '  <div class="v25-row-label" style="font-size:11px;font-weight:700;color:#8f8fa3;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.5px;">Style preset <span class="muted small" style="text-transform:none;letter-spacing:0;">— Smart DSP colour</span></div>' +
       '  <div id="v25-presets" class="v25-chips"></div>' +
       '  <div id="v25-preset-desc" class="muted small"></div>' +
+      '  <div id="v25-settings" class="v25-settings"></div>' +
       '  <div id="v25-memwarn" class="v25-memwarn" hidden>⚠️ 8+ songs need more memory — processing will be slower.</div>' +
       '  <div id="v25-songs" class="v25-songs"></div>' +
       '  <button id="v25-add" class="btn big block">＋ Add Song</button>' +
@@ -619,6 +717,9 @@ window.RM = window.RM || {};
       b.title = m.hint;
       b.setAttribute('style', chipStyle(st.mode === m.id));
       b.setAttribute('data-mode', m.id);
+      // w29 P2-7: locked + dimmed while a build is in flight.
+      b.disabled = st.creating;
+      if (st.creating) b.style.opacity = '0.45';
       b.addEventListener('click', function () { selectMode(m.id); });
       wrap.appendChild(b);
     });
@@ -643,6 +744,9 @@ window.RM = window.RM || {};
       b.title = p.tagline || p.name;
       b.setAttribute('style', chipStyle(st.presetId === p.id));
       b.setAttribute('data-preset', p.id);
+      // w29 P2-7: locked + dimmed while a build is in flight.
+      b.disabled = st.creating;
+      if (st.creating) b.style.opacity = '0.45';
       b.addEventListener('click', function () { selectPreset(p.id); });
       wrap.appendChild(b);
     });
@@ -650,20 +754,33 @@ window.RM = window.RM || {};
     if (desc) desc.textContent = cur ? (cur.description || cur.tagline || '') : '';
   }
 
-  // Switching mode/preset clears a stale result — otherwise Preview/Export
-  // would act on a mashup built with a different mode or preset.
+  // Switching mode/preset/settings clears a stale result — otherwise
+  // Preview/Export would act on a mashup built with different settings.
+  // w29 P2-6: when a finished result is dropped, say why instead of
+  // silently wiping the user's Preview/Export.
   function clearStaleResult() {
+    var had = !!st.result;
     stopPreview();
     stopAudition();
     st.result = null;
     var r = $('v25-result');
     if (r) r.hidden = true;
+    if (had) {
+      var a = A();
+      if (a) a.toast('Previous mashup cleared — settings changed. Tap Create Mashup to rebuild.');
+    }
   }
 
   function selectMode(id) {
     var found = false;
     for (var i = 0; i < MODES.length; i++) if (MODES[i].id === id) found = true;
     if (!found || st.mode === id) return;
+    // w29 P2-7: chips lock while a build is in flight.
+    if (st.creating) {
+      var a = A();
+      if (a) a.toast('Still building — wait for the mashup to finish.');
+      return;
+    }
     st.mode = id;
     clearStaleResult();
     renderModeChips();
@@ -672,10 +789,166 @@ window.RM = window.RM || {};
 
   function selectPreset(id) {
     if (st.presetId === id) return;
+    // w29 P2-7: chips lock while a build is in flight — a mid-build tap
+    // would change st.presetId and hide the result panel the build is
+    // about to show.
+    if (st.creating) {
+      var a0 = A();
+      if (a0) a0.toast('Still building — wait for the mashup to finish.');
+      return;
+    }
     st.presetId = id;
     clearStaleResult();
     renderPresetChips();
     updateCreateState();
+  }
+
+  /* ============ w29 P2-5: §14 Mashup Settings on the Create screen ============
+     The §14 settings surface (v25-arrange.js getSettingsUI) rendered here.
+     Every row maps to REAL engine params via presetRenderSpec(presetId,
+     st.settings) — see the per-row notes. Nothing decorative. */
+  function getSettings() { return st.settings; }
+
+  function setSetting(id, value) {
+    var a = A();
+    // w29 P2-7: settings lock during a build, like the mode/preset chips.
+    if (st.creating) {
+      if (a) a.toast('Still building — wait for the mashup to finish.');
+      return false;
+    }
+    var va = RM.v25arrange;
+    if (!va || typeof va.validateSettings !== 'function') return false;
+    var cur = va.validateSettings(st.settings);
+    cur[id] = value;
+    if (id === 'length') st.lengthTouched = true;
+    st.settings = va.validateSettings(cur);
+    clearStaleResult(); // w29 P2-6: toasts when a finished result is dropped
+    renderSettings();
+    updateCreateState();
+    return true;
+  }
+
+  // One-line summary of non-default choices (pure, node-testable).
+  function settingsSummary(cur) {
+    var va = RM.v25arrange;
+    if (!va || typeof va.defaultSettings !== 'function') return '';
+    cur = va.validateSettings(cur);
+    var d = va.defaultSettings();
+    var names = { length: 'Length', energy: 'Energy', vocalFocus: 'Vocal focus',
+                  transition: 'Transitions', effects: 'Effects', mastering: 'Mastering' };
+    var bits = [];
+    ['length', 'energy', 'vocalFocus', 'transition', 'effects', 'mastering'].forEach(function (k) {
+      if (String(cur[k]) !== String(d[k])) {
+        var v = cur[k];
+        if (k === 'length') v = (v === 'custom') ? cur.customMin + ' min' : v + ' min';
+        bits.push(names[k] + ': ' + v);
+      }
+    });
+    return bits.length ? 'Active: ' + bits.join(' • ') : '';
+  }
+
+  function settingsRow(row, cur) {
+    var wrap = document.createElement('div');
+    wrap.className = 'v25-set-row';
+    wrap.setAttribute('style', 'margin:10px 0;');
+    var lab = document.createElement('div');
+    lab.setAttribute('style', 'font-size:12px;font-weight:700;color:#cfcfda;margin-bottom:2px;');
+    lab.textContent = row.label;
+    var hint = document.createElement('div');
+    hint.className = 'muted small';
+    hint.textContent = row.hint || '';
+    wrap.appendChild(lab);
+    wrap.appendChild(hint);
+    var opts = document.createElement('div');
+    opts.setAttribute('style', 'margin-top:5px;');
+    (row.options || []).forEach(function (o) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = o.label;
+      b.title = o.hint || o.label;
+      b.setAttribute('style', chipStyle(String(cur[row.id]) === String(o.value)));
+      b.disabled = st.creating;
+      if (st.creating) b.style.opacity = '0.45';
+      b.addEventListener('click', function () { setSetting(row.id, o.value); });
+      opts.appendChild(b);
+    });
+    wrap.appendChild(opts);
+    // length=custom → the minutes number input from the UI spec.
+    if (row.custom && String(cur[row.id]) === String(row.custom.showWhen)) {
+      var c = row.custom;
+      var clab = document.createElement('label');
+      clab.className = 'muted small';
+      clab.setAttribute('style', 'display:block;margin-top:6px;');
+      clab.textContent = c.label + ' (' + c.min + '–' + c.max + '): ';
+      var inp = document.createElement('input');
+      inp.type = 'number';
+      inp.min = c.min; inp.max = c.max; inp.step = c.step;
+      inp.value = cur[c.id];
+      inp.disabled = st.creating;
+      inp.setAttribute('style', 'width:70px;background:#1b1b21;color:#cfcfda;border:1px solid #3a3a44;border-radius:8px;padding:5px 8px;');
+      inp.addEventListener('change', function () { setSetting(c.id, Number(inp.value)); });
+      clab.appendChild(inp);
+      wrap.appendChild(clab);
+    }
+    return wrap;
+  }
+
+  function renderSettings() {
+    var host = $('v25-settings');
+    if (!host) return;
+    var va = RM.v25arrange;
+    host.innerHTML = '';
+    if (!va || typeof va.getSettingsUI !== 'function') { host.style.display = 'none'; return; }
+    host.style.display = '';
+    var cur = va.validateSettings(st.settings);
+    var head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'btn small v25-set-toggle';
+    head.textContent = (st.settingsOpen ? '▾ ' : '▸ ') + '⚙️ Mashup Settings';
+    head.title = 'Length, energy, vocal focus, transitions, effects, mastering — real DSP controls';
+    head.disabled = st.creating;
+    head.addEventListener('click', function () { st.settingsOpen = !st.settingsOpen; renderSettings(); });
+    host.appendChild(head);
+    var sum = settingsSummary(cur);
+    if (sum) {
+      var s = document.createElement('div');
+      s.className = 'muted small v25-set-sum';
+      s.setAttribute('style', 'margin:4px 0 0;');
+      s.textContent = sum;
+      host.appendChild(s);
+    }
+    if (!st.settingsOpen) return;
+    va.getSettingsUI().forEach(function (row) { host.appendChild(settingsRow(row, cur)); });
+  }
+
+  // trimToLength(buf, gridBpm, lengthMin) — the §14 length setting as a
+  // REAL cap. The arrangement engines take no bar budget, so a finished
+  // mix longer than the user's chosen budget is trimmed from the tail
+  // (outro first) with a 50 ms fade to avoid a click. A mix already at
+  // or under budget is returned untouched. Pure DSP, node-testable.
+  function trimToLength(buf, gridBpm, lengthMin) {
+    if (!isAudioBuffer(buf)) return buf;
+    var bpm = Number(gridBpm), min = Number(lengthMin);
+    if (!isFinite(bpm) || bpm <= 0 || !isFinite(min) || min <= 0) return buf;
+    // §14 formula: totalBars = clamp(round(min × 60 × gridBpm / 240), 32, 400)
+    var targetBars = Math.max(32, Math.min(400, Math.round(min * 60 * bpm / 240)));
+    var sr = buf.sampleRate || 44100;
+    var barLen = Math.max(1, Math.round(240 / bpm * sr));
+    var targetLen = targetBars * barLen;
+    if (targetLen >= buf.length) return buf;
+    var ctx = null;
+    try { ctx = RM.audio.ensureCtx(); } catch (e) { ctx = null; }
+    if (!ctx || typeof ctx.createBuffer !== 'function') return buf;
+    var out;
+    try { out = ctx.createBuffer(buf.numberOfChannels, targetLen, buf.sampleRate); }
+    catch (e) { return buf; }
+    var fade = Math.min(targetLen, Math.max(1, Math.round(0.05 * sr)));
+    for (var ch = 0; ch < buf.numberOfChannels; ch++) {
+      var src = buf.getChannelData(ch), dst = out.getChannelData(ch);
+      dst.set(src.subarray(0, targetLen));
+      for (var i = 0; i < fade; i++) dst[targetLen - 1 - i] *= i / fade;
+    }
+    return out;
   }
 
   /* ================= w26: per-song audition ================= */
@@ -767,6 +1040,14 @@ window.RM = window.RM || {};
     }
   }
 
+  // v29 F1: pick abandon ke saare exit path — bridge + app-side flag dono disarm.
+  function cancelPick() {
+    st.pickId = null;
+    st._viaNative = false;
+    disarmPickBridge();
+    try { if (RM.app && typeof RM.app.disarmMashupPick === 'function') RM.app.disarmMashupPick(); } catch (e) {}
+  }
+
   /* ================= pick flow (exact #cdx-pick path) ================= */
 
   function requestPick(id) {
@@ -776,15 +1057,20 @@ window.RM = window.RM || {};
     stopAudition();
     st.pickId = id;
     armPickBridge(id); // w26: route app.js's mashupIntercept to our onPicked
+    st._viaNative = false;
     try {
       if (RM.app && typeof RM.app.pickAudio === 'function') {
-        RM.app.pickAudio(); // DIRECT: native system picker; result returns via handleAudioPicked -> mashupIntercept -> bridge -> onPicked
+        // v29 F1: direct routing arm karo — decode hote hi buffer mashupIntercept
+        // -> bridge -> onPicked me land karega, user Create screen pe hi rahega.
+        if (typeof RM.app.armMashupPick === 'function') RM.app.armMashupPick();
+        st._viaNative = true;
+        RM.app.pickAudio(); // DIRECT: native system picker
       } else if (RM.ux && typeof RM.ux.pickMusic === 'function') {
-        RM.ux.pickMusic(); // legacy fallback: old import screen
+        RM.ux.pickMusic(); // legacy fallback: old import screen; "Use" delivers via bridge
       } else {
-        a.show('import');
+        a.show('import'); // legacy fallback: bridge stays armed for "Use"
       }
-    } catch (e) { st.pickId = null; disarmPickBridge(); return; }
+    } catch (e) { cancelPick(); return; }
     a.toast('Pick a song 🎵');
   }
 
@@ -793,6 +1079,7 @@ window.RM = window.RM || {};
   function onPicked(id, buffer, name) {
     var a = A();
     disarmPickBridge(); // w26: pick resolved — restore the old screen's handler
+    st._viaNative = false;
     var song = (id != null) ? getSong(id) : null;
     if (!song || !isAudioBuffer(buffer)) {
       if (a) a.toast('Pick failed — try again');
@@ -838,7 +1125,7 @@ window.RM = window.RM || {};
       if (st.songs.length <= MIN_SONGS) return;
       stopPreview();
       stopAudition();
-      if (st.pickId === id) { st.pickId = null; disarmPickBridge(); }
+      if (st.pickId === id) { cancelPick(); } // v29 F1: pending pick bhi disarm
       st.songs.splice(idx, 1);
       renderSongs();
       if (a) a.toast('Song removed');
@@ -913,6 +1200,10 @@ window.RM = window.RM || {};
     st.creating = false;
     var c = $('v25-cancel');
     if (c) c.hidden = true;
+    // w29 P2-7: unlock the mode/preset chips + settings on failure too.
+    renderModeChips();
+    renderPresetChips();
+    renderSettings();
     updateCreateState();
     var txt = (msg && msg.kind === 'cancelled') ? 'Cancelled.' : (a ? (a.cleanErrMsg(msg) || 'Something went wrong. Please try again.') : 'Something went wrong.');
     if (a) a.toast(txt);
@@ -926,11 +1217,6 @@ window.RM = window.RM || {};
   }
 
   function tick() { return new Promise(function (res) { setTimeout(res, 0); }); }
-
-  function errText(e) {
-    if (e && e.kind === 'cancelled') return 'cancelled';
-    return String((e && e.message) || e || 'unknown error');
-  }
 
   // Stage 1+2+4 analysis for the create run (uses cached BPM/key from card
   // analysis when present — both came from the same real functions).
@@ -1003,8 +1289,11 @@ window.RM = window.RM || {};
     var list = songs.map(function (s) { return { buffer: s.buffer, name: s.name }; });
     var token = (RM.mashupStems && typeof RM.mashupStems.makeToken === 'function')
       ? RM.mashupStems.makeToken() : null;
-    // w26: preset → real mega opts. styleId changes the beat pattern
-    // audibly; cycles stays at the engine default.
+    // v29 F2: preset → real mega opts. styleId changes the beat pattern
+    // audibly; cycles stays at the engine default. The engine takes NO
+    // other preset opts — tempoShift / sidechainDb are applied post-build
+    // in finish() (applyPresetTempo / applyPresetPump); vocalBoostDb is a
+    // mix-time param the engine fixes internally (never faked post-build).
     var megaOpts = { token: token };
     if (po && po.styleId) megaOpts.styleId = po.styleId;
     return RM.mashupMega.build(list, megaOpts,
@@ -1030,9 +1319,13 @@ window.RM = window.RM || {};
 
   /* ---- w26: Classic (RM.mashup.build) + Vocal Swap (RM.mashupSwap.build).
          2-song engines: no opts, no onStep — the stage UI is driven from
-         progress fractions so it never sits static. ---- */
+         progress fractions so it never sits static.
+         v29 F2 (P1-2): takes the preset build opts (po) for the record —
+         the duet engines accept no opts, so the preset params land in the
+         post-chain (finish()): tempoShift via WSOLA stretch, sidechainDb
+         via the grid pump, risers via riserPlanForDuet (never null). ---- */
 
-  function buildDuet(which, songs, onProgress) {
+  function buildDuet(which, songs, onProgress, po) {
     var isSwap = which === 'swap';
     var mod = isSwap ? RM.mashupSwap : RM.mashup;
     if (!mod || typeof mod.build !== 'function') {
@@ -1261,6 +1554,10 @@ window.RM = window.RM || {};
     st.result = null;
     st._po = null;
     st._extPlan = null;
+    // w29 P2-7: lock the mode/preset chips + settings while building.
+    renderModeChips();
+    renderPresetChips();
+    renderSettings();
     try { if (RM.mashupStems && typeof RM.mashupStems.clearCancel === 'function') RM.mashupStems.clearCancel(); } catch (e) {}
     var r = $('v25-result');
     if (r) r.hidden = true;
@@ -1281,18 +1578,28 @@ window.RM = window.RM || {};
       var buf = res && res.buffer ? res.buffer : (isAudioBuffer(res) ? res : null);
       if (!buf) throw new Error('Mashup build produced no audio.');
       var meta = (res && res.meta) || {};
-      // w26: style preset post-chain — real audible DSP (tone, reverb/echo,
-      // risers, mastering). Riser placement only where the arrangement
-      // structure is known. Runs after a paint so the UI never looks dead
-      // during the (1–3 s) processing.
+      // v29 F2: style preset post-chain — real audible DSP. Pre-build, only
+      // styleId reaches the mega engine and only xfade/vocalBoost/tempoShift
+      // reach the extended pipeline, so the remaining headline params are
+      // applied here, post-build, with REAL DSP:
+      //   tempoShift  → WSOLA time-stretch of the mixdown (ratio 1/tempoShift,
+      //                 pitch preserved; extended already did it pre-build),
+      //   sidechainDb → beat-grid-synced pump at the exact dB depth,
+      //   then tone → space (reverb/echo) → risers → mastering LAST, so the
+      //   output stays true-peak safe. Riser placement only where the
+      //   arrangement structure is known (duet: derived from the real
+      //   buffer — never null). vocalBoostDb is a MIX-TIME param (needs the
+      //   separated vocal + beat): real in the extended pipeline, engine
+      //   default in mega/duet — NOT faked post-build. Runs after a paint
+      //   so the UI never looks dead during processing.
       var po = st._po || presetBuildOpts(st.presetId);
-      var plan = null, gridBpm = 100;
-      try {
-        if (res && res.duet) { gridBpm = Number(res.gridBpm) || 100; }
-        else if (st._extPlan) { plan = st._extPlan; gridBpm = Number(plan.gridBpm) || 100; }
-        else if (meta && meta.style === 'mega') { plan = riserPlanForMega(meta); gridBpm = (plan && Number(plan.gridBpm)) || 100; }
-      } catch (e) {}
+      var spec = (po && po.spec) || null;
       var finalize = function (fbuf) {
+        // w29 P2-5: §14 length cap — only when the user explicitly set a
+        // length. Trims an over-budget mix from the tail (outro first).
+        if (st.lengthTouched && po && po.spec) {
+          try { fbuf = trimToLength(fbuf, gridBpm, po.spec.lengthMin); } catch (e) {}
+        }
         var tags = (res && res.engineTags) || songs.map(function (s) { return s.tag || 'smart DSP'; });
         st.result = { buffer: fbuf, meta: meta, engine: honestEngineLabel(tags) };
         try {
@@ -1310,6 +1617,10 @@ window.RM = window.RM || {};
         setProgress('Done', 1);
         var pw2 = $('v25-progress');
         if (pw2) pw2.hidden = true;
+        // w29 P2-7: unlock the mode/preset chips + settings.
+        renderModeChips();
+        renderPresetChips();
+        renderSettings();
         updateCreateState();
         var tag = $('v25-engine');
         if (tag) tag.textContent = '⚙️ ' + st.result.engine;
@@ -1321,29 +1632,73 @@ window.RM = window.RM || {};
         if (play) play.textContent = '▶ Preview';
         a.toast('Mashup ready ✨');
       };
-      if (po && po.spec) {
-        setProgress('Applying style preset (' + po.spec.presetName + ')…', 1);
-        setTimeout(function () {
-          var fbuf = buf;
-          try {
-            fbuf = applyPresetPost(fbuf, po.spec, plan, gridBpm);
-            try { meta.preset = po.spec.presetName; } catch (e) {}
-          } catch (e) {}
-          finalize(fbuf);
-        }, 30);
-      } else {
+      if (!spec) {
         finalize(buf);
+        return;
       }
+      setProgress('Applying style preset (' + spec.presetName + ')…', 1);
+      setTimeout(function () {
+        // Extended pipeline already scaled masterBpm pre-build; mega/duet
+        // get the tempo here. The effective shift is measured from the
+        // buffer lengths afterwards, so a skipped/failed stretch can never
+        // misplace the risers or the pump grid.
+        var tempoPreBuilt = (route.engine === 'extended');
+        var tShift = Number(spec.tempoShift) || 1;
+        var chain = Promise.resolve(buf);
+        if (!tempoPreBuilt) {
+          chain = chain.then(function (b) {
+            return applyPresetTempo(b, tShift, function (q, label) {
+              setProgress(label || 'Applying style tempo…', q);
+            });
+          });
+        }
+        chain.then(function (sb) {
+          var fbuf = (sb && isAudioBuffer(sb)) ? sb : buf;
+          var effShift = 1;
+          try {
+            if (buf.length > 0 && fbuf.length > 0) {
+              var r = buf.length / fbuf.length;
+              if (isFinite(r) && r > 0) effShift = r;
+            }
+          } catch (e0) {}
+          var plan = null, effBpm = 100;
+          try {
+            if (res && res.duet) {
+              effBpm = (Number(res.gridBpm) || 100) * (tempoPreBuilt ? 1 : effShift);
+              plan = riserPlanForDuet(fbuf, effBpm); // v29 F2: duet plan, never null
+            } else if (st._extPlan) {
+              plan = st._extPlan;
+              effBpm = Number(plan.gridBpm) || 100; // already tempo-shifted pre-build
+            } else if (meta && meta.style === 'mega') {
+              var preBpm = Number(meta.bpm1) || 100;
+              effBpm = preBpm * (tempoPreBuilt ? 1 : effShift);
+              plan = riserPlanForMega(meta);
+              if (plan) plan.gridBpm = effBpm; // bars got longer/shorter with the stretch
+            }
+          } catch (e) {}
+          if (!(effBpm > 0)) effBpm = 100;
+          try {
+            fbuf = applyPresetPump(fbuf, spec.sidechainDb, effBpm);
+            fbuf = applyPresetPost(fbuf, spec, plan, effBpm);
+            try {
+              meta.preset = spec.presetName;
+              if (fbuf && isFinite(fbuf.duration)) meta.durationSec = Math.round(fbuf.duration * 10) / 10;
+            } catch (e2) {}
+          } catch (e3) {}
+          finalize(fbuf);
+        }).then(null, function () { finalize(buf); });
+      }, 30);
     };
 
     Promise.resolve()
       .then(function () {
-        // w26: preset params → real build opts (mega styleId; extended
-        // xfade/vocalBoost/tempoShift; duet engines take no opts).
+        // v29 F2: preset params → real build opts (mega styleId; extended
+        // xfade/vocalBoost/tempoShift pre-build; duet engines take no opts
+        // — their preset params land in the finish() post-chain).
         var po = presetBuildOpts(st.presetId);
         st._po = po;
         if (route.engine === 'classic' || route.engine === 'swap') {
-          return buildDuet(route.engine, songs, onProgress);
+          return buildDuet(route.engine, songs, onProgress, po);
         }
         if (route.engine === 'extended') {
           // 9–10 songs: extended pipeline — stages 1/2/4 run directly here.
@@ -1428,6 +1783,7 @@ window.RM = window.RM || {};
     renderSongs();
     renderModeChips();    // w26
     renderPresetChips();  // w26
+    renderSettings();     // w29 P2-5
   }
 
   // Chain onto RM.app.onShow: leaving the screen always stops preview;
@@ -1440,9 +1796,12 @@ window.RM = window.RM || {};
       try { if (typeof prev === 'function') prev(name); } catch (e) {}
       try {
         if (name !== 'v25create') { stopPreview(); stopAudition(); }
-        if (name !== 'import' && name !== 'v25create' && st.pickId) {
-          st.pickId = null;
-          disarmPickBridge(); // w26: abandoned pick — restore old screen's handler
+        // v29 F1: native-path pick kabhi import screen pe nahi jata (decode ->
+        // intercept -> slot, user Create pe rehta hai). Import pe jaana = flow
+        // abandon -> disarm. Legacy fallback (import screen + "Use") me bridge
+        // armed rehna chahiye, isliye wahan exemption barkarar.
+        if (name !== 'v25create' && (name !== 'import' || st._viaNative) && st.pickId) {
+          cancelPick(); // w26: abandoned pick — restore old screen's handler
         }
       } catch (e) {}
     };
@@ -1453,6 +1812,8 @@ window.RM = window.RM || {};
     if (RM.app && document.body) {
       wire();
       wrapOnShow();
+      // v29 F1: cancel/permission-deny/decode-fail pe app.js isi hook se bridge disarm karwata hai.
+      try { if (typeof RM.app.setPickCancelHook === 'function') RM.app.setPickCancelHook(cancelPick); } catch (e) {}
       setTimeout(wrapOnShow, 600);
       setTimeout(wrapOnShow, 2000);
       return;
@@ -1497,7 +1858,26 @@ window.RM = window.RM || {};
       applyPresetPost: applyPresetPost,
       riserPlanForMega: riserPlanForMega,
       riserPlanForExtended: riserPlanForExtended,
+      // v29 F2
+      applyPresetTempo: applyPresetTempo,
+      applyPresetPump: applyPresetPump,
+      riserPlanForDuet: riserPlanForDuet,
       analyzeSong: analyzeSong,
+      // w29 (P2-5/P2-6/P2-7)
+      getSettings: getSettings,
+      setSetting: setSetting,
+      settingsSummary: settingsSummary,
+      renderSettings: renderSettings,
+      trimToLength: trimToLength,
+      selectMode: selectMode,
+      selectPreset: selectPreset,
+      clearStaleResult: clearStaleResult,
+      renderModeChips: renderModeChips,
+      renderPresetChips: renderPresetChips,
+      _setCreating: function (v) { st.creating = !!v; },
+      _setSettingsOpen: function (v) { st.settingsOpen = !!v; },
+      _setResult: function (buf) { st.result = buf ? { buffer: buf } : null; },
+      _getState: function () { return { mode: st.mode, presetId: st.presetId, creating: st.creating, settings: st.settings }; },
     },
   };
   Object.defineProperty(RM.v25create, 'pickTarget', {

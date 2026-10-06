@@ -133,6 +133,7 @@ function megaMeta() {
     boundariesSec: sm.boundariesSec,
     xfadeBars: 0.5,
     style: 'mega',
+    vocalTags: ['Smart DSP', 'Smart DSP', 'Smart DSP', 'Smart DSP'], // real mega builder sets this (mashup-mega.js)
   };
 }
 

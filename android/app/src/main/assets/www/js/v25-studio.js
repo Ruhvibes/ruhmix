@@ -744,10 +744,13 @@ __rmRoot.RM = __rmRoot.RM || {};
   }
 
   /* ================= I2: undo / redo / clipboard / snap / drag ================
-     Command stack with do/undo pairs. Three command kinds:
+     Command stack with do/undo pairs. Four command kinds:
        'patch' — one sample-exact region replacement {at, removed, inserted};
        'perm'  — section reorder {orderB, orderA} (audio rebuilt by permutation);
-       'meta'  — sections/bounds metadata only (split: audio untouched).
+       'meta'  — sections/bounds metadata only (split: audio untouched);
+       'state' — v29 F4: full buffer+model snapshot {stateB, stateA} for ops
+                 that replace the whole buffer and/or rebuild the model
+                 (Apply lane mix, Smart Regenerate, async vocal swap).
      Every entry stores before/after sections, bounds and selection, so
      undo/redo restores the exact buffer (byte-identical) and the model.
      New edits clear the redo stack. Cap: 50. */
@@ -760,8 +763,10 @@ __rmRoot.RM = __rmRoot.RM || {};
     });
   }
   function cmdBegin(label, kind) {
+    st._lastSectionEdit = null; // v29 J3 P2-3: a new edit voids the Apply idempotency key
     return {
       label: label, kind: kind || 'patch',
+      fpB: bufFingerprint(st.current), fpA: null, // v29 J3 P2-5: staleness anchors
       secsB: secClone(), boundsB: st.bounds.slice(), selB: st.sel,
       at: 0, removed: null, inserted: null, orderB: null, orderA: null,
       secsA: null, boundsA: null, selA: 0,
@@ -779,13 +784,111 @@ __rmRoot.RM = __rmRoot.RM || {};
   }
   function clearUndo() { st.undo.length = 0; st.redo.length = 0; updateUndoUI(); }
 
+  // v29 J3 P2-5: byte-compare the buffer region a 'patch' command is about
+  // to replace against what the command expects to find there. The v26 FX
+  // stack is independent of this one — a v26 op (or its undo) can replace
+  // st.current under a pending v25 command, leaving stale sample offsets.
+  // Splicing at stale offsets would corrupt the audio, so a mismatch
+  // refuses honestly instead (the command is kept, nothing is altered).
+  // v29 J3 P2-5: cheap whole-buffer fingerprint (length + sample probes).
+  // Used to detect "the buffer changed under this command" — the v26 FX
+  // stack replaces st.current independently of the v25 command stack.
+  function bufFingerprint(buf) {
+    if (!buf || typeof buf.getChannelData !== 'function' || !buf.length) return '0:0';
+    var n = buf.length, nCh = buf.numberOfChannels, parts = [n, nCh], ch, d;
+    for (ch = 0; ch < nCh; ch++) {
+      d = buf.getChannelData(ch);
+      parts.push(d[0], d[n >> 2], d[n >> 1], d[(3 * n) >> 2], d[n - 1]);
+    }
+    return parts.join(',');
+  }
+
+  function regionMatches(buf, atSamp, expected) {
+    if (!buf || !expected || typeof expected.getChannelData !== 'function') return false;
+    var nCh = Math.min(buf.numberOfChannels, expected.numberOfChannels);
+    var n = expected.length;
+    if (!(atSamp >= 0) || atSamp + n > buf.length) return false;
+    for (var ch = 0; ch < nCh; ch++) {
+      var d = buf.getChannelData(ch), e = expected.getChannelData(ch);
+      for (var i = 0; i < n; i++) if (d[atSamp + i] !== e[i]) return false;
+    }
+    return true;
+  }
+
+  /* ---- v29 F4: 'state' command kind — full buffer+model snapshot ----
+     For ops that replace the whole buffer and/or rebuild the model
+     (Apply lane mix, Smart Regenerate incl. W3 rebuilds, async vocal
+     swap). Invariants the Studio already keeps:
+       - st.current is always REPLACED, never mutated in place
+         (v25 edits + the v26 fx.apply bridge), so dupBuf(current) at
+         capture time can never be aliased by later edits;
+       - st.original is NEVER mutated (see its comment above), and st.meta
+         is only replaced — references are safe for both;
+       - st.stems buffers are only read (laneMixBuffer dups them).
+     laneUI values are small plain objects — deep-copied per lane. */
+  function laneUiClone(src) {
+    var o = {}, k;
+    src = src || st.laneUI;
+    for (k in src) if (Object.prototype.hasOwnProperty.call(src, k)) {
+      var u = src[k] || {};
+      o[k] = { mute: !!u.mute, solo: !!u.solo, gainDb: +u.gainDb || 0 };
+    }
+    return o;
+  }
+  function captureStudioState() {
+    return {
+      current: st.current ? dupBuf(st.current) : null,
+      original: st.original,
+      meta: st.meta, engine: st.engine, songs: st.songs,
+      mode: st.mode, bpm: st.bpm, barSec: st.barSec,
+      sections: secClone(), bounds: st.bounds.slice(), sel: st.sel,
+      stems: st.stems, laneUI: laneUiClone(),
+      ab: st.ab, zoom: st.zoom, offset: tp.offset,
+    };
+  }
+  function restoreStudioState(s) {
+    try { RM.wave.dropPeaks(st.current); } catch (e) {}
+    st.current = s.current; st.original = s.original;
+    st.meta = s.meta; st.engine = s.engine; st.songs = s.songs;
+    st.mode = s.mode; st.bpm = s.bpm; st.barSec = s.barSec;
+    st.sections = s.sections.map(function (x) {
+      return { id: x.id, name: x.name, kind: x.kind, vocalSong: x.vocalSong, lenSec: x.lenSec };
+    });
+    st.bounds = s.bounds.slice(); st.sel = s.sel;
+    st.stems = s.stems; st.laneUI = laneUiClone(s.laneUI); // laneViews rebuilt by renderLanes
+    st.ab = s.ab; st.zoom = s.zoom;
+    tp.offset = st.current ? clamp(s.offset, 0, st.current.duration) : 0;
+    st._downbeat = null; // v27: audio changed — downbeats re-analyze on next wave draw
+    renderAll();
+  }
+  function pushStateCommand(label, before, after) {
+    var c = {
+      label: label, kind: 'state', stateB: before, stateA: after,
+      secsB: before.sections, boundsB: before.bounds, selB: before.sel,
+      secsA: after.sections, boundsA: after.bounds, selA: after.sel,
+    };
+    pushUndo(c);
+  }
+
   // Apply a command forward (dir>0) or backward (dir<0). For 'patch' the
   // buffer is rebuilt from the stored sample-exact slices; for 'perm' the
   // current per-section slices are concatenated in the target id order.
   function applyCmd(c, dir) {
     if (st.busy || !st.current) return false;
+    st._lastSectionEdit = null; // v29 J3 P2-3: undo/redo voids the Apply idempotency key
     var fwd = dir > 0;
     if (c.kind === 'patch') {
+      // v29 J3 P2-5: cross-stack staleness guard. The v26 FX stack can
+      // replace st.current under a pending v25 command (or vice versa),
+      // leaving stale sample offsets — splicing them would corrupt the
+      // audio. The buffer must be exactly the state this command started
+      // from (redo) or left behind (undo); otherwise refuse honestly (the
+      // command is kept, nothing is altered).
+      var wantFp = fwd ? c.fpB : c.fpA;
+      if (wantFp && bufFingerprint(st.current) !== wantFp) {
+        toast('Skipped: this undo no longer matches the current audio (it was changed by Studio FX)');
+        return false;
+      }
       var rem = fwd ? c.removed : c.inserted;
       var ins = fwd ? c.inserted : c.removed;
       var remLen = rem ? rem.length : 0;
@@ -798,6 +901,7 @@ __rmRoot.RM = __rmRoot.RM || {};
       if (!nb) return false;
       try { RM.wave.dropPeaks(old); } catch (e) {}
       st.current = nb;
+      if (fwd) c.fpA = bufFingerprint(nb); // anchor for a later undo
       tp.offset = clamp(tp.offset, 0, nb.duration);
     } else if (c.kind === 'perm') {
       var order = fwd ? c.orderA : c.orderB;
@@ -812,7 +916,13 @@ __rmRoot.RM = __rmRoot.RM || {};
       try { RM.wave.dropPeaks(old2); } catch (e) {}
       st.current = nb2;
       tp.offset = clamp(tp.offset, 0, nb2.duration);
+    } else if (c.kind === 'state') {
+      // v29 F4: full buffer+model snapshot — restore and done.
+      restoreStudioState(fwd ? c.stateA : c.stateB);
+      return true;
     }
+    if (c.kind === 'patch' || c.kind === 'perm')
+      st._downbeat = null; // v27: undo/redo changed the audio — downbeats re-analyze
     // 'meta': buffer untouched
     st.sections = (fwd ? c.secsA : c.secsB).map(function (s) {
       return { id: s.id, name: s.name, kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec };
@@ -1010,7 +1120,13 @@ __rmRoot.RM = __rmRoot.RM || {};
     c.inserted = null;
     st.sections.splice(i, 1);
     st.bounds.splice(Math.min(i, st.bounds.length - 1), 1);
-    resetBounds();
+    // v29 J3 P2-1: surgical junction reset — only the seam created by the
+    // deletion (between old sections i-1 and i+1, now at index i-1) is
+    // reset to 'cut'. Every other junction keeps the user's chosen
+    // transition. (Deleting the first/last section removes its adjacent
+    // junction with it, so no reset is needed there.)
+    if (i > 0 && i < st.sections.length && st.bounds.length > 0)
+      st.bounds[Math.min(i - 1, st.bounds.length - 1)] = 'cut';
     st.sel = Math.min(i, st.sections.length - 1);
     cmdEnd(c);
     applyCmd(c, +1);
@@ -1088,7 +1204,9 @@ __rmRoot.RM = __rmRoot.RM || {};
     }
     c.inserted = null;
     s.lenSec -= dSec;
-    resetBounds();
+    // v29 J3 P2-1: trim changes no section pair, so no junction is
+    // structurally affected — all transition choices survive (the old
+    // resetBounds() wiped every junction here for no reason).
     cmdEnd(c);
     applyCmd(c, +1);
     toast('Trimmed \u2713');
@@ -1103,15 +1221,17 @@ __rmRoot.RM = __rmRoot.RM || {};
   // section, as ONE undoable patch. jx covers the junction region so xfade
   // (which shrinks the buffer) is captured exactly; lastJX reports the real
   // samples removed by renderJunction.
-  function applySectionEditCore(i, fi, fo, vdb, tr) {
+  function applySectionEditCore(i, fi, fo, vdb, tr, noUndo) {
     var s = st.sections[i];
     if (!s || st.busy || !st.current) return false;
     var n = st.sections.length, bd = bounds()[i], sr = st.current.sampleRate;
     var jx = (i < n - 1) ? junctionHalfSec(i, tr) : 0;
     var aS = Math.round(bd.a * sr), bS = Math.round((bd.b + jx) * sr);
-    var c = cmdBegin('Section edit');
-    c.at = aS;
-    c.removed = sliceSamp(st.current, aS, bS);
+    // v29 F4: the command MUST be captured BEFORE the mutations below
+    // (st.bounds[i] / renderJunction's lens change) — otherwise secsB ==
+    // secsA and undo cannot restore the model.
+    var c = noUndo ? null : cmdBegin('Section edit');
+    if (c) { c.at = aS; c.removed = sliceSamp(st.current, aS, bS); }
     var nb = dupBuf(st.current);
     if (fi > 0) fadeRegion(nb, bd.a, bd.b, Math.min(fi, s.lenSec / 2), 'in');
     if (fo > 0) fadeRegion(nb, bd.a, bd.b, Math.min(fo, s.lenSec / 2), 'out');
@@ -1121,6 +1241,16 @@ __rmRoot.RM = __rmRoot.RM || {};
       st.bounds[i] = tr;
       nb = renderJunction(nb, i, tr);
     }
+    if (noUndo) {
+      // v29 F4: the caller folds this edit into a wider undoable unit
+      // (async vocal swap) — apply the buffer directly, no command of its own.
+      try { RM.wave.dropPeaks(st.current); } catch (e) {}
+      st.current = nb;
+      st._downbeat = null; // v27: audio changed — downbeats re-analyze
+      tp.offset = clamp(tp.offset, 0, nb.duration);
+      renderAll();
+      return true;
+    }
     c.inserted = sliceSamp(nb, aS, aS + (bS - aS) - lastJX);
     cmdEnd(c);   // captures secsA AFTER renderJunction's lens change
     applyCmd(c, +1);
@@ -1129,6 +1259,13 @@ __rmRoot.RM = __rmRoot.RM || {};
 
   // Apply fade in/out + volume + vocal source + transition for the section.
   // Vocal swap is async; the rest applies first, then the swap re-renders.
+  // v29 F4: the whole Apply (incl. the async swap) is ONE undoable unit.
+  // v29 J3 P2-3: one-apply semantics — after a successful Apply every
+  // one-shot control resets to neutral (Volume was already reset to 0 dB;
+  // Fade in/out now reset to Off too), and re-pressing Apply with identical
+  // settings is a no-op instead of deepening fades / re-rendering the
+  // transition. The transition select is junction state (synced from
+  // st.bounds on selection change), so it is intentionally NOT reset.
   function applySectionEdit() {
     var s = needSel(); if (!s || st.busy) return;
     var i = st.sel;
@@ -1137,17 +1274,29 @@ __rmRoot.RM = __rmRoot.RM || {};
     var vdb = +(($('stu-vol') || {}).value || 0);
     // Transition AFTER this section (no-op on the last section — no "next").
     var tr = (($('stu-trans') || {}).value) || 'cut';
-    applySectionEditCore(i, fi, fo, vdb, tr);
+    var key = i + '|' + fi + '|' + fo + '|' + vdb + '|' + tr;
+    if (st._lastSectionEdit === key) {
+      toast('Section already updated with these settings');
+      return;
+    }
     // Vocal source swap (async, Smart DSP).
     var vsel = $('stu-vocal-src');
     var want = vsel && vsel.style.display !== 'none' ? parseInt(vsel.value, 10) : NaN;
     var vv = $('stu-vol-v'); if (vv) vv.textContent = '0 dB';
     var vr = $('stu-vol'); if (vr) vr.value = '0';
+    var fin = $('stu-fadein'); if (fin) fin.value = '0'; // v29 J3 P2-3: consistent reset
+    var fout = $('stu-fadeout'); if (fout) fout.value = '0';
+    // v29 F4: section edit + async vocal swap = ONE undoable unit.
     if (!isNaN(want) && want !== s.vocalSong && s.kind === 'vocal') {
-      swapVocalSource(i, want);
+      var before = captureStudioState();
+      applySectionEditCore(i, fi, fo, vdb, tr, true); // no own command
+      if (!swapVocalSource(i, want, before))
+        pushStateCommand('Section edit', before, captureStudioState()); // swap never started
     } else {
+      applySectionEditCore(i, fi, fo, vdb, tr);
       toast('Section updated \u2713');
     }
+    st._lastSectionEdit = key; // v29 J3 P2-3: identical re-press = no-op
   }
 
   /* ================= I2: drag-to-reorder (pointer events) =================
@@ -1353,14 +1502,17 @@ __rmRoot.RM = __rmRoot.RM || {};
       if (results[i] && re.test(results[i].name || '')) return results[i].buffer;
     return (results[fallbackIdx] && results[fallbackIdx].buffer) || null;
   }
-  function swapVocalSource(i, targetSong) {
+  // v29 F4: `before` = pre-Apply snapshot; the swap's completion pushes ONE
+  // state command covering the section edit + the swap. Returns false when the
+  // swap never starts (the caller then makes the section edit undoable alone).
+  function swapVocalSource(i, targetSong, before) {
     var s = st.sections[i];
-    if (!s || s.kind !== 'vocal' || st.busy) return;
+    if (!s || s.kind !== 'vocal' || st.busy) return false;
     var j = -1;
     for (var k = 0; k < st.sections.length; k++)
       if (k !== i && st.sections[k].kind === 'vocal' && st.sections[k].vocalSong === targetSong) { j = k; break; }
-    if (j < 0) { toast('No section sings ' + songLabel(targetSong)); return; }
-    if (!RM.stems || typeof RM.stems.run !== 'function') { toast('Stem engine not ready'); return; }
+    if (j < 0) { toast('No section sings ' + songLabel(targetSong)); return false; }
+    if (!RM.stems || typeof RM.stems.run !== 'function') { toast('Stem engine not ready'); return false; }
     st.busy = true; setProg('Smart DSP: isolating vocals…', 0.1);
     var bd = bounds();
     var secI = sliceBuf(st.current, bd[i].a, bd[i].b);
@@ -1387,12 +1539,17 @@ __rmRoot.RM = __rmRoot.RM || {};
         s.name = songLabel(targetSong) + ' · Vocal (swapped)';
         st.busy = false; setProg('Vocal source swapped ✓', 1);
         replaceCurrent(nb, true);
+        if (before) pushStateCommand('Section edit + vocal swap', before, captureStudioState());
         toast('Vocal source: ' + songLabel(targetSong) + ' ✓');
       })
       .catch(function (e) {
         st.busy = false; setProg('', 0);
+        // v29 F4: the swap failed, but the section edit already applied —
+        // keep THAT undoable instead of silently dropping it.
+        if (before) pushStateCommand('Section edit', before, captureStudioState());
         toast('Vocal swap failed — try again');
       });
+    return true;
   }
 
   /* ================= stem extraction + lane mix ================= */
@@ -1460,7 +1617,9 @@ __rmRoot.RM = __rmRoot.RM || {};
   function commitLanes() {
     if (!st.stems) { toast('Extract stems first 🔬'); return; }
     var mix = laneMixBuffer(); if (!mix) return;
+    var before = captureStudioState(); // v29 F4: lane commit is one undoable unit
     replaceCurrent(mix, true);
+    pushStateCommand('Apply lane mix', before, captureStudioState());
     toast('Lane mix applied ✓');
   }
 
@@ -1678,6 +1837,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     stopPlayback(false);
     setProg(def.name + '…', 0);
     var prog = function (l, f) { setProg(l || (def.name + '…'), f == null ? 0.5 : f); };
+    var before = captureStudioState(); // v29 F4: snapshot BEFORE the regen
     Promise.resolve()
       .then(function () { return def.run(st.current, prog); })
       .then(function (r) {
@@ -1686,6 +1846,8 @@ __rmRoot.RM = __rmRoot.RM || {};
         if (!r.buf && !r.rebuild) throw new Error('empty result');
         if (r.rebuild) applyRebuild(r.rebuild);
         else replaceCurrent(r.buf, true);
+        // v29 F4: every regen is one undoable unit (rebuilds included).
+        pushStateCommand('Regenerate: ' + def.name, before, captureStudioState());
         setProg('Done ✓', 1);
         toast(def.name + ' ✓');
       })
@@ -1713,7 +1875,8 @@ __rmRoot.RM = __rmRoot.RM || {};
     st.ab = 'B'; st.sel = -1; tp.offset = 0; st.zoom = 1;
     st._suppressClick = false;
     st._downbeat = null; // v27: new audio — downbeats re-analyze on next wave draw
-    clearUndo(); st.clip = null; // I2: rebuild = new baseline
+    // v29 F4: a rebuild no longer clears history — runRegen pushed a snapshot
+    // before it, so undo restores the pre-rebuild mix (buffer + full model).
     var sc = $('stu-scroll'); if (sc) sc.value = '0';
     renderAll();
   }
@@ -1948,7 +2111,7 @@ __rmRoot.RM = __rmRoot.RM || {};
       cur:function(){return st.current;}, bpm:function(){return st.bpm;}, secs:function(){return st.sections;},
       auto:function(){return st.automation||null;}, setAuto:function(p){st.automation=p||null;},
       apply:function(nb,o){o=o||{};var ob=st.current,od=ob?ob.duration:0,i;try{RM.wave.dropPeaks(ob);}catch(e){}
-        st.current=nb;st._downbeat=null; // v27: audio changed — downbeats re-analyze
+        st.current=nb;st._downbeat=null;st._lastSectionEdit=null; // v27: audio changed — downbeats re-analyze; v29 J3 P2-3: Apply key void
         if(o.bpm){st.bpm=o.bpm;st.barSec=240/o.bpm;}
         if(o.sections){for(i=0;i<st.sections.length&&i<o.sections.length;i++)st.sections[i].lenSec=o.sections[i];}
         else if(o.rescale&&od>0){var r=nb.duration/od;for(i=0;i<st.sections.length;i++)st.sections[i].lenSec*=r;}
@@ -1981,7 +2144,11 @@ __rmRoot.RM = __rmRoot.RM || {};
       doUndo: doUndo, doRedo: doRedo, clearUndo: clearUndo,
       doExport: doExport,
       cmdBegin: cmdBegin, cmdEnd: cmdEnd, pushUndo: pushUndo, applyCmd: applyCmd,
+      regionMatches: regionMatches, bufFingerprint: bufFingerprint, // v29 J3 P2-5
       permuteSections: permuteSections,
+      commitLanes: commitLanes, runRegen: runRegen,
+      applySectionEdit: applySectionEdit, swapVocalSource: swapVocalSource,
+      captureStudioState: captureStudioState, pushStateCommand: pushStateCommand,
       MAX_UNDO: MAX_UNDO,
     },
   };

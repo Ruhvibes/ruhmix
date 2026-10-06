@@ -522,10 +522,14 @@ public class MainActivity extends ComponentActivity {
                         }
                         pendingAudioAction = null;
                         cancelPendingFileChooser();
+                        // v29 F1: pick dead hai — JS bridge disarm.
+                        callJs("if(window.onAudioPicked){window.onAudioPicked({ok:[],failed:[]})}");
                     })
                     .setNegativeButton("Not now", (d, w) -> {
                         pendingAudioAction = null;
                         cancelPendingFileChooser();
+                        // v29 F1: pick dead hai — JS bridge disarm.
+                        callJs("if(window.onAudioPicked){window.onAudioPicked({ok:[],failed:[]})}");
                     })
                     .setCancelable(false)
                     .show();
@@ -580,6 +584,8 @@ public class MainActivity extends ComponentActivity {
             } else {
                 audioPermDeniedBefore = true;
                 cancelPendingFileChooser();
+                // v29 F1: JS ko batao pick dead hai — armed bridge disarm ho (cancel path).
+                callJs("if(window.onAudioPicked){window.onAudioPicked({ok:[],failed:[]})}");
                 Toast.makeText(this,
                         "Permission not granted \u2014 please allow access in Settings > Apps > RuhMix > Permissions",
                         Toast.LENGTH_LONG).show();

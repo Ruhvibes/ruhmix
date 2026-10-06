@@ -157,6 +157,22 @@ RM.proj = (function () {
   }
   function get(id) { return list().find((x) => x.id === id) || null; }
 
+  // J4-3: regular (non-mashup) project ka rename — naam + updatedAt badlo,
+  // live editor state ko entry me leak mat karo. P.save() snapshotLive()
+  // chalata hai jo khule hue editor ki settings is entry par thop deta
+  // (wahi leak jise RM.v25projects.rename saveKeepSettings se rokta hai) —
+  // isliye persistAll seedha, save() ke bina.
+  function rename(id, name) {
+    const arr = list();
+    const p = arr.find((x) => x.id === id);
+    if (!p) return false;
+    const nm = String(name == null ? '' : name).trim().slice(0, 60);
+    if (nm) p.name = nm;
+    p.updatedAt = Date.now();
+    persistAll(arr);
+    return true;
+  }
+
   /* ---------- autosave + crash recovery ---------- */
   let _asTimer = 0;
 
@@ -426,7 +442,7 @@ RM.proj = (function () {
   function invalidateView(buffer) { try { viewCache.delete(buffer); } catch (e) {} }
 
   return {
-    create, list, save, remove, get,
+    create, list, save, remove, get, rename,
     serialize, deserialize,
     autosave, loadAutosave, markCleanExit, markDirty,
     needsRecovery, discardAutosave,

@@ -10,8 +10,9 @@
      3. Honest null display: detectBPM/detectKey null -> song.bpm/key null
         -> card shows "BPM —" / "Key —".
      4. Mode selector routes to the correct engine (resolveEngine matrix).
-     5. Nav mapping: Create tab -> v25 Create screen; old mashup screen
-        still reachable from the Home dashboard.
+     5. Nav mapping: Create tab -> v25 Create screen; all create entries
+        unified on the v25 Create screen (v29 P2-8 — no duplicate old-screen
+        routes).
      6. Orphan audit: zero orphans -> #bottomnav hidden; any orphan ->
         #bottomnav stays visible.
    ===================================================================== */
@@ -246,18 +247,26 @@ async function main() {
   shown.length = 0;
   SH.go('create');
   ok(shown[shown.length - 1] === 'v25create', "go('create') reaches the v25 Create screen", 'got ' + shown[shown.length - 1]);
-  // old mashup screen still reachable from the Home dashboard
+  // v29 P2-8: unified create route — Quick AI Mashup lands on the v25
+  // Create screen now (no duplicate old-screen entry point).
   shown.length = 0;
   SH.quickAiMashup();
-  ok(shown[shown.length - 1] === 'mashup', "Quick AI Mashup still opens the old mashup screen");
+  ok(shown[shown.length - 1] === 'v25create', "quickAiMashup redirects to the v25 Create screen", 'got ' + shown[shown.length - 1]);
+  // No duplicate "Quick AI Mashup" card on the Home dashboard.
+  const dupQuick = homeEl._all().some((e) => e.id === 'v25-c-quick');
+  ok(!dupQuick, 'Home dashboard has no duplicate Quick AI Mashup card');
+  ok(homeEl._all().some((e) => e.id === 'v25-c-create'), 'Home dashboard keeps the single Create New Mashup card');
 
   console.log('== orphan audit ==');
   const orphans = SH.auditAndHideOldNav();
   ok(Array.isArray(orphans) && orphans.length === 0, 'zero orphaned screens', 'orphans: ' + orphans.join(','));
   ok(bottomnav.style.display === 'none', '#bottomnav hidden when zero orphans');
-  for (const s of ['mashup', 'editor', 'remix', 'mixer']) {
+  for (const s of ['editor', 'remix', 'mixer']) {
     ok(!!moreGrid.querySelector('[data-go="' + s + '"]'), 'More grid has a "' + s + '" destination');
   }
+  // v29 P2-8: More-grid "Classic Mashup" routes to the unified Create screen.
+  ok(!!moreGrid.querySelector('[data-go="v25create"]'), 'More grid "Classic Mashup" routes to the v25 Create screen');
+  ok(!moreGrid.querySelector('[data-go="mashup"]'), 'More grid has no old mashup-screen route');
   ok(!!homeEl.querySelector('[data-go="more"]'), 'Home dashboard has a More Tools card');
   ok(!!homeEl.querySelector('[data-go="import"]'), 'Home dashboard keeps the Import card');
 

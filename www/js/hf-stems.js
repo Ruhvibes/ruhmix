@@ -435,6 +435,7 @@ RM.hfStems = (function () {
       A.toast(T('', 'Large file — upload may take a while'));
     }
     st.running = true;
+    badgeSep(true);
     const spaceUrl = cfg.url.replace(/\/+$/, '');
     const api = (cfg.apiName || DEFAULT_API).replace(/^\/+/, '') || DEFAULT_API;
     try {
@@ -560,6 +561,7 @@ RM.hfStems = (function () {
   /* ================= done: results + mixer ================= */
   function finishHf(stems) {
     st.running = false;
+    badgeSep(false);
     st.results = stems;
     stems.forEach((s) => RM.stems.results.push({ name: s.name, buffer: s.buffer, engine: 'hf' }));
     // Round-6 (W7 Issue 9): HF ke 2 stems (Vocal + Instrumental) ko stem pack me
@@ -610,6 +612,7 @@ RM.hfStems = (function () {
   /* ================= failure panel ================= */
   function failHf(msg, kind) {
     st.running = false;
+    badgeSep(false);
     stopHfPlayers();
     hideProgress();
     const box = $('ais-fail');
@@ -635,6 +638,15 @@ RM.hfStems = (function () {
   }
 
   /* ================= progress / abort ================= */
+  // J4-5: back se screen chhodne par bhi run background me chalta hai — tab
+  // persistent badge dikhao (tap = wapas AI screen par, jahan Cancel hai).
+  function badgeSep(on) {
+    try {
+      if (!A) return;
+      if (on) { if (A.showSepBadge) A.showSepBadge(T('', '🤗 AI separation running…'), 'aistem'); }
+      else if (A.hideSepBadge) A.hideSepBadge('aistem');
+    } catch (e) {}
+  }
   function showProgress(p, label, cancelable) {
     const box = $('ais-progress');
     if (!box) return;
@@ -674,6 +686,7 @@ RM.hfStems = (function () {
   function abortAll(silent) {
     if (!A && window.RM && RM.app) { A = RM.app; $ = A.$; } // render() se pehle bhi call ho sakta hai
     st.running = false;
+    badgeSep(false);
     if (st.xhr) { try { st.xhr.abort(); } catch (e) {} st.xhr = null; }
     if (st.abort) { try { st.abort.abort(); } catch (e) {} st.abort = null; }
     stopHfPlayers();

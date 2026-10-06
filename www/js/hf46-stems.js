@@ -336,6 +336,7 @@ RM.hf46Stems = (function () {
     catch (e) { return fail46('Could not prepare audio: ' + A.cleanErrMsg(e && e.message ? e.message : e), 'process'); }
     if (st.song.buffer.duration > 600) A.toast('Large file — upload may take a while');
     st.running = true;
+    badgeSep46(true);
     const spaceUrl = cfg.url.replace(/\/+$/, '');
     const api = (cfg.apiName || DEFAULT_API).replace(/^\/+/, '') || DEFAULT_API;
     const model = MODELS[cfg.model] || MODELS.htdemucs;
@@ -422,6 +423,7 @@ RM.hf46Stems = (function () {
   /* ================= done ================= */
   function finish46(stems, model) {
     st.running = false;
+    badgeSep46(false);
     stems.forEach((s) => RM.stems.results.push({ name: s.name, buffer: s.buffer, engine: 'hf46' }));
     try {
       RM.stems.setStemPack({
@@ -465,6 +467,7 @@ RM.hf46Stems = (function () {
   function fail46(msg, kind) {
     const h = H();
     st.running = false;
+    badgeSep46(false);
     hideProgress();
     const box = $('ais46-fail');
     if (!box) return;
@@ -521,9 +524,20 @@ RM.hf46Stems = (function () {
     const b = $('ais46-progress');
     if (b) { b.style.display = 'none'; b.innerHTML = ''; }
   }
+  // J4-5: back se screen chhodne par bhi run background me chalta hai — tab
+  // persistent badge dikhao (tap = wapas AI screen par).
+  function badgeSep46(on) {
+    try {
+      if (!A && window.RM && RM.app) { A = RM.app; }
+      if (!A) return;
+      if (on) { if (A.showSepBadge) A.showSepBadge('🤗 AI separation running…', 'aistem'); }
+      else if (A.hideSepBadge) A.hideSepBadge('aistem');
+    } catch (e) {}
+  }
   function abortAll(silent) {
     if (!A && window.RM && RM.app) { A = RM.app; $ = A.$; }
     st.running = false;
+    badgeSep46(false);
     if (st.xhr) { try { st.xhr.abort(); } catch (e) {} st.xhr = null; }
     if (st.abort) { try { st.abort.abort(); } catch (e) {} st.abort = null; }
     hideProgress();
