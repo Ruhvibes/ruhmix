@@ -99,12 +99,16 @@ window.RM = window.RM || {};
   }
 
   /* ================= feedforward peak compressor (pure) =================
-     Same family as the v25 mix/master chain: peak envelope follower,
-     threshold/ratio gain computer. Amount 0–100 → threshold −30…−6 dB,
-     ratio 1.5:1…6:1. */
+     Second-stage "glue" compressor after processVocal's fixed 3:1@−18 dB
+     stage. Amount 0–100 → threshold −34…−18 dB, ratio 1.5:1…6:1, so high
+     amounts still bite on what the first stage left behind. */
   function compressMono(x, sr, amount) {
     var a = clamp(amount, 0, 100) / 100;
-    var thrDb = -30 + 24 * a, ratio = 1.5 + 4.5 * a;
+    if (a <= 0) { // knob at 0 = true bypass
+      var cp = new Float32Array(x.length); cp.set(x);
+      return { out: cp, maxGrDb: 0 };
+    }
+    var thrDb = -34 + 16 * a, ratio = 1.5 + 4.5 * a;
     var attackSec = 0.010, releaseSec = 0.100;
     var thr = dbToLin(thrDb);
     var aA = 1 - Math.exp(-1 / (attackSec * sr));
@@ -137,19 +141,16 @@ window.RM = window.RM || {};
     return ir;
   }
   function naiveConvolve(x, ir) {
+    // Proper (causal) convolution: y[i] = sum_j x[i-j] * ir[j].
+    // Node-test fallback for short buffers; the browser path uses a real
+    // OfflineAudioContext convolver instead.
     var n = x.length, m = ir.length, y = new Float32Array(n), i, j;
     for (i = 0; i < n; i++) {
-      var s = 0, kmax = Math.min(m, n - i);
-      for (j = 0; j < kmax; j++) s += x[i + j] * ir[j];
+      var s = 0, jmax = Math.min(m, i + 1);
+      for (j = 0; j < jmax; j++) s += x[i - j] * ir[j];
       y[i] = s;
     }
     return y;
-  }
-  function irBuffer(ir, sr) {
-    var OC = global.OfflineAudioContext || global.webkitOfflineAudioContext;
-    var oc = new OC(1, ir.length, sr);
-    oc.createBuffer(1, ir.length, sr).getChannelData(0).set(ir);
-    return { oc: oc, buf: oc.createBuffer(1, ir.length, sr) };
   }
   // Wet reverb tail for a mono signal. Browser: real convolver in an
   // OfflineAudioContext. Node (no OfflineAudioContext): naive convolution
@@ -245,3 +246,394 @@ window.RM = window.RM || {};
     }
     return buf;
   }
+
+  /* ================= vocal chain (pure, async for reverb) =================
+     opts: { deess:0-100, harsh:0-100, comp:0-100, eq7:{bandId:db},
+             reverb:0-100, delay:0-100 }
+     Input: mono Float32Array. Returns { proc, rev, dly, meta } where
+       proc = processed dry vocal, rev/dly = wet send signals (mono). */
+  function processVocalChain(x, sr, opts) {
+    opts = opts || {};
+    if (!RM.v25mix || typeof RM.v25mix.processVocal !== 'function')
+      return Promise.reject(new Error('vocal engine (v25mix) not loaded'));
+    if (!RM.fx || !RM.fx.eq7)
+      return Promise.reject(new Error('EQ engine (fx.eq7) not loaded'));
+    var meta = { deessDips: 0, deessMaxDb: 0, harshDips: 0, harshMaxDb: 0, compGrDb: 0 };
+    // processVocal needs an AudioBuffer-like; wrap the mono signal.
+    var inBuf = shimBuffer(2, x.length, sr);
+    inBuf.getChannelData(0).set(x);
+    inBuf.getChannelData(1).set(x);
+    var deess = clamp(opts.deess || 0, 0, 100);
+    var harsh = clamp(opts.harsh || 0, 0, 100);
+    var pv = RM.v25mix.processVocal(inBuf, {
+      deess: deess > 0 ? { maxDipDb: deess / 100 * 10, thrFactor: 0.4 } : { maxDipDb: 0, thrFactor: 10 },
+      harsh: harsh > 0 ? { maxDipDb: harsh / 100 * 6, thrFactor: 0.5 } : { maxDipDb: 0, thrFactor: 10 },
+    });
+    meta.deessDips = pv.meta.deess.dips; meta.deessMaxDb = pv.meta.deess.maxDipDb;
+    meta.harshDips = pv.meta.harshTame.dips; meta.harshMaxDb = pv.meta.harshTame.maxDipDb;
+    var proc = new Float32Array(x.length);
+    proc.set(pv.buffer.getChannelData(0).subarray(0, x.length));
+    // 7-band EQ (buffer domain, real biquads) on the processed vocal.
+    var eqTmp = shimBuffer(1, proc.length, sr);
+    eqTmp.getChannelData(0).set(proc);
+    var eqOut = RM.fx.eq7.applyToBuffer(eqTmp, opts.eq7 || {});
+    proc.set(eqOut.getChannelData(0).subarray(0, proc.length));
+    // Compressor amount knob.
+    var comp = clamp(opts.comp || 0, 0, 100);
+    if (comp > 0) {
+      var cr = compressMono(proc, sr, comp);
+      proc = cr.out; meta.compGrDb = Math.round(cr.maxGrDb * 10) / 10;
+    }
+    // Sends (wet only; dry stays in proc).
+    var revAmt = clamp(opts.reverb || 0, 0, 100) / 100 * 0.5;
+    var dlyAmt = clamp(opts.delay || 0, 0, 100) / 100 * 0.45;
+    var revP = revAmt > 0 ? reverbWet(proc, sr, revAmt, 1.6, 2.4)
+                          : Promise.resolve(new Float32Array(proc.length));
+    var dly = dlyAmt > 0 ? delaySend(proc, sr, dlyAmt, 0.375, 0.35, 4)
+                         : new Float32Array(proc.length);
+    return revP.then(function (rev) {
+      return { proc: proc, rev: rev, dly: dly, meta: meta };
+    });
+  }
+
+  /* ---- sections path: process the Studio's vocal sections of the mix.
+     Delta approach: only the *change* from vocal processing (plus sends)
+     is added to the untouched dry stereo mix, so the stereo image of the
+     beat survives. Sidechain ON ducks the dry mix under the vocal. ---- */
+  function applyToSections(mix, ranges, opts) {
+    var sr = mix.sampleRate, nCh = mix.numberOfChannels;
+    var out = dupBuf(mix);
+    var report = { kind: 'sections', ranges: 0, deessDips: 0, deessMaxDb: 0, compGrDb: 0, duck: !!opts.duck };
+    var chain = Promise.resolve();
+    ranges.forEach(function (r) {
+      chain = chain.then(function () {
+        var a = clamp(Math.round(r.aSec * sr), 0, mix.length);
+        var b = clamp(Math.round(r.bSec * sr), 0, mix.length);
+        if (b - a < 64) return null;
+        var slice = allocBuf(nCh, b - a, sr);
+        var ch, i;
+        for (ch = 0; ch < nCh; ch++)
+          slice.getChannelData(ch).set(mix.getChannelData(ch).subarray(a, b));
+        var mono = monoMean(slice);
+        return processVocalChain(mono, sr, opts).then(function (vc) {
+          var n = b - a;
+          var duck = opts.duck ? duckGains(vc.proc, sr, 3) : null;
+          var edge = Math.min(Math.round(0.008 * sr), Math.floor(n / 4));
+          for (i = 0; i < n; i++) {
+            var f = 1;
+            if (edge > 0) {
+              if (i < edge) f = 0.5 - 0.5 * Math.cos(Math.PI * i / edge);
+              else if (i >= n - edge) f = 0.5 - 0.5 * Math.cos(Math.PI * (n - 1 - i) / edge);
+            }
+            var add = (vc.proc[i] - mono[i] + vc.rev[i] + vc.dly[i]) * f;
+            for (ch = 0; ch < nCh; ch++) {
+              var d = out.getChannelData(ch);
+              if (duck) {
+                var g = 1 - (1 - duck[i]) * f;
+                d[a + i] = d[a + i] * g + add;
+              } else {
+                d[a + i] = d[a + i] + add;
+              }
+            }
+          }
+          report.ranges++;
+          report.deessDips += vc.meta.deessDips;
+          if (vc.meta.deessMaxDb > report.deessMaxDb) report.deessMaxDb = vc.meta.deessMaxDb;
+          if (vc.meta.compGrDb > report.compGrDb) report.compGrDb = vc.meta.compGrDb;
+          return null;
+        });
+      });
+    });
+    return chain.then(function () { return { buffer: out, report: report }; });
+  }
+
+  /* ---- stems path: the vocals stem lane is the true isolated vocal.
+     Process it, optionally duck the instrumental lane under it, rebuild
+     the lane mix honouring mute/solo/gainDb like the Studio's own
+     lane commit (vocals + instrumental form the exact partition). ---- */
+  function applyToStems(stems, laneUI, opts) {
+    var sr = stems.vocals.sampleRate;
+    var n = Math.min(stems.vocals.length, stems.instrumental.length);
+    function laneGain(id) {
+      var u = (laneUI && laneUI[id]) || {};
+      if (u.mute) return 0;
+      var anySolo = (laneUI && ((laneUI.vocals && laneUI.vocals.solo) || (laneUI.instrumental && laneUI.instrumental.solo)));
+      if (anySolo && !u.solo) return 0;
+      return dbToLin(u.gainDb || 0);
+    }
+    var vocMono = monoMean(stems.vocals).subarray(0, n);
+    var monoCopy = new Float32Array(n); monoCopy.set(vocMono);
+    return processVocalChain(monoCopy, sr, opts).then(function (vc) {
+      var nCh = Math.max(stems.vocals.numberOfChannels, stems.instrumental.numberOfChannels, 2);
+      var vocOut = allocBuf(nCh, n, sr), ch, i;
+      for (ch = 0; ch < nCh; ch++) {
+        var vd = vocOut.getChannelData(ch);
+        for (i = 0; i < n; i++) vd[i] = vc.proc[i] + vc.rev[i] + vc.dly[i];
+      }
+      var insOut = allocBuf(nCh, n, sr);
+      for (ch = 0; ch < nCh; ch++) {
+        var sd = stems.instrumental.getChannelData(Math.min(ch, stems.instrumental.numberOfChannels - 1));
+        insOut.getChannelData(ch).set(sd.subarray(0, n));
+      }
+      if (opts.duck) insOut = applyDuck(insOut, duckGains(vc.proc, sr, 3));
+      var gv = laneGain('vocals'), gi = laneGain('instrumental');
+      for (ch = 0; ch < nCh; ch++) {
+        var vch = vocOut.getChannelData(ch), ich = insOut.getChannelData(ch);
+        for (i = 0; i < n; i++) ich[i] = ich[i] * gi + vch[i] * gv;
+      }
+      softLimit(insOut, 0.71);
+      return {
+        buffer: insOut,
+        report: {
+          kind: 'stems', ranges: 1, deessDips: vc.meta.deessDips,
+          deessMaxDb: vc.meta.deessMaxDb, compGrDb: vc.meta.compGrDb, duck: !!opts.duck,
+        },
+      };
+    });
+  }
+
+  /* ================= undo =================
+     Uses window.__v26pushUndo / window.__v26undo when another v26 worker
+     created them (I2/I3); otherwise this file's own mini-stack, published
+     under the same names for later workers. Contract:
+       __v26pushUndo(label, undoFn) — push; __v26undo() — pop & run. */
+  var undoStack = [];
+  function miniPushUndo(label, undoFn) {
+    undoStack.push({ label: label, fn: undoFn });
+    if (undoStack.length > 8) undoStack.shift();
+    refreshUndoBtn();
+  }
+  function miniUndo() {
+    var e = undoStack.pop();
+    refreshUndoBtn();
+    if (e) { try { e.fn(); } catch (err) { /* honest: nothing to roll back to */ } return true; }
+    return false;
+  }
+  var pushUndoFn, undoFn;
+  if (typeof global.__v26pushUndo === 'function') {
+    pushUndoFn = global.__v26pushUndo;
+    undoFn = (typeof global.__v26undo === 'function') ? global.__v26undo : miniUndo;
+  } else {
+    pushUndoFn = miniPushUndo; undoFn = miniUndo;
+    global.__v26pushUndo = miniPushUndo;
+    global.__v26undo = miniUndo;
+  }
+  function refreshUndoBtn() {
+    if (typeof document === 'undefined') return;
+    var b = document.getElementById('v26v-undo');
+    if (b) { b.disabled = undoStack.length === 0; b.textContent = '↩ Undo' + (undoStack.length ? ' (' + undoStack.length + ')' : ''); }
+  }
+
+  /* ================= Studio bridge ================= */
+  function studio() { return (RM.v25studio && RM.v25studio.getMixBuffer) ? RM.v25studio : null; }
+  function detectTarget() {
+    var S = studio();
+    if (!S) return { type: 'none', why: 'Studio not ready' };
+    var mix = S.getMixBuffer();
+    if (!mix || !mix.getChannelData) return { type: 'none', why: 'Load a mashup in Studio first' };
+    var stems = S.getStems ? S.getStems() : null;
+    if (stems && stems.vocals && typeof stems.vocals.getChannelData === 'function')
+      return { type: 'stems', why: 'vocals stem lane' };
+    var ranges = S.getSectionRanges ? S.getSectionRanges() : [];
+    var vocal = ranges.filter(function (r) { return r.kind === 'vocal'; });
+    if (vocal.length) return { type: 'sections', ranges: vocal, why: vocal.length + ' vocal section(s)' };
+    return { type: 'none', why: 'No vocal sections — extract stems first' };
+  }
+
+  /* ================= UI ================= */
+  var KNOBS = [
+    { id: 'deess',  label: 'De-ess',     min: 0, max: 100, val: 50, unit: '%', hint: 'Dynamic 4–8 kHz sibilance dip' },
+    { id: 'harsh',  label: 'Harsh tame', min: 0, max: 100, val: 40, unit: '%', hint: 'Dynamic 2–5 kHz resonance cut' },
+    { id: 'comp',   label: 'Compressor', min: 0, max: 100, val: 35, unit: '%', hint: 'Glue compressor, −34…−18 dB thr, 1.5–6:1' },
+    { id: 'reverb', label: 'Reverb send', min: 0, max: 100, val: 25, unit: '%', hint: 'Generated-IR convolver send' },
+    { id: 'delay',  label: 'Delay send', min: 0, max: 100, val: 15, unit: '%', hint: '0.375 s echo taps send' },
+  ];
+  function readOpts() {
+    var o = { duck: false, eq7: {} };
+    if (typeof document === 'undefined') return o;
+    KNOBS.forEach(function (k) {
+      var el = document.getElementById('v26v-' + k.id);
+      o[k.id] = el ? clamp(+el.value || 0, k.min, k.max) : k.val;
+    });
+    (RM.fx.eq7.BANDS || []).forEach(function (b) {
+      var el = document.getElementById('v26v-eq-' + b.id);
+      o.eq7[b.id] = el ? clamp(+el.value || 0, -12, 12) : 0;
+    });
+    var dk = document.getElementById('v26v-duck');
+    o.duck = !!(dk && dk.checked);
+    return o;
+  }
+  function fmtReport(r) {
+    var bits = [];
+    bits.push(r.kind === 'stems' ? 'vocals stem lane' : r.ranges + ' vocal section(s)');
+    bits.push('de-ess ' + r.deessDips + ' dips (−' + r.deessMaxDb + ' dB max)');
+    if (r.compGrDb > 0) bits.push('comp GR ' + r.compGrDb + ' dB');
+    bits.push('sidechain ' + (r.duck ? 'ON' : 'OFF'));
+    return 'Applied to ' + bits.join(' · ');
+  }
+  function setStatus(msg) {
+    if (typeof document === 'undefined') return;
+    var el = document.getElementById('v26v-status');
+    if (el) el.textContent = msg;
+  }
+  function setBusy(b, msg) {
+    if (typeof document === 'undefined') return;
+    var btn = document.getElementById('v26v-apply');
+    if (btn) btn.disabled = b;
+    setStatus(msg || '');
+  }
+
+  function onApply() {
+    var S = studio();
+    if (!S) { setStatus('Studio not ready yet.'); return; }
+    var mix = S.getMixBuffer();
+    if (!mix) { setStatus('Load a mashup in Studio first 🎵'); return; }
+    var target = detectTarget();
+    if (target.type === 'none') { setStatus(target.why + '.'); return; }
+    var o = readOpts();
+    setBusy(true, 'Processing vocal (' + target.why + ')…');
+    var prev = dupBuf(mix);
+    var done;
+    if (target.type === 'stems') {
+      var laneUI = S.getLaneUI ? S.getLaneUI() : {};
+      done = applyToStems(S.getStems(), laneUI || {}, o);
+    } else {
+      done = applyToSections(mix, target.ranges, o);
+    }
+    done.then(function (res) {
+      pushUndoFn('Vocal chain', function () { S.commitMixBuffer(prev, 'Undo: vocal chain'); });
+      S.commitMixBuffer(res.buffer, 'Vocal chain applied ✓');
+      setBusy(false, fmtReport(res.report) + '.');
+      refreshTarget();
+    }).catch(function (e) {
+      setBusy(false, 'Failed: ' + (e && e.message ? e.message : e));
+    });
+  }
+
+  function refreshTarget() {
+    if (typeof document === 'undefined') return;
+    var el = document.getElementById('v26v-target');
+    if (el) el.textContent = detectTarget().why;
+  }
+
+  function sliderRow(id, label, min, max, step, val, unit, hint) {
+    return '<div class="row"><label style="flex:1" title="' + hint + '">' + label +
+      ' <input type="range" id="' + id + '" min="' + min + '" max="' + max +
+      '" step="' + step + '" value="' + val + '" aria-label="' + label + '">' +
+      ' <span id="' + id + '-v">' + val + unit + '</span></label></div>';
+  }
+  function panelHTML() {
+    var h = '<div class="panel" id="v26-vocal-panel">' +
+      '<h4>🎤 Vocal Chain <span class="beta">Smart DSP</span></h4>' +
+      '<div class="muted small">Real on-device vocal processing — "Smart" DSP, not AI. ' +
+      'Target: <b id="v26v-target">…</b></div>';
+    KNOBS.forEach(function (k) {
+      h += sliderRow('v26v-' + k.id, k.label, k.min, k.max, 1, k.val, k.unit, k.hint);
+    });
+    h += '<h5 style="margin:8px 0 2px">7-band Vocal EQ <span class="muted small">−12…+12 dB</span></h5>';
+    (RM.fx.eq7.BANDS || []).forEach(function (b) {
+      h += sliderRow('v26v-eq-' + b.id, b.label + ' <span class="muted small">' + b.freq + ' Hz</span>',
+        -12, 12, 0.5, 0, ' dB', b.type + ' @ ' + b.freq + ' Hz');
+    });
+    h += '<div class="row"><label title="Duck the instrumental under the vocal (real envelope follower, max −3 dB)">' +
+      '<input type="checkbox" id="v26v-duck" checked> Sidechain ducking <span class="muted small">instrumental −3 dB max under vocal</span></label></div>';
+    h += '<div class="btn-row">' +
+      '<button class="btn primary" id="v26v-apply">✨ Apply to vocal</button>' +
+      '<button class="btn" id="v26v-undo" disabled>↩ Undo</button>' +
+      '<button class="btn ghost" id="v26v-reset">Reset</button></div>' +
+      '<div class="muted small" id="v26v-status" style="margin-top:6px"></div>' +
+      '</div>';
+    return h;
+  }
+  function wirePanel() {
+    if (typeof document === 'undefined') return;
+    KNOBS.forEach(function (k) {
+      var el = document.getElementById('v26v-' + k.id);
+      if (el) el.addEventListener('input', function () {
+        var v = document.getElementById('v26v-' + k.id + '-v');
+        if (v) v.textContent = el.value + k.unit;
+      });
+    });
+    (RM.fx.eq7.BANDS || []).forEach(function (b) {
+      var el = document.getElementById('v26v-eq-' + b.id);
+      if (el) el.addEventListener('input', function () {
+        var v = document.getElementById('v26v-eq-' + b.id + '-v');
+        if (v) v.textContent = (+el.value).toFixed(1) + ' dB';
+      });
+    });
+    var ap = document.getElementById('v26v-apply');
+    if (ap) ap.addEventListener('click', onApply);
+    var un = document.getElementById('v26v-undo');
+    if (un) un.addEventListener('click', function () { undoFn(); refreshTarget(); });
+    var rs = document.getElementById('v26v-reset');
+    if (rs) rs.addEventListener('click', function () {
+      KNOBS.forEach(function (k) {
+        var el = document.getElementById('v26v-' + k.id);
+        if (el) { el.value = k.val; el.dispatchEvent(new Event('input')); }
+      });
+      (RM.fx.eq7.BANDS || []).forEach(function (b) {
+        var el = document.getElementById('v26v-eq-' + b.id);
+        if (el) { el.value = 0; el.dispatchEvent(new Event('input')); }
+      });
+      var dk = document.getElementById('v26v-duck');
+      if (dk) dk.checked = true;
+      setStatus('Knobs reset.');
+    });
+  }
+  // Inject the panel into the Studio screen (which v25-studio.js renders
+  // dynamically — there is no static #screen-studio in index.html).
+  function injectPanel(attempts) {
+    if (typeof document === 'undefined') return;
+    if (document.getElementById('v26-vocal-panel')) return;
+    var anchor = document.getElementById('stu-commit-lanes');
+    var hostPanel = anchor && anchor.closest ? anchor.closest('.panel') : null;
+    var host = hostPanel || document.getElementById('stu-main');
+    if (!host) {
+      if (attempts > 0) setTimeout(function () { injectPanel(attempts - 1); }, 300);
+      return;
+    }
+    var tmp = document.createElement('div');
+    tmp.innerHTML = panelHTML();
+    var panel = tmp.firstChild;
+    if (hostPanel && hostPanel.nextSibling) hostPanel.parentNode.insertBefore(panel, hostPanel.nextSibling);
+    else if (hostPanel) hostPanel.parentNode.appendChild(panel);
+    else host.appendChild(panel);
+    wirePanel();
+    refreshTarget();
+    // Keep the target label fresh when the Studio screen is (re)opened.
+    setInterval(refreshTarget, 2000);
+  }
+  function boot() {
+    if (typeof document === 'undefined') return;
+    if (document.readyState === 'loading')
+      document.addEventListener('DOMContentLoaded', function () { injectPanel(40); });
+    else injectPanel(40);
+  }
+
+  V.KNOBS = KNOBS;
+  V.detectTarget = detectTarget;
+  V.readOpts = readOpts;
+  V.apply = onApply;
+  V.undo = function () { return undoFn(); };
+  V._panelHTML = panelHTML;
+  RM.v26vocal = V;
+  boot();
+
+  /* ================= node test hook (browser-harmless) ================= */
+  try {
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = {
+        api: { processVocalChain: processVocalChain, applyToSections: applyToSections, applyToStems: applyToStems },
+        internals: {
+          shimBuffer: shimBuffer, allocBuf: allocBuf, dupBuf: dupBuf, monoMean: monoMean,
+          dbToLin: dbToLin, clamp: clamp, maxAbsArr: maxAbsArr, rmsArr: rmsArr,
+          bandEnergy: bandEnergy, crestFactor: crestFactor,
+          compressMono: compressMono, makeReverbIR: makeReverbIR,
+          naiveConvolve: naiveConvolve, reverbWet: reverbWet, delaySend: delaySend,
+          duckGains: duckGains, applyDuck: applyDuck, softLimit: softLimit,
+          KNOBS: KNOBS,
+        },
+      };
+    }
+  } catch (e) { /* browser */ }
+})(typeof window !== 'undefined' ? window : globalThis);
