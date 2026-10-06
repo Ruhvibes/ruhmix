@@ -137,7 +137,7 @@ RM.app = (function () {
   state.fx = defaultFx();
 
   /* ================= navigation ================= */
-  const SCREENS = ['home','import','editor','remix','slowed','stems','aistem','mixer','fx','master','record','export','projects','settings','more'];
+  const SCREENS = ['home','import','editor','remix','slowed','mashup','stems','aistem','mixer','fx','master','record','export','projects','settings','more'];
   function show(name, fromPop) {
     if (!SCREENS.includes(name)) name = 'home';
     const prev = state.screen;
@@ -578,6 +578,19 @@ RM.app = (function () {
 
   // Called by the native shell: window.Android.pickAudio() / importMusic() result.
   // Dono formats: purana string array, aur naya {ok:[file://...], failed:[{name, reason}]}.
+  /* ================= Auto Mashup picker interception (Worker 3) =================
+     mashup-screen.js sets RM.mashupScreen.pickTarget = 1|2, then routes to the
+     import screen via the exact #cdx-pick flow (RM.ux.pickMusic). At the two
+     landing points where a picked track would normally enter the editor, the
+     decoded AudioBuffer + name is delivered to the mashup slot instead, and
+     the user is returned to the mashup screen. */
+  function mashupIntercept(buffer, name) {
+    const ms = window.RM && RM.mashupScreen;
+    if (!ms || !ms.pickTarget || typeof ms.onPicked !== 'function') return false;
+    try { ms.onPicked(ms.pickTarget, buffer, name); } catch (e) { console.log('[mashup] onPicked failed', e); }
+    return true;
+  }
+
   function handleAudioPicked(paths) {
     if (paths == null) return;
     let okList = [], failedList = [];
@@ -636,6 +649,8 @@ RM.app = (function () {
       const d = music.directBuf;
       music.directLoad = false; music.directBuf = null;
       if (d && d.buffer) {
+        // Mashup picker: pending pick -> buffer lands in the mashup slot.
+        if (mashupIntercept(d.buffer, d.name)) return;
         // Ultra-simple: song tap -> seedha editor (koi "Use" button nahi)
         loadAudioBuffer(d.buffer, d.name, { name: d.name, size: 0, type: '', lastModified: Date.now() });
         return;
@@ -673,6 +688,8 @@ RM.app = (function () {
         <button class="btn small" data-act="use">${'Use'}</button>
         <button class="btn small ghost" data-act="del">✕</button>`;
       d.querySelector('[data-act="use"]').addEventListener('click', () => {
+        // Mashup picker (Files tab): "Use" delivers to the mashup slot.
+        if (mashupIntercept(it.buffer, it.name)) return;
         loadAudioBuffer(it.buffer, it.name, { name: it.name, size: it.size, type: it.type, lastModified: Date.now() });
       });
       d.querySelector('[data-act="del"]').addEventListener('click', () => {
@@ -2737,6 +2754,9 @@ Object.assign(RM.app, (function () {
       if (!A.needAudio()) return;
       A.show('export');
     });
+    // Auto Mashup home card (Worker 3): direct nav, no audio required.
+    const mashBtn = $('home-mashup');
+    if (mashBtn) mashBtn.addEventListener('click', () => A.show('mashup'));
     $('home-search').addEventListener('input', (e) => {
       const q = e.target.value.trim().toLowerCase();
       document.querySelectorAll('#cdx-fxgrid .cdx-fxcard, #cdx-protools .cdx-procard').forEach((c) => {
