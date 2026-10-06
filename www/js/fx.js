@@ -285,6 +285,8 @@ RM.fx = (function () {
       setSpeed(hz, immediate) { st.speed = clamp(+hz || 0.12, 0.05, 1); apply(immediate ? 0 : 0.03); },
       setDepth(d, immediate) { st.depth = clamp(+d || 0, 0, 1); apply(immediate ? 0 : 0.03); },
       getSettings() { return { mode: st.mode, speed: +st.speed.toFixed(3), depth: +st.depth.toFixed(3) }; },
+      // Test hook: true jab 360° branch ka input physically disconnected hai.
+      isS360Starved() { return s360Starved; },
       dispose() {
         s360Gen++; // pending starve timer dead chain ko dobara wire na kare
         try { N.lfo.stop(); } catch (e) {}

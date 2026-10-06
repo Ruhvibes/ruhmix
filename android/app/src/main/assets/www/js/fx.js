@@ -209,6 +209,20 @@ RM.fx = (function () {
     N.input.connect(N.dly); N.dly.connect(N.dlyWet); N.dlyWet.connect(N.output);
 
     const st = { mode: 'off', speed: 0.12, depth: 1 };
+    // Idle true-bypass for the 360° HRTF branch: mode '360' ke alawa iska
+    // input physically disconnected rehta hai. gate=0 se output silent to
+    // tha hi, lekin HRTF panner har sample process karta rehta tha (stutter
+    // rule: convolver/FX off me bilkul idle hone chahiye). Disconnect 400ms
+    // delayed + gen-guarded hai taaki gate glide (tc 0.3) pehle output ko 0
+    // pe la sake — turant disconnect wet tail kaat ke click dega.
+    let s360Starved = false, s360Gen = 0;
+    function setS360Starved(starved) {
+      starved = !!starved;
+      if (starved === s360Starved) return;
+      s360Starved = starved;
+      if (starved) { try { N.input.disconnect(N.s360.input); } catch (e) {} }
+      else { try { N.input.connect(N.s360.input); } catch (e) {} }
+    }
     function targets() {
       const m = SPATIAL_MODES[st.mode] || SPATIAL_MODES.off;
       const k = clamp(st.depth, 0, 1); // depth slider = intensity
@@ -240,6 +254,11 @@ RM.fx = (function () {
       N.s360.setSpeed(tg.freq, imm);
       N.s360.setDepth(st.depth, imm);
       N.s360.setOn(tg.s360, imm);
+      // 360° branch input: sirf '360' mode me wired; baaki modes me 400ms
+      // baad physically disconnect (gate glide ke baad, click-free).
+      const g360 = ++s360Gen;
+      if (tg.s360) setS360Starved(false);
+      else setTimeout(() => { if (g360 === s360Gen) setS360Starved(true); }, 400);
     }
     const api = {
       input: N.input, output: N.output, nodes: N,
@@ -266,7 +285,10 @@ RM.fx = (function () {
       setSpeed(hz, immediate) { st.speed = clamp(+hz || 0.12, 0.05, 1); apply(immediate ? 0 : 0.03); },
       setDepth(d, immediate) { st.depth = clamp(+d || 0, 0, 1); apply(immediate ? 0 : 0.03); },
       getSettings() { return { mode: st.mode, speed: +st.speed.toFixed(3), depth: +st.depth.toFixed(3) }; },
+      // Test hook: true jab 360° branch ka input physically disconnected hai.
+      isS360Starved() { return s360Starved; },
       dispose() {
+        s360Gen++; // pending starve timer dead chain ko dobara wire na kare
         try { N.lfo.stop(); } catch (e) {}
         try { N.lfo2.stop(); } catch (e) {}
         try { N.s360.dispose(); } catch (e) {} // HRTF branch LFOs first
@@ -579,6 +601,7 @@ RM.fx = (function () {
       getSpatial() { return N.spatial.getSettings(); },
       getBypass() { return { reverb: reverbBypassed, spatial: spatialBypassed }; },
       dispose() {
+        spatialGen++; // pending off->bypass timer dead chain ko dobara wire na kare
         try { N.spatial.dispose(); } catch (e) {} // pehle: iske LFOs stop hon
         try { N.chLFO.stop(); } catch (e) {}
         Object.keys(N).forEach(k => {

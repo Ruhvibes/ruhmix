@@ -191,11 +191,22 @@ window.RM = window.RM || {};
 
   // Export complete/cancel ke baad (coordinator patch app.js me ye call
   // karega) wapas origin screen par.
+  // ROOT FIX: openExport() ne 'export' ko history ke sabse upar push kiya
+  // tha, isliye wapas jaane ke liye history.back() use karo — a.show(origin)
+  // yahan naya push karta, aur phir Back dabane par export<->origin ke
+  // beech ping-pong loop ban jata tha (dead-end back behavior).
   function onExportFinished() {
     var o = ux.origin;
     ux.origin = null;
     var a = A();
-    if (o && a) { try { a.show(o); } catch (e) {} }
+    if (!o || !a) return;
+    try {
+      if (a.state.screen === 'export' && window.history && typeof history.back === 'function') {
+        history.back(); // popstate -> show(origin, fromPop) — koi naya push nahi
+        return;
+      }
+      a.show(o);
+    } catch (e) { try { a.show(o); } catch (e2) {} }
   }
 
   /* ================= wiring ================= */

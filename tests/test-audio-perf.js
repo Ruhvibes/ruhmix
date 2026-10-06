@@ -182,6 +182,16 @@ const PAGE_TESTS = `async () => {
     await new Promise((r) => setTimeout(r, 600));
     const g5 = chain.getBypass();
     ok('spatial off->16d race: ends un-bypassed', g5.spatial === false, JSON.stringify(g5));
+    // 360° HRTF branch input starve (true bypass — gate=0 ke alawa panner
+    // bhi idle hona chahiye jab mode '360' nahi hai)
+    const sp = chain.nodes.spatial;
+    await new Promise((r) => setTimeout(r, 600));
+    ok('360 branch: input starved when mode != 360', sp.isS360Starved() === true, '');
+    chain.set('spatialMode', '360');
+    ok('360 branch: input wired in 360 mode', sp.isS360Starved() === false, '');
+    chain.set('spatialMode', 'off');
+    await new Promise((r) => setTimeout(r, 600));
+    ok('360 branch: input re-starved after leaving 360', sp.isS360Starved() === true, '');
     try { chain.dispose(); } catch (e) {}
     try { await oc.close(); } catch (e) {}
   } catch (e) { ok('bypass engagement', false, String(e && e.message || e)); }

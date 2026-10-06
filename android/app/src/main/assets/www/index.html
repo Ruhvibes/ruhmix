@@ -62,6 +62,7 @@
 
   <!-- 4. Big Share / Export -->
   <button class="btn cdx-share" id="cdx-share"><span class="cdx-share-title">📤 Share / Export</span><span class="cdx-share-sub">MP3 • WAV • FLAC</span></button>
+  <button class="btn cdx-share" id="home-mashup"><span class="cdx-share-title">🤖 AI Mashup</span><span class="cdx-share-sub">Vocals × Beat — auto mix</span></button>
 
   <!-- 5. Pro Tools -->
   <div class="sec-head">
@@ -202,6 +203,25 @@
     <div class="row"><label>Stereo Width <input type="range" id="sl-width" min="0" max="2" step="0.1" value="1.2"></label><span id="sl-width-v">1.2</span></div>
   </div>
   <button class="btn primary big block" id="sl-play">▶ Preview</button>
+</section>
+
+<!-- ======================= 5b. AUTO MASHUP ======================= -->
+<section class="screen" id="screen-mashup">
+  <h2>🤖 Auto Mashup</h2>
+  <p class="muted">Smart BPM + key matching</p>
+  <p id="mashup-engine-tag" class="mashup-tag"></p>
+  <button class="btn big" id="mashup-pick1">🎤 Song 1 — Vocals</button>
+  <div id="mashup-name1" class="muted">No song selected</div>
+  <button class="btn big" id="mashup-pick2">🥁 Song 2 — Beat</button>
+  <div id="mashup-name2" class="muted">No song selected</div>
+  <p class="muted small" id="mashup-honest">Smart DSP vocal isolation • tempo &amp; key auto-matched. No fake AI claims.</p>
+  <button class="btn primary big" id="mashup-make">✨ Create Auto Mashup</button>
+  <div id="mashup-progress" hidden><div id="mashup-prog-label"></div><div class="prog"><div id="mashup-prog-bar"></div></div></div>
+  <div id="mashup-result" hidden>
+    <div id="mashup-meta" class="muted"></div>
+    <button class="btn big" id="mashup-play">▶ Preview</button>
+    <button class="btn primary big" id="mashup-export">📤 Export / Share</button>
+  </div>
 </section>
 
 <!-- ======================= 6. STEMS ======================= -->
@@ -517,6 +537,11 @@
 <script src="js/export.js"></script>
 <script src="js/projects.js"></script>
 <script src="js/import-hardening.js"></script>
+<script src="js/mashup-dsp.js"></script>
+<script src="js/mashup.js"></script>
+<script src="js/mashup-stems.js"></script>
+<script src="js/mashup-export.js"></script>
+<script src="js/mashup-screen.js"></script>
 <script src="js/app.js"></script>
 <script src="js/ux-flow.js"></script>
 <script src="js/cdx.js"></script>
