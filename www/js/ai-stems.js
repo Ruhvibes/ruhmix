@@ -307,39 +307,61 @@ RM.aiStems = (function () {
   /* ============ rewarded ad gate: 1 ad dekho, 1 gaana separate karo ============ */
   let adGateToken = 0;
   let adGating = false; // Round-6 (W2): double-tap race — gate pending ho to dobara ad mat kholo
+  // Ad fail/skip/timeout: separation NAHI chalegi — graceful message, retry ka option.
+  function adFailed(cfg) {
+    hideProgress();
+    const box = $('ais-fail');
+    if (box) {
+      box.style.display = '';
+      box.innerHTML = `
+        <div class="panel">
+          <div class="err" style="margin-bottom:8px">⚠ ${A.escapeHtml(RM.ads.rewardedSkippedMessage())}</div>
+          <div class="btn-row">
+            <button class="btn primary" id="ais-retry">${T('', '🔁 Try again')}</button>
+            <button class="btn" id="ais-go-dsp3">${T('', 'Try Beta (DSP)')}</button>
+            <button class="btn ghost" id="ais-cancel">${T('', 'Cancel')}</button>
+          </div>
+        </div>`;
+      $('ais-retry').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; gateWithAd(cfg); });
+      $('ais-cancel').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; });
+      const dsp = $('ais-go-dsp3');
+      if (dsp) dsp.addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; A.show('stems'); });
+    } else {
+      A.toast(T('', 'Ad could not play — please try again'));
+    }
+  }
   function gateWithAd(cfg) {
     if (adGating) return; // ad gate already pending
     adGating = true;
     const myToken = ++adGateToken;
     showProgress(0, T('', '🎬 Loading ad…'), true);
+    let settled = false;
+    const done = () => { settled = true; adGating = false; }; // gate resolved
+    // Watchdog: ad SDK kabhi resolve/reject na kare to gate hamesha ke liye
+    // atka rehta tha (spinner + dobara try bhi block). 90 s me graceful fail.
+    const wd = setTimeout(() => {
+      if (settled || myToken !== adGateToken) return;
+      done();
+      adGateToken++; // late ad-callback ab kuch na kare
+      adFailed(cfg);
+    }, 90000);
     RM.ads.showRewarded().then((earned) => {
-      adGating = false; // gate resolved (myToken check se pehle)
+      if (settled) return; // watchdog pehle fire ho chuka
+      clearTimeout(wd);
+      done();
       if (myToken !== adGateToken) return; // user ne cancel kiya tha
       if (earned) {
         uploadAndProcess(cfg);
       } else {
-        hideProgress();
-        // Ad fail/skip: separation NAHI chalegi — graceful message, retry ka option.
-        const box = $('ais-fail');
-        if (box) {
-          box.style.display = '';
-          box.innerHTML = `
-            <div class="panel">
-              <div class="err" style="margin-bottom:8px">⚠ ${A.escapeHtml(RM.ads.rewardedSkippedMessage())}</div>
-              <div class="btn-row">
-                <button class="btn primary" id="ais-retry">${T('', '🔁 Try again')}</button>
-                <button class="btn" id="ais-go-dsp3">${T('', 'Try Beta (DSP)')}</button>
-                <button class="btn ghost" id="ais-cancel">${T('', 'Cancel')}</button>
-              </div>
-            </div>`;
-          $('ais-retry').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; gateWithAd(cfg); });
-          $('ais-cancel').addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; });
-          const dsp = $('ais-go-dsp3');
-          if (dsp) dsp.addEventListener('click', () => { box.style.display = 'none'; box.innerHTML = ''; A.show('stems'); });
-        } else {
-          A.toast(T('', 'Ad could not play — please try again'));
-        }
+        adFailed(cfg);
       }
+    }, () => {
+      // Rejected ad promise: pehle unhandled rejection + atka hua gate tha.
+      if (settled) return;
+      clearTimeout(wd);
+      done();
+      if (myToken !== adGateToken) return;
+      adFailed(cfg);
     });
   }
 

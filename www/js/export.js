@@ -69,6 +69,7 @@ RM.exp = (function () {
       try { enc = new lamejs.Mp3Encoder(2, sampleRate, kbps); }
       catch (e) { reject(e); return; }
       const total = int16.left.length;
+      if (!total) { reject(new Error('No audio to encode.')); return; }
       const chunk = 1152 * 32;
       const parts = [];
       let i = 0;
@@ -77,13 +78,16 @@ RM.exp = (function () {
           if (token && token.cancelled) { reject(new Error('cancelled')); return; }
           const end = Math.min(total, i + chunk);
           const d = enc.encodeBuffer(int16.left.subarray(i, end), int16.right.subarray(i, end));
-          if (d && d.length) parts.push(new Uint8Array(d.buffer ? d : d));
+          // new Uint8Array(view): exact copy of the view's bytes. (d.buffer
+          // directly would also copy the encoder's spare capacity if a future
+          // lamejs ever returned an offset view instead of an exact copy.)
+          if (d && d.length) parts.push(new Uint8Array(d));
           i = end;
           if (onProgress) onProgress(i / total);
           if (i < total) setTimeout(step, 0);
           else {
             const f = enc.flush();
-            if (f && f.length) parts.push(new Uint8Array(f.buffer ? f : f));
+            if (f && f.length) parts.push(new Uint8Array(f));
             resolve(new Blob(parts, { type: 'audio/mpeg' }));
           }
         } catch (e) { reject(e); }
@@ -348,11 +352,14 @@ RM.exp = (function () {
     if (n <= 256) w.bits(8, n - 1); else w.bits(16, n - 1);
     w.flushByte(); // make the pending header byte visible to bytesSince
     w.bits(8, crc8(w.bytesSince(hdrPos)));
-    const framePos = w.bytePos();
+    // RFC 9639 §9.3: the footer CRC-16 covers the WHOLE frame — header
+    // (sync code included) + subframes + padding — excluding only the CRC
+    // itself. Covering just the subframes made every frame fail strict
+    // decoders' CRC check (verified: 33/33 frames mismatched).
     writeSubframe(w, xL, n);
     if (xR) writeSubframe(w, xR, n);
     w.padToByte();
-    const frameBytes = w.bytesSince(framePos);
+    const frameBytes = w.bytesSince(hdrPos);
     w.bits(16, crc16(frameBytes));
   }
 

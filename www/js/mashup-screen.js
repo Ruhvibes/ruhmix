@@ -98,6 +98,19 @@ window.RM = window.RM || {};
     if (a) a.toast(a.cleanErrMsg(msg) || 'Something went wrong. Please try again.');
   }
 
+  // Professional one-line summary of what the auto pipeline did.
+  function formatMeta(m) {
+    if (!m || typeof m !== 'object') return String(m || '');
+    var parts = [];
+    if (m.bpm1 && m.targetBpm) parts.push(m.bpm1 + ' → ' + m.targetBpm + ' BPM');
+    if (m.key1 && m.key1 !== 'Unknown') {
+      var ks = m.key1 + (m.semitones ? ' (key matched ' + (m.semitones > 0 ? '+' : '') + m.semitones + ' st)' : ' (key matched)');
+      parts.push(ks);
+    }
+    if (m.durationSec) parts.push(m.durationSec + 's');
+    return parts.join(' • ') || 'Mashup ready';
+  }
+
   function make() {
     var a = A();
     if (!a || ms.building) return;
@@ -120,14 +133,27 @@ window.RM = window.RM || {};
         done = true;
         var buf = res && res.buffer ? res.buffer : (res instanceof AudioBuffer ? res : null);
         if (!buf) throw new Error('Mashup build produced no audio.');
+        var m = (res && res.meta) || {};
+        // Honest engine label from the real per-call provider tags (Worker 4):
+        // never claim DSP when neural stems were used, or vice versa.
+        var tagV = m.engineTagVocal || '', tagI = m.engineTagInstr || '';
+        var engineLabel = 'Smart DSP engine';
+        var neuralV = /neural/i.test(tagV), neuralI = /neural/i.test(tagI);
+        if (neuralV && neuralI) engineLabel = 'Neural stems engine';
+        else if (neuralV || neuralI) engineLabel = 'Smart DSP + neural stems';
+        else if (/failed/i.test(tagV + ' ' + tagI)) engineLabel = 'Smart DSP engine (neural unavailable)';
         ms.result = {
           buffer: buf,
-          meta: (res && res.meta) || (ms.slot1.name + ' × ' + ms.slot2.name),
-          engine: (res && res.engine) || 'Smart DSP engine',
+          meta: m,
+          engine: engineLabel,
         };
+        // Friendly export name from the two picked songs.
+        try {
+          ms.result.meta.name = 'Mashup ' + (ms.slot1.name || 'A') + ' x ' + (ms.slot2.name || 'B');
+        } catch (e) {}
         setBuildUI(false);
         var meta = $('mashup-meta');
-        if (meta) meta.textContent = ms.result.meta;
+        if (meta) meta.textContent = formatMeta(m);
         var tag = $('mashup-engine-tag');
         if (tag) tag.textContent = '⚙️ ' + ms.result.engine;
         var r = $('mashup-result');

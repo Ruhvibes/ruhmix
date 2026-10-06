@@ -56,6 +56,7 @@ RM.hfStems = (function () {
     setupEl: null,
     mainEl: null,
   };
+  let runSeq = 0; // retry-race guard: har runHf apna token leta hai
 
   /* ================= config (localStorage only, no secrets) ================= */
   function getCfg() {
@@ -418,6 +419,7 @@ RM.hfStems = (function () {
 
   /* ================= HF flow: upload -> call -> SSE -> download ================= */
   async function runHf(cfg, autoRetried) {
+    const myRun = ++runSeq; // is run ka token (retry race guard)
     // Purane HF results hatao taaki repeat runs accumulate na hon.
     for (let i = RM.stems.results.length - 1; i >= 0; i--) {
       if (RM.stems.results[i].engine === 'hf') RM.stems.results.splice(i, 1);
@@ -516,10 +518,13 @@ RM.hfStems = (function () {
         // 1 auto-retry — space jag raha ho to dusri baar lag jata hai.
         // 'asleep' pe user ko saaf batao ki server jag raha hai (dead spinner nahi).
         // Cancel button rakha hai taaki 5 s wait me user atka na rahe.
+        // Race guard: beech me cancel + naya run shuru hua to purana timeout
+        // dusra flow na chalaye (myRun token).
         showProgress(-1, e.kind === 'asleep'
           ? T('', '🤗 Space is waking up… retrying')
           : T('', '🔁 Retrying…'), true);
-        setTimeout(() => { if (st.running) runHf(cfg, true); }, 5000);
+        const tok = myRun;
+        setTimeout(() => { if (st.running && tok === runSeq) runHf(cfg, true); }, 5000);
         return;
       }
       failHf(errToMessage(e), e && e.kind);

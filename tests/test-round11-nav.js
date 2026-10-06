@@ -24,7 +24,7 @@ const WWW = '/home/hatch/workspace/ruhmix/www';
 const JAVA = '/home/hatch/workspace/ruhmix/android/app/src/main/java/com/ruhmix/app/MainActivity.java';
 
 const SCREENS = ['home', 'import', 'editor', 'remix', 'slowed', 'stems', 'aistem',
-  'mixer', 'fx', 'master', 'record', 'export', 'projects', 'settings', 'more'];
+  'mixer', 'fx', 'master', 'record', 'export', 'projects', 'settings', 'more', 'mashup'];
 const TABS = ['home', 'editor', 'remix', 'mixer', 'more'];
 
 const pageErrors = [];
@@ -353,10 +353,11 @@ async function back(page) {
     if (/ux-export-btn/.test(idx)) reach.add('export');
     if (/openProject/.test(appJs)) reach.add('editor'); // projects -> editor
     if (/cdx-pick/.test(idx)) reach.add('import'); // CD-ROMantic home: Pick Music -> import
+    if (/home-mashup/.test(idx)) reach.add('mashup'); // Home card -> mashup screen
     if (/aistem/.test(uxJs) || /aistem/.test(appJs)) reach.add('aistem');
     const unreachable = SCREENS.filter((s) => !reach.has(s));
     console.log('STEP D3');
-    add('D3. sitemap: all 15 screens reachable', unreachable.length === 0,
+    add('D3. sitemap: all 16 screens reachable', unreachable.length === 0,
       unreachable.length ? 'orphan: ' + unreachable.join(',') : 'tabs+home+more+export cover all');
 
     console.log('STEP E1');

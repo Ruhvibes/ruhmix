@@ -2751,6 +2751,9 @@ Object.assign(RM.app, (function () {
     });
     const shareBtn = $('cdx-share');
     if (shareBtn) shareBtn.addEventListener('click', () => {
+      // Phase-2 fix (Worker 8): ux-flow entry taaki exportSource hamesha fresh
+      // ho (stale "Selected" source bug) + onExportFinished back-nav sahi chale.
+      if (window.RM && RM.ux && RM.ux.openExport) { RM.ux.openExport('home'); return; }
       if (!A.needAudio()) return;
       A.show('export');
     });

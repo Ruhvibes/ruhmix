@@ -85,7 +85,11 @@ RM.stemDeck = (function () {
 
     deck.master = ctx.createGain();
     deck.master.gain.value = 1;
-    deck.master.connect(ctx.destination);
+    // Live deck mixes go through the guarded master chain (limiter + safety
+    // clipper), like the studio player — never raw to the DAC. Stacked
+    // stems at up to 120% vol would otherwise digitally clip.
+    try { deck.master.connect(RM.audio.masterIn()); }
+    catch (e) { deck.master.connect(ctx.destination); }
 
     const head = document.createElement('div');
     head.className = 'deck-head';

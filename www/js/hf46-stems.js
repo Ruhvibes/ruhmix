@@ -68,6 +68,7 @@ RM.hf46Stems = (function () {
     song: null, consentGiven: false, running: false,
     xhr: null, abort: null, setupEl: null, mainEl: null,
   };
+  let runSeq = 0; // retry-race guard: har run46 apna token leta hai
 
   function H() { return RM.hfStems && RM.hfStems.internals; } // pure helpers
 
@@ -323,6 +324,7 @@ RM.hf46Stems = (function () {
 
   /* ================= flow: upload -> call -> SSE -> download ================= */
   async function run46(cfg, autoRetried) {
+    const myRun = ++runSeq; // is run ka token (retry race guard)
     const h = H();
     if (!h) { fail46('The HF engine failed to load. Restart the app and try again.', 'process'); return; }
     for (let i = RM.stems.results.length - 1; i >= 0; i--) {
@@ -383,7 +385,10 @@ RM.hf46Stems = (function () {
       if (e && e.kind === 'cancel') e = { kind: 'timeout' };
       if (!autoRetried && e && (e.kind === 'asleep' || e.kind === 'connect' || e.kind === 'server')) {
         showProgress(-1, e.kind === 'asleep' ? '🤗 Space is waking up… retrying' : '🔁 Retrying…', true);
-        setTimeout(() => { if (st.running) run46(cfg, true); }, 5000);
+        // Race guard: beech me cancel + naya run shuru hua to purana timeout
+        // dusra flow na chalaye (myRun token).
+        const tok = myRun;
+        setTimeout(() => { if (st.running && tok === runSeq) run46(cfg, true); }, 5000);
         return;
       }
       fail46(h.errToMessage(e), e && e.kind);

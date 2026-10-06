@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * RuhMix Round-11 full walkthrough: all 15 screens, zero pageerrors,
+ * RuhMix Round-11 full walkthrough: all 16 screens, zero pageerrors,
  * zero console errors, no blank buttons/labels.
  * Exit 0 = all pass.
  */
@@ -39,7 +39,7 @@ const no = (n, d) => { fail++; console.log('FAIL', n, d ? ' — ' + d : ''); };
   const screens = await page.evaluate(() =>
     Array.from(document.querySelectorAll('section.screen')).map((s) => s.id.replace(/^screen-/, '')));
   ok('screen-count', screens.length + ' screens: ' + screens.join(','));
-  if (screens.length !== 15) no('screen-count-15', 'found ' + screens.length);
+  if (screens.length !== 16) no('screen-count-16', 'found ' + screens.length);
 
   for (const s of screens) {
     await page.evaluate((n) => RM.app.show(n), s);
