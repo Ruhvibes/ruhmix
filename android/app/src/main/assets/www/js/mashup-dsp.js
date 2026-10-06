@@ -97,18 +97,35 @@ RM.mashupDSP = (function () {
   }
 
   // Average of all channels, first `len` samples, chunked.
+  // Mid/side "sides" sum to zero BY CONSTRUCTION (sL + sR = 0: the mashup's
+  // instrumental IS such a sides signal), so a plain average would return
+  // digital silence for perfectly valid content — detectKey would then see
+  // nothing and report a phantom 'C major' (confidence 0), and the WSOLA
+  // offset search would degrade. Detect that cancellation and fall back
+  // to the loudest channel instead.
   async function monoMix(buf, len, onProgress) {
     const ch = channelArrays(buf);
     const nCh = ch.length;
     const inv = 1 / Math.max(1, nCh);
     const mono = new Float32Array(len);
+    const eCh = new Float64Array(nCh);
+    let eMix = 0;
     await chunked(len, 1 << 18, (a, b) => {
       for (let i = a; i < b; i++) {
         let s = 0;
-        for (let c = 0; c < nCh; c++) s += ch[c][i];
-        mono[i] = s * inv;
+        for (let c = 0; c < nCh; c++) { const v = ch[c][i]; s += v; eCh[c] += v * v; }
+        const m = s * inv;
+        mono[i] = m;
+        eMix += m * m;
       }
     }, onProgress);
+    let eMax = 0, bc = 0;
+    for (let c = 0; c < nCh; c++) { if (eCh[c] > eMax) { eMax = eCh[c]; bc = c; } }
+    // Cancellation: the mix holds <1% of the loudest channel's energy while
+    // that channel is non-silent -> the channels cancelled each other out.
+    if (eMax > 1e-12 && eMix < 0.01 * eMax) {
+      mono.set(ch[bc].subarray(0, len));
+    }
     return mono;
   }
 
@@ -242,12 +259,20 @@ RM.mashupDSP = (function () {
         let aStar = nat;
         // Actual output advance of this frame (Hs is fractional).
         const step = (k + 1 < nFrames ? Math.round((k + 1) * Hs) : outLen) - synPos;
-        const olv = Math.max(1, W - step); // real overlap with previous frame
+        // Crossfade length: capped at `step` so every output sample is
+        // written by at most 2 frames. The old code crossfaded over the
+        // full W-step overlap, which for ratio < 1.5 exceeds step: samples
+        // were then blended 3-6 times -> comb filtering that cancelled
+        // true tones and minted phantom ones (measured on a D-major
+        // chord at 0.703: D3 -18 dB, phantom G3 +79x, key detector
+        // flipped D major -> G major). For ratio >= 1.5 this equals the
+        // old W-step (proven path, unchanged).
+        const xf = Math.max(1, Math.min(W - step, step));
         if (k > 0) {
           // Best integer offset: maximize normalized cross-correlation
           // between the synthesized overlap and the candidate input
           // segment (decimated for speed; full-rate offset applied).
-          const L = Math.max(1, Math.floor(olv / D));
+          const L = Math.max(1, Math.floor(xf / D));
           let refE = 0;
           for (let n = 0; n < L; n++) { const v = y0[synPos + n * D]; refE += v * v; }
           let bestScore = -1, bestD = 0;
@@ -270,18 +295,25 @@ RM.mashupDSP = (function () {
         for (let c = 0; c < nCh; c++) {
           const x = chIn[c], y = chOut[c];
           if (k === 0) {
-            for (let n = 0; n < W; n++) {
+            // No previous frame: direct copy, plus 2 samples of slack so
+            // frame 1's crossfade reference stays valid under Hs rounding.
+            // (The slack is fully overwritten by frame 1's direct region.)
+            const n0 = xf + step + 2;
+            for (let n = 0; n < n0; n++) {
               const idx = aStar + n;
               y[n] = idx < inLen ? x[idx] : 0;
             }
           } else {
-            for (let n = 0; n < olv; n++) {
-              const w = n / olv; // linear crossfade: click-free join
+            for (let n = 0; n < xf; n++) {
+              const w = n / xf; // linear crossfade: click-free join
               const idx = aStar + n;
               const s = idx < inLen ? x[idx] : 0;
               y[synPos + n] = y[synPos + n] * (1 - w) + s * w;
             }
-            for (let n = olv; n < W; n++) {
+            // Direct copy of the new material only — the NEXT frame's
+            // crossfade blends over [synPos+step, synPos+step+xf).
+            const nEnd = xf + step;
+            for (let n = xf; n < nEnd; n++) {
               const idx = aStar + n;
               y[synPos + n] = idx < inLen ? x[idx] : 0;
             }

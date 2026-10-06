@@ -267,25 +267,16 @@ RM.mashup = (function () {
       throw new Error('Sample-rate normalization failed: ' + (e && e.message ? e.message : e));
     });
 
-    /* ---- Stage 3: Matching tempo… (stretch the BEAT to the target) ---- */
-    chain = chain.then(function () {
-      prog('Matching tempo…', 0.46);
-      var p;
-      try { p = dsp.timeStretch(instrBuf, tempo.stretchRatio); }
-      catch (e) { throw new Error('Tempo matching failed: ' + (e && e.message ? e.message : e)); }
-      return Promise.resolve(p).then(function (stretched) {
-        if (!isAudioBuffer(stretched)) throw new Error('Tempo matching returned no audio.');
-        instrBuf = stretched;
-        prog('Matching tempo…', 0.58);
-      }, function (e) {
-        throw new Error('Tempo matching failed: ' + (e && e.message ? e.message : e));
-      });
-    });
-
-    /* ---- Stage 4: Matching key… ---- */
+    /* ---- Stage 3: Matching key… (detect on CLEAN buffers, BEFORE stretch) ----
+       Key is pitch — unaffected by time-stretching. Detecting it on the
+       already-stretched beat is less reliable: WSOLA joins can confuse the
+       chromagram on dense/polyphonic material (measured: a D-major beat
+       detected as C# minor after a 0.703 stretch). So detect first on the
+       clean resampled buffers, stretch after; the semitone shift is still
+       applied to the stretched buffer below. */
     var key1 = 'Unknown', key2 = 'Unknown', semitones = 0;
     chain = chain.then(function () {
-      prog('Matching key…', 0.60);
+      prog('Matching key…', 0.46);
       var p1, p2;
       try {
         p1 = dsp.detectKey(vocalBuf);
@@ -293,7 +284,7 @@ RM.mashup = (function () {
       } catch (e) { throw new Error('Key matching failed: ' + (e && e.message ? e.message : e)); }
       return Promise.all([Promise.resolve(p1), Promise.resolve(p2)]).then(function (keys) {
         key1 = keyLabel(keys[0]); key2 = keyLabel(keys[1]);
-        prog('Matching key…', 0.66);
+        prog('Matching key…', 0.54);
         if (keys[0] && keys[1]) {
           var st;
           try { st = dsp.semitonesBetween(keys[0], keys[1]); }
@@ -303,20 +294,36 @@ RM.mashup = (function () {
           // so we cap it instead of producing a chipmunk effect.
           semitones = Math.max(-MAX_SEMITONES, Math.min(MAX_SEMITONES, Math.round(st)));
         }
+        prog('Matching key…', 0.58);
+      }, function (e) {
+        throw new Error('Key matching failed: ' + (e && e.message ? e.message : e));
+      });
+    });
+
+    /* ---- Stage 4: Matching tempo… (stretch the BEAT, then key-shift) ---- */
+    chain = chain.then(function () {
+      prog('Matching tempo…', 0.60);
+      var p;
+      try { p = dsp.timeStretch(instrBuf, tempo.stretchRatio); }
+      catch (e) { throw new Error('Tempo matching failed: ' + (e && e.message ? e.message : e)); }
+      return Promise.resolve(p).then(function (stretched) {
+        if (!isAudioBuffer(stretched)) throw new Error('Tempo matching returned no audio.');
+        instrBuf = stretched;
+        prog('Matching tempo…', 0.66);
         if (semitones !== 0) {
           var pp;
           try { pp = dsp.pitchShift(instrBuf, semitones); }
           catch (e) { throw new Error('Key matching failed: ' + (e && e.message ? e.message : e)); }
           return Promise.resolve(pp).then(function (shifted) {
             if (isAudioBuffer(shifted)) instrBuf = shifted;
-            prog('Matching key…', 0.70);
+            prog('Matching tempo…', 0.70);
           }, function (e) {
             throw new Error('Key matching failed: ' + (e && e.message ? e.message : e));
           });
         }
-        prog('Matching key…', 0.70);
+        prog('Matching tempo…', 0.70);
       }, function (e) {
-        throw new Error('Key matching failed: ' + (e && e.message ? e.message : e));
+        throw new Error('Tempo matching failed: ' + (e && e.message ? e.message : e));
       });
     });
 

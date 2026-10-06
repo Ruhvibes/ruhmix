@@ -28,6 +28,23 @@ RM.exp = (function () {
     return `ruhmix-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.${ext}`;
   }
 
+  // Effect-tail allowance for offline renders.
+  // Reverb IRs are capped at ~2.2s, but echo feedback rings much longer:
+  // RT60 = time * 60 / (-20 * log10(fb)) seconds (fb=0.4/time=0.75 ->
+  // 5.65s; fb=0.85/time=0.375 -> 15.9s). A fixed 2.5s tail audibly chops
+  // these decays (measured: hard truncation at -26dB below steady state,
+  // ~3s of audible decay lost). Capped at 20s — beyond that the render
+  // cost outweighs an already -60dB tail.
+  function tailForFx(fxp) {
+    let tail = 2.5;
+    const e = fxp && fxp.echo;
+    if (e && e.on && e.fb > 0 && e.fb < 1 && e.time > 0) {
+      const rt60 = e.time * 60 / (-20 * Math.log10(e.fb));
+      tail = Math.max(tail, Math.min(rt60, 20));
+    }
+    return tail;
+  }
+
   // Render a buffer through a caller-built graph, offline.
   // buildGraph(oc, srcNode) must return the node to connect to destination.
   function renderOffline(buffer, buildGraph, opts) {
@@ -484,7 +501,7 @@ RM.exp = (function () {
 
   return {
     BITRATES, SAMPLE_RATES, defaultName,
-    renderOffline, encodeMp3, lameAvailable, encodeFlac,
+    renderOffline, tailForFx, encodeMp3, lameAvailable, encodeFlac,
     blobToBase64, deliver, share,
   };
 })();

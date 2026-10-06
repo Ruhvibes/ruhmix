@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 18 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 19 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -1085,7 +1085,13 @@ Object.assign(RM.app, (function () {
   function selRange() {
     const a = Math.max(0, parseFloat($('ed-sel-a').value) || 0);
     const b = Math.max(0, parseFloat($('ed-sel-b').value) || 0);
-    const dur = A.state.buffer ? A.state.buffer.duration : 0;
+    // Selection hamesha CURRENT VIEW ke relative hai (ops view-relative
+    // lagte hain). Original buffer ki duration se clamp karne par trim/cut
+    // ke baad selection view se bahar nikal jati thi — cut tab chup-chaap
+    // kuchh nahi kaatta tha lekin "Cut — selection is in the clipboard"
+    // ka daava kar deta tha. View duration se clamp = sahi guard.
+    const vb = A.state.viewBuffer || A.state.buffer;
+    const dur = vb ? vb.duration : 0;
     return { a: clamp(Math.min(a, b), 0, dur), b: clamp(Math.max(a, b), 0, dur) };
   }
   function updateTrimShade() {
@@ -1146,17 +1152,22 @@ Object.assign(RM.app, (function () {
     });
 
     $('ed-vol').addEventListener('input', (e) => {
+      // Editor tab bottom-nav se bina audio ke bhi khul sakta hai: tab
+      // project/player dono null hote hain — TypeError ke bajaye silent no-op.
+      if (!A.state.project || !A.state.player) return;
       A.state.project.settings.volume = +e.target.value / 100;
       A.state.player.setVolume(A.state.project.settings.volume);
       $('ed-vol-v').textContent = e.target.value + '%';
       RM.proj.autosave(A.state.project);
     });
     $('ed-pan').addEventListener('input', (e) => {
+      if (!A.state.project || !A.state.player) return;
       A.state.project.settings.pan = +e.target.value / 100;
       A.state.player.setPan(A.state.project.settings.pan);
       RM.proj.autosave(A.state.project);
     });
     $('ed-speed').addEventListener('input', (e) => {
+      if (!A.state.project || !A.state.player) return;
       const r = +e.target.value / 100;
       A.state.project.settings.speed = r;
       A.state.player.setRate(r);
@@ -1212,15 +1223,18 @@ Object.assign(RM.app, (function () {
     }));
     $('ed-paste').addEventListener('click', () => guardOp('ed-paste', async () => {
       if (!A.needAudio()) return;
-      if (!RM.proj.getClipboard()) { A.toast('Clipboard is empty'); return; }
-      const at = A.state.player.position();
-      await A.pushOp({ t: 'paste', at });
+      const cb = RM.proj.getClipboard();
+      if (!cb) { A.toast('Clipboard is empty'); return; }
+      const at = A.state.player ? A.state.player.position() : 0;
+      // _clip snapshot: is paste ke baad copy/cut/split karne par bhi ye
+      // paste wahi audio render karega jo paste ke waqt clipboard me tha.
+      await A.pushOp({ t: 'paste', at, _clip: cb });
       updateEditorMeta();
     }));
     $('ed-split').addEventListener('click', () => guardOp('ed-split', async () => {
       if (!A.needAudio()) return;
       if (!A.state.viewBuffer) { A.toast('Preparing audio…'); return; }
-      const p = A.state.player.position();
+      const p = A.state.player ? A.state.player.position() : 0;
       const dur = A.state.viewBuffer.duration;
       if (dur - p < 0.1) { A.toast('Cannot split near the end'); return; }
       const ok = await copyRange(p, dur, null, true);
@@ -1234,9 +1248,9 @@ Object.assign(RM.app, (function () {
       if (!A.state.viewBuffer) { A.toast('Preparing audio…'); return; }
       const dur = A.state.viewBuffer.duration;
       if (!(dur > 0.05)) { A.toast('Nothing to duplicate'); return; }
-      const ok = await copyRange(0, dur, null, true);
-      if (!ok) return;
-      await A.pushOp({ t: 'paste', at: dur });
+      const clip = await copyRange(0, dur, null, true);
+      if (!clip) return;
+      await A.pushOp({ t: 'paste', at: dur, _clip: clip });
       A.toast('Duplicated');
       updateEditorMeta();
     }));
@@ -1334,9 +1348,11 @@ Object.assign(RM.app, (function () {
     });
   }
 
+  // Returns the clipboard AudioBuffer on success, null on failure (callers
+  // use it to snapshot _clip into paste ops).
   function copyRange(a, b, done, quiet) {
     const src = A.state.viewBuffer;
-    if (!src) { A.toast('Preparing audio…'); return Promise.resolve(false); }
+    if (!src) { A.toast('Preparing audio…'); return Promise.resolve(null); }
     const sr = src.sampleRate;
     const aS = Math.round(a * sr), bS = Math.min(src.length, Math.round(b * sr));
     const len = Math.max(1, bS - aS);
@@ -1351,7 +1367,7 @@ Object.assign(RM.app, (function () {
       RM.proj.setClipboard(cb);
       if (!quiet) A.toast('Copied');
       if (done) done();
-      return true;
+      return cb;
     });
   }
 
@@ -1484,12 +1500,16 @@ Object.assign(RM.app, (function () {
       // style FX ke saath offline render, warna export me tempo kho jata hai.
       try {
         const rxBuf = A.state.buffer, rxRate = rate, rxFx = A.state.fx, rxName = s.name;
+        // Tail: beat-synced echo can ring past 2.5s (fb=0.4/time=0.75 ->
+        // 5.65s) — a fixed tail would chop it inside the remix buffer, and
+        // the later export (tail: 0) could never recover it.
+        const rxTail = RM.exp.tailForFx(rxFx);
         RM.exp.renderOffline(rxBuf, (oc, srcNode) => {
           const chain = RM.fx.makeChain(oc);
           chain.applyPreset(rxFx);
           srcNode.connect(chain.input);
           return chain.output;
-        }, { sampleRate: rxBuf.sampleRate, rate: rxRate }).then((rb) => {
+        }, { sampleRate: rxBuf.sampleRate, rate: rxRate, tail: rxTail }).then((rb) => {
           A.state.remixBuffer = rb;
           A.state.remixBufferName = rxName + ' — ' + (A.state.fileName || 'remix');
           try { A.refreshExportSource(); } catch (e) {}
@@ -2323,15 +2343,10 @@ Object.assign(RM.app, (function () {
     // enable ho. Bina iske button hamesha disabled rehta (dead UI).
     stage('Preparing…', 0.02);
     let chain;
-    // Echo tail: high feedback pe echo 2.5s se bahut lambi chalti hai (fb=0.85 →
-    // ~16s). Default tail use ki to tail kat jati hai — isliye echo settings se
-    // RT60 nikaal ke tail badha dete hain (max 20s, usse zyada render bekaar).
+    // Effect tail: RM.exp.tailForFx covers reverb IRs plus the echo RT60
+    // (shared helper — the remix-buffer render below uses it too).
     const fxp = src.fx || A.defaultFx();
-    let tailNeed = 2.5;
-    if (fxp.echo && fxp.echo.on && fxp.echo.fb > 0 && fxp.echo.fb < 1 && fxp.echo.time > 0) {
-      const rt60 = fxp.echo.time * 60 / (-20 * Math.log10(fxp.echo.fb));
-      tailNeed = Math.max(tailNeed, Math.min(rt60, 20));
-    }
+    const tailNeed = RM.exp.tailForFx(fxp);
     Promise.resolve().then(() => RM.exp.renderOffline(src.buffer, (oc, srcNode) => {
       chain = RM.fx.makeChain(oc);
       chain.applyPreset(fxp);
@@ -2718,7 +2733,7 @@ Object.assign(RM.app, (function () {
       if (!A.state || !A.state.buffer) { A.needAudio(); return; }
       A.ensureStudio();
       const pl = A.state.player;
-      if (pl.playing) pl.pause(); else pl.play(0);
+      if (pl.playing) pl.pause(); else pl.play(); // resume from pause offset (editor jaisa) — play(0) hamesha start se bajata tha
       cdxUpdateNow();
     });
     if (!cdxNowTimer) cdxNowTimer = setInterval(cdxUpdateNow, 500);

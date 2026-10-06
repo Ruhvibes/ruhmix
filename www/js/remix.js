@@ -194,7 +194,11 @@ RM.remix = (function () {
           const beat = 60 / bpm;
           const maxDur = Math.max.apply(null, rb.map((r) => r.buffer.duration));
           const D = maxDur / rate; // musical duration at style rate
-          const tail = 2.5; // reverb tail
+          // Tail: per-role FX keep the style's (beat-synced) echo — its RT60
+          // can exceed 2.5s, and a fixed tail would chop the long echo decay
+          // inside the stem mix (export later re-exports it with tail: 0).
+          const tail = Math.max.apply(null,
+            rb.map((r) => RM.exp.tailForFx(roleFx(baseFx, r.role, bpm))));
           const oc = new OC(2, Math.max(1, Math.ceil((D + tail) * sr)), sr);
           const mixBus = oc.createGain();
           const master = RM.fx.makeMasterChain(oc, RM.fx.MASTER_PRESETS[MASTER_BY_STYLE[styleId] || 'clean']);

@@ -129,42 +129,6 @@ RM.stems = (function () {
     const m = n >> 1;
     return (n & 1) ? s[m] : (s[m - 1] + s[m]) * 0.5;
   }
-  // Median filter along the TIME axis (enhances harmonic/tonal content)
-  function medfiltTime(mag, frames, bins, winSize) {
-    const out = new Float32Array(mag.length);
-    const half = winSize >> 1;
-    const tmp = new Float32Array(winSize);
-    for (let b = 0; b < bins; b++) {
-      for (let f = 0; f < frames; f++) {
-        let n = 0;
-        for (let k = -half; k <= half; k++) {
-          const ff = f + k < 0 ? 0 : (f + k >= frames ? frames - 1 : f + k);
-          tmp[n++] = mag[ff * bins + b];
-        }
-        out[f * bins + b] = medianOfSorted(tmp, n);
-      }
-    }
-    return out;
-  }
-  // Median filter along the FREQUENCY axis (enhances percussive content)
-  function medfiltFreq(mag, frames, bins, winSize) {
-    const out = new Float32Array(mag.length);
-    const half = winSize >> 1;
-    const tmp = new Float32Array(winSize);
-    for (let f = 0; f < frames; f++) {
-      const base = f * bins;
-      for (let b = 0; b < bins; b++) {
-        let n = 0;
-        for (let k = -half; k <= half; k++) {
-          const bb = b + k < 0 ? 0 : (b + k >= bins ? bins - 1 : b + k);
-          tmp[n++] = mag[base + bb];
-        }
-        out[base + b] = medianOfSorted(tmp, n);
-      }
-    }
-    return out;
-  }
-
   const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
   /* ================= engine: Vocal Cut (DSP) ================= */

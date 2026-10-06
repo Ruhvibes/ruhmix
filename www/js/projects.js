@@ -9,7 +9,9 @@
      {t:'trim', a, b}    keep [a,b] seconds of the CURRENT VIEW
      {t:'cut', a, b}     remove [a,b] seconds of the CURRENT VIEW
      {t:'paste', at}     insert clipboard at `at` seconds of the CURRENT VIEW
-                         (clipboard is in-memory)
+                         (clipboard is in-memory; the op snapshots it as
+                         `_clip` at push time so later copies can't change
+                         what this paste renders — see applyOps)
      {t:'fadein', dur}   linear fade-in over dur seconds (from view start)
      {t:'fadeout', dur}  linear fade-out over dur seconds (to view end)
      {t:'gain', db}      multiply view by dB
@@ -97,7 +99,13 @@ RM.proj = (function () {
       const clean = { t: op.t };
       let ok = true;
       for (const f of fields) {
-        const v = Number(op[f]);
+        // null/undefined/'' ko Number() chup-chaap 0 bana deta hai
+        // (Number(null)===0, Number('')===0) — bhrasht op "0" ban kar
+        // project me ghus jata tha jabki contract kehta hai drop ho.
+        // NaN (JSON me null bankar aata hai) bhi yahin pakda jata hai.
+        const raw = op[f];
+        if (raw == null || raw === '') { ok = false; break; }
+        const v = Number(raw);
         if (!Number.isFinite(v)) { ok = false; break; }
         clean[f] = v;
       }
@@ -305,12 +313,27 @@ RM.proj = (function () {
         const aS = s2s(op.a), bS = s2s(op.b);
         const lo = Math.min(aS, bS), hi = Math.max(aS, bS);
         segs = sliceView(0, lo).concat(sliceView(hi, total));
-      } else if (op.t === 'paste' && clipboard) {
-        const total = viewLen(); // sliceView se pehle
-        const atS = s2s(op.at);
-        segs = sliceView(0, atS)
-          .concat([{ buf: clipboard, a: 0, b: clipboard.length }])
-          .concat(sliceView(atS, total));
+      } else if (op.t === 'paste') {
+        // _clip: push ke waqt clipboard ka SNAPSHOT (AudioBuffer reference).
+        // Pehle paste hamesha live `clipboard` singleton se render hota tha:
+        // baad me copy/cut/split/duplicate karne par clipboard badal jata aur
+        // replay par PEHLE ke paste ops galat audio (naya clipboard content)
+        // render karte — undo bhi sahi state restore nahi karta tha
+        // (e.g. duplicate -> split -> undo = 26s jabki 20s hona chahiye tha).
+        // _clip op ke saath undo/redo me travel karta hai, isliye replay
+        // deterministic hai. Purane saves ke paste ops (bina _clip) live
+        // clipboard par fall back karte hain — backward compatible.
+        // Note: _clip JSON me {} bankar serialize hota hai (AudioBuffer ke
+        // enumerable props nahi hote) — sanitizeOps use drop kar deta hai,
+        // isliye restart ke baad purana "clipboard empty" warning path chalta hai.
+        const cb = (op && op._clip && typeof op._clip.getChannelData === 'function') ? op._clip : clipboard;
+        if (cb) {
+          const total = viewLen(); // sliceView se pehle
+          const atS = s2s(op.at);
+          segs = sliceView(0, atS)
+            .concat([{ buf: cb, a: 0, b: cb.length }])
+            .concat(sliceView(atS, total));
+        }
       }
       // unknown op types: ignore (deserialize inhe pehle hi drop karta hai)
     }

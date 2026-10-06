@@ -14,6 +14,14 @@ RM.fx = (function () {
   const clamp = RM.audio.clamp;
   const EQ10_FREQS = [60, 150, 300, 600, 1000, 2000, 4000, 8000, 12000, 16000];
 
+  // Physical-bypass delay after switching spatial OFF (or away from 360°).
+  // The wet/dry gains glide with tc=0.3, so they need ~4 time constants to
+  // settle (e^-4 = 1.8% residual). Disconnecting earlier (400ms = 26%
+  // residual) rebalances dry/wet mid-glide -> audible click (measured:
+  // 0.074 jump on a 0.2 signal). 1200ms makes the switch inaudible; the
+  // extra 0.8s of fading convolver is not idle load, just transition.
+  const SPATIAL_BYPASS_DELAY_MS = 1200;
+
   const REVERB_ROOMS = {
     studio: { dur: 0.6, decay: 2.2, label: 'Studio' },
     room:   { dur: 1.0, decay: 2.4, label: 'Room' },
@@ -212,9 +220,10 @@ RM.fx = (function () {
     // Idle true-bypass for the 360° HRTF branch: mode '360' ke alawa iska
     // input physically disconnected rehta hai. gate=0 se output silent to
     // tha hi, lekin HRTF panner har sample process karta rehta tha (stutter
-    // rule: convolver/FX off me bilkul idle hone chahiye). Disconnect 400ms
-    // delayed + gen-guarded hai taaki gate glide (tc 0.3) pehle output ko 0
-    // pe la sake — turant disconnect wet tail kaat ke click dega.
+    // rule: convolver/FX off me bilkul idle hone chahiye). Disconnect
+    // SPATIAL_BYPASS_DELAY_MS delayed + gen-guarded hai taaki gate glide
+    // (tc 0.3) pehle output ko ~0 pe la sake — jaldi disconnect wet/dry
+    // rebalance ko beech-glide me kaat ke click dega.
     let s360Starved = false, s360Gen = 0;
     function setS360Starved(starved) {
       starved = !!starved;
@@ -254,11 +263,12 @@ RM.fx = (function () {
       N.s360.setSpeed(tg.freq, imm);
       N.s360.setDepth(st.depth, imm);
       N.s360.setOn(tg.s360, imm);
-      // 360° branch input: sirf '360' mode me wired; baaki modes me 400ms
-      // baad physically disconnect (gate glide ke baad, click-free).
+      // 360° branch input: sirf '360' mode me wired; baaki modes me
+      // SPATIAL_BYPASS_DELAY_MS baad physically disconnect (gate glide ke
+      // baad, click-free).
       const g360 = ++s360Gen;
       if (tg.s360) setS360Starved(false);
-      else setTimeout(() => { if (g360 === s360Gen) setS360Starved(true); }, 400);
+      else setTimeout(() => { if (g360 === s360Gen) setS360Starved(true); }, SPATIAL_BYPASS_DELAY_MS);
     }
     const api = {
       input: N.input, output: N.output, nodes: N,
@@ -545,10 +555,12 @@ RM.fx = (function () {
             const gen = ++spatialGen;
             N.spatial.setMode(m, fresh);
             if (m === 'off') {
-              // Pehle wet gains glide se 0 pe (tc 0.3, click-free), phir
-              // physical bypass — turant disconnect wet tail kaat ke click dega.
-              // (fresh chain pe setMode immediate tha, isliye yahan koi tail nahi.)
-              setTimeout(() => { if (gen === spatialGen) setSpatialBypass(true); }, 400);
+              // Pehle wet gains glide se ~0 pe (tc 0.3, click-free), phir
+              // physical bypass — SPATIAL_BYPASS_DELAY_MS (=4 time constants)
+              // ke baad, warna beech-glide disconnect dry/wet rebalance kaat
+              // ke click dega. (fresh chain pe setMode immediate tha, isliye
+              // yahan koi tail nahi.)
+              setTimeout(() => { if (gen === spatialGen) setSpatialBypass(true); }, SPATIAL_BYPASS_DELAY_MS);
             } else setSpatialBypass(false);
             break;
           }

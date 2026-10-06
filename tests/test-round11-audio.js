@@ -254,12 +254,12 @@ const PAGE_TESTS = `async () => {
     chain.set('spatialMode', '8d');
     chain.set('spatialMode', 'off');
     chain.set('spatialMode', '16d');
-    await wait(700); // past the 400ms delayed-bypass window
+    await wait(700); // race settled; bypass timers (1200ms) only matter for 'off'
     const g = chain.getBypass(), s = chain.getSpatial();
     ok('B3: spatial off->8d->off->16d race ends un-bypassed on 16d',
        g.spatial === false && s.mode === '16d', JSON.stringify(g) + ' ' + JSON.stringify(s));
     chain.set('spatialMode', 'off');
-    await wait(700);
+    await wait(1600); // past the 1200ms delayed-bypass window
     const g2 = chain.getBypass();
     ok('B3b: back to off re-engages bypass after glide', g2.spatial === true, JSON.stringify(g2));
     try { chain.dispose(); } catch (e) {}
@@ -344,8 +344,8 @@ const PAGE_TESTS = `async () => {
     // to a chain that was never engaged (delayed bypass restores topology).
     const rA = await renderX(withSpatial('off'), 5);
     const rB = await renderX(withSpatial('off'), 5, async (chain) => {
-      chain.set('spatialMode', '8d'); await wait(700);
-      chain.set('spatialMode', 'off'); await wait(700);
+      chain.set('spatialMode', '8d'); await wait(1600);
+      chain.set('spatialMode', 'off'); await wait(1600); // past the 1200ms bypass window
       if (!chain.getBypass().spatial) throw new Error('bypass did not re-engage');
     });
     let maxDiff = 0;

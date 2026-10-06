@@ -138,7 +138,11 @@ window.RM = window.RM || {};
         // never claim DSP when neural stems were used, or vice versa.
         var tagV = m.engineTagVocal || '', tagI = m.engineTagInstr || '';
         var engineLabel = 'Smart DSP engine';
-        var neuralV = /neural/i.test(tagV), neuralI = /neural/i.test(tagI);
+        // HONESTY: the fallback tag 'smart DSP (neural failed)' contains the
+        // word "neural" — it must NOT count as neural (the actual engine was
+        // DSP). Only a real neural success tag ('neural stems') counts.
+        var neuralV = /neural/i.test(tagV) && !/neural failed/i.test(tagV),
+            neuralI = /neural/i.test(tagI) && !/neural failed/i.test(tagI);
         if (neuralV && neuralI) engineLabel = 'Neural stems engine';
         else if (neuralV || neuralI) engineLabel = 'Smart DSP + neural stems';
         else if (/failed/i.test(tagV + ' ' + tagI)) engineLabel = 'Smart DSP engine (neural unavailable)';
