@@ -2473,6 +2473,108 @@ Object.assign(RM.app, (function () {
     $('proj-search').addEventListener('input', renderProjects);
     renderProjects();
   }
+
+  /* ---- v25 mashup project row actions (I7: wire RM.v25projects) ----
+     Mashup rows (settings.mashup.kind === 'mashup') get Rename / Duplicate /
+     Continue / Export-again. Regular editor rows keep the old Open + Delete.
+     Honest limit: audio BYTES are never stored, so Continue / Export-again
+     reuse the in-session mashup result when it's still in memory; otherwise
+     they say so plainly instead of crashing or faking it. */
+  function isMashupRow(p) {
+    try {
+      return !!(RM.v25projects && typeof RM.v25projects.isMashup === 'function'
+        && RM.v25projects.isMashup(p));
+    } catch (e) { return false; }
+  }
+  function mashupRowMeta(s) {
+    const bits = [];
+    if (s.songCount) bits.push(s.songCount + (s.songCount === 1 ? ' song' : ' songs'));
+    if (s.bpm) bits.push(Math.round(s.bpm) + ' BPM');
+    if (s.key) bits.push(s.key);
+    if (s.hasQc) bits.push('QC ✓');
+    if (s.lastExport) bits.push('exported');
+    return bits.length ? bits.join(' • ') : 'Mashup project';
+  }
+  function currentMashupResult() {
+    try {
+      return (RM.mashupScreen && typeof RM.mashupScreen.getResult === 'function')
+        ? RM.mashupScreen.getResult() : null;
+    } catch (e) { return null; }
+  }
+  // In-session mashup audio (if any) handed to fn({buffer, meta, engine}).
+  // Returns true when audio was available (fn ran or a confirm was shown).
+  function withProjectAudio(p, verb, fn) {
+    const mr = currentMashupResult();
+    if (mr && mr.buffer && typeof mr.buffer.getChannelData === 'function') {
+      const go = () => fn({ buffer: mr.buffer, meta: mr.meta || {}, engine: mr.engine });
+      const resName = (mr.meta && mr.meta.name) || '';
+      // Never silently use the wrong audio: confirm when the in-memory
+      // result belongs to a different mashup.
+      if (!resName || resName === p.name) { go(); return true; }
+      A.dialog('Use current audio?',
+        `<p>Audio in memory is <b>${A.escapeHtml(resName)}</b> — a different mashup. ${A.escapeHtml(verb)} project <b>${A.escapeHtml(p.name)}</b> with this audio?</p>`,
+        'Use this audio', 'Cancel').then((ok) => { if (ok) go(); });
+      return true;
+    }
+    return false;
+  }
+  function renameMashupProject(p) {
+    A.dialog('Rename project',
+      `<input id="dlg-name" class="textin" value="${A.escapeHtml(p.name)}" maxlength="60" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">`,
+      'Rename', 'Cancel').then((ok) => {
+        if (!ok) return;
+        const name = (($('dlg-name') && $('dlg-name').value) || '').trim() || p.name;
+        if (RM.v25projects.rename(p.id, name)) {
+          A.toast('Project renamed ✓');
+          renderProjects(); renderHomeRecent();
+        } else {
+          A.toast('Rename failed — project not found');
+        }
+      });
+  }
+  function duplicateMashupProject(p) {
+    const id = RM.v25projects.duplicate(p.id);
+    if (id) {
+      A.toast('Project duplicated ✓');
+      renderProjects(); renderHomeRecent();
+    } else {
+      A.toast('Duplicate failed — project not found');
+    }
+  }
+  function continueMashupProject(p) {
+    const res = RM.v25projects.continueEditing(p.id);
+    if (!res) { A.toast('Project not found'); return; }
+    const had = withProjectAudio(res.project, 'Continue editing', (a) => {
+      if (RM.v25studio && typeof RM.v25studio.open === 'function') {
+        RM.v25studio.open({ buffer: a.buffer, meta: a.meta, engineTags: a.engine, songs: [] });
+        A.toast('Continuing: ' + res.project.name);
+      } else {
+        A.toast('Studio is not available in this build');
+      }
+    });
+    if (!had) {
+      // Live state was still restored above; the Studio opens empty and the
+      // user gets the honest rebuild path instead of a crash.
+      A.show('studio');
+      A.toast('Audio for this project is not stored on the device. Pick the original songs on the Create screen and rebuild to continue editing.', 6000);
+    }
+  }
+  function exportAgainMashupProject(p) {
+    const got = RM.v25projects.exportAgain(p.id);
+    if (!got) { A.toast('Project not found'); return; }
+    const had = withProjectAudio(got.project, 'Export', (a) => {
+      if (RM.v25exportui && typeof RM.v25exportui.show === 'function') {
+        RM.v25exportui.show({ buffer: a.buffer, meta: a.meta, name: got.project.name || 'RuhMix-mashup' });
+      } else {
+        A.toast('Export screen is not available in this build');
+      }
+    });
+    if (!had) {
+      A.dialog('Audio unavailable',
+        `<p>Audio for <b>${A.escapeHtml(got.project.name)}</b> is not stored on the device, so it can't be re-exported. Rebuild the mashup on the Create screen first.</p>`,
+        'Go to Create', 'Cancel').then((ok) => { if (ok) A.show('mashup'); });
+    }
+  }
   function renderProjects() {
     const box = $('projects-list');
     if (!box) return;
@@ -2484,21 +2586,48 @@ Object.assign(RM.app, (function () {
       box.innerHTML = `<div class="empty"><div class="empty-icon">📁</div>${q ? ('No projects found') : ('No saved projects yet')}</div>`;
       return;
     }
+    let mash = {};
+    try { RM.v25projects.listMashups().forEach((s) => { mash[s.id] = s; }); } catch (e) {}
     arr.forEach((p) => {
       const d = document.createElement('div');
       d.className = 'import-item';
       const dt = new Date(p.updatedAt).toLocaleDateString();
-      d.innerHTML = `
+      const ms = mash[p.id];
+      if (!ms) {
+        d.innerHTML = `
         <div class="ii-main">
           <div class="ii-name">${A.escapeHtml(p.name)}</div>
           <div class="ii-meta">${A.escapeHtml((p.audioRef && p.audioRef.name) || ('No audio'))} • ${p.ops.length} edits • ${dt}</div>
         </div>
         <button class="btn small" data-a="open">${'Open'}</button>
         <button class="btn small ghost" data-a="del">✕</button>`;
-      d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
+        d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
+        d.querySelector('[data-a="del"]').addEventListener('click', () => {
+          A.dialog('Delete?', `<p>${A.escapeHtml(p.name)}</p>`, 'Delete', 'Cancel')
+            .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
+        });
+        box.appendChild(d);
+        return;
+      }
+      d.innerHTML = `
+        <div class="ii-main">
+          <div class="ii-name">${A.escapeHtml(p.name)} <span class="beta">MASHUP</span></div>
+          <div class="ii-meta">${A.escapeHtml(mashupRowMeta(ms))} • ${dt}</div>
+          <div class="btn-row" style="margin:6px 0 0">
+            <button class="btn small" data-a="rename">✏️ Rename</button>
+            <button class="btn small" data-a="dup">⧉ Duplicate</button>
+            <button class="btn small" data-a="cont">▶ Continue</button>
+            <button class="btn small" data-a="exp">⬇ Export again</button>
+          </div>
+        </div>
+        <button class="btn small ghost" data-a="del">✕</button>`;
+      d.querySelector('[data-a="rename"]').addEventListener('click', () => renameMashupProject(p));
+      d.querySelector('[data-a="dup"]').addEventListener('click', () => duplicateMashupProject(p));
+      d.querySelector('[data-a="cont"]').addEventListener('click', () => continueMashupProject(p));
+      d.querySelector('[data-a="exp"]').addEventListener('click', () => exportAgainMashupProject(p));
       d.querySelector('[data-a="del"]').addEventListener('click', () => {
         A.dialog('Delete?', `<p>${A.escapeHtml(p.name)}</p>`, 'Delete', 'Cancel')
-          .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
+          .then((ok) => { if (ok) { RM.v25projects.delete(p.id); renderProjects(); renderHomeRecent(); } });
       });
       box.appendChild(d);
     });
