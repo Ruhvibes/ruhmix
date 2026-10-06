@@ -5,10 +5,14 @@
    no dependencies — classical signal processing only.
 
    Exposes window.RM.mashupDSP:
-     detectKey(audioBuffer, onProgress) -> Promise<{key, mode, confidence}>
+     detectKey(audioBuffer, onProgress) -> Promise<{key, mode, confidence} | null>
        Chromagram (STFT, Hann 4096/2048) averaged over up to 30 s,
        matched against Krumhansl-Schmuckler major/minor profiles.
        key: 'C'..'B', mode: 'major'|'minor', confidence: 0..1.
+       HONESTY (w26): null on digital silence or audio too short to
+       analyze (< 2048 samples) — never an invented "C major". Callers
+       must handle null (v25-create shows "Key —"; the mega/swap/
+       classic engines skip the key match and say so).
      timeStretch(audioBuffer, ratio, onProgress) -> Promise<AudioBuffer>
        WSOLA time-stretcher. ratio > 1 = longer duration, pitch
        preserved. ratio clamped to [0.5, 2.0]. Mono + stereo.
@@ -151,7 +155,8 @@ RM.mashupDSP = (function () {
     const sr = audioBuffer.sampleRate;
     const prog = (p) => { if (onProgress) onProgress(p); };
     const len = Math.min(audioBuffer.length, Math.floor(30 * sr));
-    if (len < 2048) return { key: 'C', mode: 'major', confidence: 0 };
+    // w26: too short to analyze — report null, never an invented key.
+    if (len < 2048) return null;
 
     const mono = await monoMix(audioBuffer, len, (p) => prog(p * 0.08));
 
@@ -203,7 +208,9 @@ RM.mashupDSP = (function () {
 
     let mx = 0;
     for (let i = 0; i < 12; i++) if (chroma[i] > mx) mx = chroma[i];
-    if (mx <= 0) return { key: 'C', mode: 'major', confidence: 0 };
+    // w26: digital silence — no pitch content, so no key. Report null
+    // instead of inventing "C major".
+    if (mx <= 0) return null;
     for (let i = 0; i < 12; i++) chroma[i] /= mx;
 
     const rot = new Float64Array(12);

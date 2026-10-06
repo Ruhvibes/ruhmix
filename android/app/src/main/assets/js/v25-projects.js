@@ -30,8 +30,9 @@
      RM.v25projects.listMashups() -> [{id, name, updatedAt, bpm, key,
        songCount, hasQc, lastExport}]
      RM.v25projects.get(id) -> {project, mashup} | null
-     RM.v25projects.rename(id, name) -> bool
-     RM.v25projects.duplicate(id) -> newId | null
+     RM.v25projects.isMashup(p) -> bool          (row rendering helper)
+     RM.v25projects.rename(id, name) -> bool      (stored settings preserved)
+     RM.v25projects.duplicate(id) -> newId | null (stored settings preserved)
      RM.v25projects.delete(id) -> bool            (reuses RM.proj.remove)
      RM.v25projects.continueEditing(id) -> {project, mashup, liveRestored} | null
        Restores fx/slowed/mastering/remix into RM.app.state via
@@ -77,6 +78,33 @@ RM.v25projects = (function () {
       return Object.keys(names).length;
     }
     return 0;
+  }
+
+  function isMashup(p) { return !!mashupOf(p); }
+
+  // P.save() snapshots the LIVE editor state (fx/slowed/mastering/remix)
+  // into settings — correct when saving the open project, but WRONG for
+  // rename/duplicate, which operate on a non-live library entry: a blind
+  // P.save would clobber that entry's stored settings with whatever the
+  // editor happens to hold right now. Neutralize the live snapshot for
+  // this one save (synchronous — state is restored before we return).
+  function saveKeepSettings(p) {
+    var P = needProj();
+    var app = (window.RM && RM.app) || null;
+    var st = app && app.state;
+    var hold = null;
+    if (st) {
+      hold = { fx: st.fx, slowed: st.slowed, mastering: st.mastering, remix: st.remix };
+      st.fx = null; st.slowed = null; st.mastering = null; st.remix = null;
+    }
+    try {
+      P.save(p);
+    } finally {
+      if (st && hold) {
+        st.fx = hold.fx; st.slowed = hold.slowed;
+        st.mastering = hold.mastering; st.remix = hold.remix;
+      }
+    }
   }
 
   function saveMashup(data) {
@@ -128,7 +156,7 @@ RM.v25projects = (function () {
     var p = P.get(id);
     if (!p || !mashupOf(p)) return false;
     p.name = String(name || p.name).slice(0, 60);
-    P.save(p);
+    saveKeepSettings(p); // don't let the live editor state leak into this entry
     return true;
   }
 
@@ -143,7 +171,7 @@ RM.v25projects = (function () {
     copy.createdAt = Date.now();
     copy.updatedAt = Date.now();
     if (copy.settings && copy.settings.mashup) copy.settings.mashup.savedAt = Date.now();
-    P.save(copy);
+    saveKeepSettings(copy); // the copy keeps the ORIGINAL's stored settings
     return copy.id;
   }
 
@@ -181,6 +209,7 @@ RM.v25projects = (function () {
     saveMashup: saveMashup,
     listMashups: listMashups,
     get: get,
+    isMashup: isMashup,
     rename: rename,
     duplicate: duplicate,
     delete: del,

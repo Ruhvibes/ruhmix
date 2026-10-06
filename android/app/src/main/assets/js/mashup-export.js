@@ -1,7 +1,7 @@
 'use strict';
 /* =====================================================================
    RuhMix — mashup-export.js
-   Bridge: 🤖 Auto Mashup  ->  existing Export screen.
+   Bridge: 🤖 Auto Mashup  ->  v25 Export overlay (RM.v25exportui).
 
    Contract: RM.mashupExport.sendToExport(audioBuffer, meta)
      - audioBuffer: AudioBuffer with the fully-built mashup mix. This also
@@ -12,51 +12,41 @@
        that stops any mashup preview playback owned by the mashup builder,
        and `style` is the beat style (W3) used for the export filename.
 
-   Mechanism (reuses the app's own explicit-source hook, same as the
-   Stem-deck "Export" buttons in stem-deck.js — export.js untouched):
+   Mechanism (v26 — the v25 export OVERLAY, RM.v25exportui):
      1. Stop mashup preview playback (meta.stop, then RM.mashup.stopPreview,
         then the main studio player as a defensive last resort). Nothing
         autoplays after this.
-     2. A.state.exportSource = { kind: 'buffer', buffer, name, fx, tail } —
-        the slot app.js refreshExportSource() already understands: it
-        unshifts a "🎯 Selected: <name>" radio option and auto-checks it.
-        fx = flatFx() (compressor OFF) and tail = 0 because the mashup is a
-        FINISHED mix: the preview plays buffer -> masterIn() (brickwall
-        limiter + safety clip only, no studio compressor), so exporting
-        through A.defaultFx() (comp ON, -18 dB / 4:1) would squash the W3
-        loudness balance and pump the beat's transients. flatFx matches the
-        preview path exactly — same treatment as the finished stem-mix and
-        remix-buffer exports. tail = 0: no 2.5 s of dead air appended.
-     3. RM.app.show('export') — the app's own navigation. The onShow hook
-        (app.js init) calls refreshExportSource() + syncExpDefaults(), so
-        the mashup is selected with current format/bitrate defaults and
-        MP3 (128/192/256/320), WAV, FLAC + Share all work unchanged.
-        Filename (v23): derived from meta.style —
+     2. RM.v25exportui.show(buffer, meta, { name }) — "Your Mashup Is Ready":
+        the v25 Smart Check (RM.v25qc.runCheck, 11 real DSP scans) runs on the
+        finished buffer with the builder's arrangement meta; "Fix Issues"
+        applies real DSP repairs (RM.v25qc.fixAll) and re-checks; the §25
+        copyright notice has a MANDATORY per-session checkbox (export/share
+        stay disabled until ticked); MP3/WAV/FLAC + bitrate/sample-rate
+        selectors; real progress; save via the EXISTING deliver path
+        (RM.exp.deliver -> Music/RuhMix/); share. The mashup is a FINISHED
+        mix: the overlay's exportPipeline encodes the buffer directly
+        (resample -> int16 -> MP3/WAV/FLAC), exactly as previewed — no studio
+        compressor, no re-render, no effect tail.
+        Filename (v23): derived from meta.style (unchanged) —
           'mega'      -> "RuhMix-mashup-mega-<N>songs" (N = meta.songCount
                         or meta.songs.length; no suffix if unknown)
           'swap'      -> "RuhMix-mashup-swap"
           'song2'     -> "RuhMix-mashup-song2"
           beat-style  -> "RuhMix-mashup-<style>" (e.g. hiphop, trap, auto)
           no style    -> meta.name || "AI Mashup" (classic friendly name)
-        The export screen sanitizes the base and appends the chosen
-        extension (.mp3/.wav/.flac), so the extension is NOT added here.
+        The overlay sanitizes the base and appends the chosen extension
+        (.mp3/.wav/.flac), so the extension is NOT added here.
+     3. Fallback: if RM.v25exportui is missing (should never happen — the
+        script is bundled), the old classic-screen handoff runs unchanged:
+        A.state.exportSource = { kind: 'buffer', buffer, name, fx, tail } —
+        the slot app.js refreshExportSource() already understands, then
+        A.show('export').
 
    Long buffers (5–12 min, v23 mega): the handoff passes the AudioBuffer
-   BY REFERENCE — A.state.exportSource only holds the reference; nothing
-   is serialized, copied, or re-rendered by this bridge. refreshExportSource
-   wraps it in a get() closure for the radio option; doExport picks it up
-   by reference. All downstream encoders are long-buffer safe (chunked):
-     - MP3: export.js encodeMp3 — 1152*32-sample steps via setTimeout,
-       per-chunk progress + cancel token (resampleBuffer/floatToInt16
-       before it are chunked too, audio-engine.js).
-     - WAV: audio-engine.js encodeWavBuffer — runChunked(1<<18) per-sample
-       loop, per-chunk progress.
-     - FLAC: export.js encodeFlac — chunked MD5 pass (1<<18) + per-frame
-       frameStep (4096-sample blocks) via setTimeout, progress 0→1,
-       cancel token.
-     - Saving: blobToBase64 is chunked (0x8000) with progress; deliver()
-       (v22) goes MediaStore -> Music/RuhMix/ first, cache/browser fallback
-       intact. Share (saveFile -> shareFile / shareAudioUri) untouched.
+   BY REFERENCE — the overlay holds the reference; nothing is serialized,
+   copied, or re-rendered by this bridge. All downstream encoders are
+   long-buffer safe (chunked): MP3/WAV/FLAC + blobToBase64 + deliver()
+   (v22 MediaStore -> Music/RuhMix/) as before.
 
    Normal editor→export flow is untouched: we only ever set
    A.state.exportSource at the moment the mashup's Export/Share button is
@@ -158,10 +148,18 @@ RM.mashupExport = (function () {
     // Filename: v23 style-derived scheme (see exportName above); classic
     // mashup keeps its friendly "Mashup A x B" name when no style is set.
     lastName = exportName(meta);
-    // Established explicit-source hook (see refreshExportSource in
-    // app.js: {kind:'buffer'} unshifts "🎯 Selected: <name>" and checks
-    // it). Do NOT touch state.buffer/viewBuffer — the editor's current
-    // project stays exactly as it was.
+    // v26: route through the v25 export overlay (QC smart check + mandatory
+    // §25 copyright checkbox + MP3/WAV/FLAC + progress + Music/RuhMix save
+    // + share). Positional form: show(buffer, meta, opts).
+    try {
+      if (window.RM && RM.v25exportui && typeof RM.v25exportui.show === 'function') {
+        RM.v25exportui.show(buf, meta, { name: lastName });
+        return true;
+      }
+    } catch (e) { /* fall through to the classic screen below */ }
+    // Fallback — overlay module missing: the classic export screen handoff
+    // (pre-v26 mechanism). Do NOT touch state.buffer/viewBuffer — the
+    // editor's current project stays exactly as it was.
     var es = { kind: 'buffer', buffer: buf, name: lastName };
     // Finished mix: flat FX (no studio compressor — the beat must render
     // exactly as W3 loudness-matched it) and no effect tail appended.

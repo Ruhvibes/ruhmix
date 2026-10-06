@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 25 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 26 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -1485,8 +1485,8 @@ Object.assign(RM.app, (function () {
       } else {
         A.state.fx = JSON.parse(JSON.stringify(s.fx));
       }
-      // sync echo to detected BPM (quarter note)
-      const beat = 60 / bpm;
+      // sync echo to detected BPM (quarter note); fall back to 120 on undetectable (silent) input
+      const beat = 60 / (bpm || 120);
       if (A.state.fx.echo.on) A.state.fx.echo.time = +(beat * 0.75).toFixed(3);
       A.applyFxToChain();
       A.ensureStudio();
@@ -1812,6 +1812,11 @@ Object.assign(RM.app, (function () {
       refreshTrackUI();
     });
     $('mx-stop-all').addEventListener('click', stopMixer);
+    // v26 (I5): "Export Mix" — offline mixdown (vol/pan/mute/solo) -> export flow.
+    $('mx-export-mix').addEventListener('click', () => {
+      if (window.RM && RM.v26mixdown) RM.v26mixdown.exportMixerMix();
+      else A.toast('Mixdown not ready');
+    });
   }
   function stopMixer() {
     mixer.tracks.forEach((tr) => { try { if (tr.player) tr.player.stop(true); } catch (e) {} });
@@ -2231,16 +2236,15 @@ Object.assign(RM.app, (function () {
     if (A.state.viewBuffer) opts.push({ kind: 'project', label: ('Current project') + ' (' + A.state.fileName + ')', get: () => ({ buffer: A.state.viewBuffer, rate: A.state.project.settings.speed || 1, fx: A.state.fx, name: A.state.fileName, vol: A.state.project.settings.volume, pan: A.state.project.settings.pan }) });
     RM.stems.results.forEach((s) => opts.push({ kind: 'stem', label: 'Stem: ' + s.name, get: () => ({ buffer: s.buffer, rate: 1, fx: A.defaultFx(), name: s.name }) }));
     A.state.imports.forEach((it) => opts.push({ kind: 'import', label: it.name, get: () => ({ buffer: it.buffer, rate: 1, fx: A.defaultFx(), name: it.name }) }));
-    if (!opts.length) {
-      box.innerHTML = `<div class="empty"><div class="empty-icon">📤</div>${'Load audio first to export'}</div>`;
-      return;
-    }
     // Stem row se "Export" dabane par exportSource {kind:'buffer', buffer, name}
     // set hota hai — use radio me explicit option banao aur select karo.
     // (Pehle radio hamesha index 0 check karta tha -> galat source export hota tha.)
     const es = A.state.exportSource;
     let checkedIdx = 0;
     if (es && es.kind === 'buffer' && es.buffer) {
+      // v26 (I5): "Export Mix" (mixer) ka mixdown bhi yahi se aata hai — koi
+      // aur source na ho tab bhi explicit option banna chahiye, isliye empty
+      // check se PEHLE unshift karo.
       // W5 (mashup-export.js): the mashup hands a finished mix and passes
       // its own fx (flatFx — compressor OFF, so the W3 loudness-matched
       // vocals+beat render exactly as previewed) and tail (0 — no dead-air
@@ -2250,6 +2254,10 @@ Object.assign(RM.app, (function () {
       checkedIdx = 0;
     } else if (es && typeof es.idx === 'number' && es.idx >= 0 && es.idx < opts.length) {
       checkedIdx = es.idx;
+    }
+    if (!opts.length) {
+      box.innerHTML = `<div class="empty"><div class="empty-icon">📤</div>${'Load audio first to export'}</div>`;
+      return;
     }
     opts.forEach((o, i) => {
       const l = document.createElement('label');
@@ -2317,6 +2325,9 @@ Object.assign(RM.app, (function () {
   function doExport() {
     const opts = A.state._exportOpts;
     if (!opts || !opts.length) { A.toast('Nothing to export'); return; }
+    // v26 §25: mandatory copyright acknowledgement — no export without it.
+    const ackBox = $('exp-copyright-ack');
+    if (ackBox && !ackBox.checked) { A.toast('Please tick the copyright notice first'); return; }
     const sel = document.querySelector('input[name="expsrc"]:checked');
     const src = opts[sel ? +sel.value : 0].get();
     const fmtEl = document.querySelector('input[name="expfmt"]:checked');
@@ -2347,7 +2358,7 @@ Object.assign(RM.app, (function () {
     // length limit) to bhi .catch tak pahunche aur Export button dobara
     // enable ho. Bina iske button hamesha disabled rehta (dead UI).
     stage('Preparing…', 0.02);
-    let chain;
+    let chain, mstChain = null;
     // Effect tail: RM.exp.tailForFx covers reverb IRs plus the echo RT60
     // (shared helper — the remix-buffer render below uses it too).
     const fxp = src.fx || A.defaultFx();
@@ -2376,10 +2387,18 @@ Object.assign(RM.app, (function () {
           outNode = xp;
         } else { outNode = xg; }
       }
+      // v26 (I5): mastering -> export. "Apply to export" toggle (mastering
+      // screen) ON: the SAME fx.makeMasterChain graph with the CURRENT mst-*
+      // settings becomes the FINAL stage. OFF: unchanged behavior.
+      if (window.RM && RM.v26mixdown && RM.v26mixdown.masteringEnabled()) {
+        const mc = RM.v26mixdown.applyMasterChainOffline(oc, outNode);
+        outNode = mc.out; mstChain = mc.chain;
+      }
       return outNode;
     }, { sampleRate: sr, rate: src.rate || 1, tail: (src.tail !== undefined ? src.tail : tailNeed) }))
       .then((rendered) => {
         try { if (chain) chain.dispose(); } catch (e) {}
+        try { if (mstChain) mstChain.dispose(); } catch (e) {}
         stage('Rendering… please wait', 0.35);
         const p2 = normalize
           ? RM.audio.normalizeBuffer(rendered, 0.71, (p) => setExpStage(('Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
@@ -2457,6 +2476,108 @@ Object.assign(RM.app, (function () {
     $('proj-search').addEventListener('input', renderProjects);
     renderProjects();
   }
+
+  /* ---- v25 mashup project row actions (I7: wire RM.v25projects) ----
+     Mashup rows (settings.mashup.kind === 'mashup') get Rename / Duplicate /
+     Continue / Export-again. Regular editor rows keep the old Open + Delete.
+     Honest limit: audio BYTES are never stored, so Continue / Export-again
+     reuse the in-session mashup result when it's still in memory; otherwise
+     they say so plainly instead of crashing or faking it. */
+  function isMashupRow(p) {
+    try {
+      return !!(RM.v25projects && typeof RM.v25projects.isMashup === 'function'
+        && RM.v25projects.isMashup(p));
+    } catch (e) { return false; }
+  }
+  function mashupRowMeta(s) {
+    const bits = [];
+    if (s.songCount) bits.push(s.songCount + (s.songCount === 1 ? ' song' : ' songs'));
+    if (s.bpm) bits.push(Math.round(s.bpm) + ' BPM');
+    if (s.key) bits.push(s.key);
+    if (s.hasQc) bits.push('QC ✓');
+    if (s.lastExport) bits.push('exported');
+    return bits.length ? bits.join(' • ') : 'Mashup project';
+  }
+  function currentMashupResult() {
+    try {
+      return (RM.mashupScreen && typeof RM.mashupScreen.getResult === 'function')
+        ? RM.mashupScreen.getResult() : null;
+    } catch (e) { return null; }
+  }
+  // In-session mashup audio (if any) handed to fn({buffer, meta, engine}).
+  // Returns true when audio was available (fn ran or a confirm was shown).
+  function withProjectAudio(p, verb, fn) {
+    const mr = currentMashupResult();
+    if (mr && mr.buffer && typeof mr.buffer.getChannelData === 'function') {
+      const go = () => fn({ buffer: mr.buffer, meta: mr.meta || {}, engine: mr.engine });
+      const resName = (mr.meta && mr.meta.name) || '';
+      // Never silently use the wrong audio: confirm when the in-memory
+      // result belongs to a different mashup.
+      if (!resName || resName === p.name) { go(); return true; }
+      A.dialog('Use current audio?',
+        `<p>Audio in memory is <b>${A.escapeHtml(resName)}</b> — a different mashup. ${A.escapeHtml(verb)} project <b>${A.escapeHtml(p.name)}</b> with this audio?</p>`,
+        'Use this audio', 'Cancel').then((ok) => { if (ok) go(); });
+      return true;
+    }
+    return false;
+  }
+  function renameMashupProject(p) {
+    A.dialog('Rename project',
+      `<input id="dlg-name" class="textin" value="${A.escapeHtml(p.name)}" maxlength="60" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">`,
+      'Rename', 'Cancel').then((ok) => {
+        if (!ok) return;
+        const name = (($('dlg-name') && $('dlg-name').value) || '').trim() || p.name;
+        if (RM.v25projects.rename(p.id, name)) {
+          A.toast('Project renamed ✓');
+          renderProjects(); renderHomeRecent();
+        } else {
+          A.toast('Rename failed — project not found');
+        }
+      });
+  }
+  function duplicateMashupProject(p) {
+    const id = RM.v25projects.duplicate(p.id);
+    if (id) {
+      A.toast('Project duplicated ✓');
+      renderProjects(); renderHomeRecent();
+    } else {
+      A.toast('Duplicate failed — project not found');
+    }
+  }
+  function continueMashupProject(p) {
+    const res = RM.v25projects.continueEditing(p.id);
+    if (!res) { A.toast('Project not found'); return; }
+    const had = withProjectAudio(res.project, 'Continue editing', (a) => {
+      if (RM.v25studio && typeof RM.v25studio.open === 'function') {
+        RM.v25studio.open({ buffer: a.buffer, meta: a.meta, engineTags: a.engine, songs: [] });
+        A.toast('Continuing: ' + res.project.name);
+      } else {
+        A.toast('Studio is not available in this build');
+      }
+    });
+    if (!had) {
+      // Live state was still restored above; the Studio opens empty and the
+      // user gets the honest rebuild path instead of a crash.
+      A.show('studio');
+      A.toast('Audio for this project is not stored on the device. Pick the original songs on the Create screen and rebuild to continue editing.', 6000);
+    }
+  }
+  function exportAgainMashupProject(p) {
+    const got = RM.v25projects.exportAgain(p.id);
+    if (!got) { A.toast('Project not found'); return; }
+    const had = withProjectAudio(got.project, 'Export', (a) => {
+      if (RM.v25exportui && typeof RM.v25exportui.show === 'function') {
+        RM.v25exportui.show({ buffer: a.buffer, meta: a.meta, name: got.project.name || 'RuhMix-mashup' });
+      } else {
+        A.toast('Export screen is not available in this build');
+      }
+    });
+    if (!had) {
+      A.dialog('Audio unavailable',
+        `<p>Audio for <b>${A.escapeHtml(got.project.name)}</b> is not stored on the device, so it can't be re-exported. Rebuild the mashup on the Create screen first.</p>`,
+        'Go to Create', 'Cancel').then((ok) => { if (ok) A.show('mashup'); });
+    }
+  }
   function renderProjects() {
     const box = $('projects-list');
     if (!box) return;
@@ -2468,21 +2589,48 @@ Object.assign(RM.app, (function () {
       box.innerHTML = `<div class="empty"><div class="empty-icon">📁</div>${q ? ('No projects found') : ('No saved projects yet')}</div>`;
       return;
     }
+    let mash = {};
+    try { RM.v25projects.listMashups().forEach((s) => { mash[s.id] = s; }); } catch (e) {}
     arr.forEach((p) => {
       const d = document.createElement('div');
       d.className = 'import-item';
       const dt = new Date(p.updatedAt).toLocaleDateString();
-      d.innerHTML = `
+      const ms = mash[p.id];
+      if (!ms) {
+        d.innerHTML = `
         <div class="ii-main">
           <div class="ii-name">${A.escapeHtml(p.name)}</div>
           <div class="ii-meta">${A.escapeHtml((p.audioRef && p.audioRef.name) || ('No audio'))} • ${p.ops.length} edits • ${dt}</div>
         </div>
         <button class="btn small" data-a="open">${'Open'}</button>
         <button class="btn small ghost" data-a="del">✕</button>`;
-      d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
+        d.querySelector('[data-a="open"]').addEventListener('click', () => openProject(p));
+        d.querySelector('[data-a="del"]').addEventListener('click', () => {
+          A.dialog('Delete?', `<p>${A.escapeHtml(p.name)}</p>`, 'Delete', 'Cancel')
+            .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
+        });
+        box.appendChild(d);
+        return;
+      }
+      d.innerHTML = `
+        <div class="ii-main">
+          <div class="ii-name">${A.escapeHtml(p.name)} <span class="beta">MASHUP</span></div>
+          <div class="ii-meta">${A.escapeHtml(mashupRowMeta(ms))} • ${dt}</div>
+          <div class="btn-row" style="margin:6px 0 0">
+            <button class="btn small" data-a="rename">✏️ Rename</button>
+            <button class="btn small" data-a="dup">⧉ Duplicate</button>
+            <button class="btn small" data-a="cont">▶ Continue</button>
+            <button class="btn small" data-a="exp">⬇ Export again</button>
+          </div>
+        </div>
+        <button class="btn small ghost" data-a="del">✕</button>`;
+      d.querySelector('[data-a="rename"]').addEventListener('click', () => renameMashupProject(p));
+      d.querySelector('[data-a="dup"]').addEventListener('click', () => duplicateMashupProject(p));
+      d.querySelector('[data-a="cont"]').addEventListener('click', () => continueMashupProject(p));
+      d.querySelector('[data-a="exp"]').addEventListener('click', () => exportAgainMashupProject(p));
       d.querySelector('[data-a="del"]').addEventListener('click', () => {
         A.dialog('Delete?', `<p>${A.escapeHtml(p.name)}</p>`, 'Delete', 'Cancel')
-          .then((ok) => { if (ok) { RM.proj.remove(p.id); renderProjects(); renderHomeRecent(); } });
+          .then((ok) => { if (ok) { RM.v25projects.delete(p.id); renderProjects(); renderHomeRecent(); } });
       });
       box.appendChild(d);
     });
@@ -2813,7 +2961,7 @@ Object.assign(RM.app, (function () {
   /* ================= init ================= */
   function init() {
     A.onShow = (name) => {
-      if (name === 'export') { refreshExportSource(); if (A.syncExpDefaults) A.syncExpDefaults(); }
+      if (name === 'export') { refreshExportSource(); if (A.syncExpDefaults) A.syncExpDefaults(); const ab = $('exp-copyright-ack'); if (ab) ab.checked = false; /* v26 §25: required fresh each visit */ }
       if (name === 'projects') renderProjects();
       if (name === 'settings') updateStorageInfo();
       if (name === 'home') { renderHomeRecent(); cdxUpdateNow(); }

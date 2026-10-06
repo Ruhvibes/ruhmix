@@ -319,6 +319,7 @@
   <div class="btn-row">
     <button class="btn primary" id="mx-play-all">▶ Play All</button>
     <button class="btn" id="mx-stop-all">■ Stop</button>
+    <button class="btn" id="mx-export-mix">🎚️ Export Mix</button>
   </div>
   <div id="mixer-tracks"></div>
 </section>
@@ -416,6 +417,9 @@
     <div class="row"><label>Ratio <input type="range" id="mst-ratio" min="10" max="100" value="25"></label><span id="mst-ratio-v">2.5:1</span></div>
   </div>
   <div class="btn-row">
+    <label class="radio-row"><input type="checkbox" id="mst-apply-export"><span>🎛️ Apply mastering to exports</span></label>
+  </div>
+  <div class="btn-row">
     <button class="btn" id="mst-ab">Hearing: AFTER (mastered)</button>
   </div>
   <div class="btn-row">
@@ -452,7 +456,14 @@
     <div class="row"><label>Sample Rate <select id="exp-sr"><option selected>44100</option><option>48000</option></select> Hz</label></div>
     <label class="radio-row"><input type="checkbox" id="exp-normalize" checked><span>Loudness normalize (peak −0.5 dB)</span></label>
     <div id="exp-note" class="muted small"></div>
+    <div id="exp-mastering-flag" class="muted small" style="display:none"></div>
     <div class="honest">M4A/AAC: offline encoding is not possible in the browser (native code required) — so M4A is not listed.</div>
+  </div>
+  <div class="panel" id="exp-copyright">
+    <h4>⚖️ Copyright Notice</h4>
+    <p class="muted small">Only use audio that you own, have permission to use, or are otherwise legally authorized to process and publish.</p>
+    <p class="muted small"><b>Creating a mashup does NOT give you copyright ownership.</b></p>
+    <label class="radio-row"><input type="checkbox" id="exp-copyright-ack"><span>I understand — I will only export and share audio I am legally authorized to use.</span></label>
   </div>
   <div class="progress"><div class="pbar" id="exp-pbar"></div></div>
   <div id="exp-status" class="status"></div>
@@ -617,7 +628,10 @@
 <script src="js/v25-stems-ui.js"></script>
 <script src="js/v25-create.js"></script>
 <script src="js/v25-studio.js"></script>
+<script src="js/v26-studio-fx.js"></script>
+<script src="js/v26-vocal.js"></script>
 <script src="js/v25-export-ui.js"></script>
 <script src="js/v25-shell.js"></script>
+<script src="js/v26-mixdown.js"></script>
 </body>
 </html>

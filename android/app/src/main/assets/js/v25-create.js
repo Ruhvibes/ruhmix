@@ -68,6 +68,13 @@ window.RM = window.RM || {};
     result: null,       // { buffer, meta, engine }
     pvSrc: null,
     nextId: 1,
+    mode: 'mega',       // w26: 'classic' | 'swap' | 'mega'
+    presetId: 'custom', // w26: style preset id (RM.v25arrange; 'custom' = Smart default)
+    audSrc: null,       // w26: per-song audition source
+    audId: null,        // w26: song id currently auditioning
+    _po: null,          // w26: preset build opts for the in-flight create
+    _extPlan: null,     // w26: riser plan for the extended pipeline
+    _bridge: null,      // w26: mashupIntercept pick bridge { id, orig }
     _wired: false,
     _hook: null,
   };
@@ -144,6 +151,194 @@ window.RM = window.RM || {};
               typeof b.sampleRate === 'number' && typeof b.length === 'number');
   }
 
+  /* ================= w26: mode routing (pure, node-testable) ========== */
+  // Classic / Vocal Swap are 2-song engines; Mega covers 2–8 songs; 9–10
+  // songs always use the extended pipeline (same real public functions).
+  var MODES = [
+    { id: 'classic', label: '🎤 Classic',
+      hint: '2 songs — vocals over the auto-matched beat (RM.mashup.build)' },
+    { id: 'swap', label: '🔄 Vocal Swap',
+      hint: '2 songs — singers alternate every 8 bars (RM.mashupSwap.build)' },
+    { id: 'mega', label: '🎹 Mega Mix',
+      hint: '2–8 songs — vocals rotate over an auto-matched beat (RM.mashupMega.build)' },
+  ];
+
+  function resolveEngine(mode, enabledCount) {
+    var n = Number(enabledCount) || 0;
+    if (mode === 'classic' || mode === 'swap') {
+      if (n === 2) return { engine: mode, reason: '' };
+      return { engine: null,
+               reason: (mode === 'classic' ? 'Classic' : 'Vocal Swap') +
+                       ' needs exactly 2 enabled songs — enable/disable songs or switch to Mega Mix.' };
+    }
+    if (n >= 2 && n <= 8) return { engine: 'mega', reason: '' };
+    if (n >= 9 && n <= MAX_SONGS) return { engine: 'extended', reason: '' };
+    return { engine: null, reason: 'Pick at least 2 songs to create a mashup.' };
+  }
+
+  /* ================= w26: style presets (pure, node-testable) ========= */
+  // presetRenderSpec(presetId, default settings) gives the full merged
+  // render spec. Mapping onto the real engines:
+  //   pre-build:  mega opts.styleId = spec.beatStyle (null → auto pick);
+  //               extended pipeline: xfadeBars, vocalBoostDb, tempoShift.
+  //   post-build: REAL audible DSP — preset tone (brightness/bass),
+  //               Schroeder reverb + echo (reverbWet/delayWet), risers,
+  //               mastering. Every preset differs from every other in at
+  //               least one post dimension (render-tested, no no-ops).
+  function presetSpec(presetId) {
+    var va = RM.v25arrange;
+    if (!va || typeof va.presetRenderSpec !== 'function') return null;
+    try { return va.presetRenderSpec(presetId, null); } catch (e) { return null; }
+  }
+
+  function presetBuildOpts(presetId) {
+    var spec = presetSpec(presetId);
+    if (!spec) return null;
+    return {
+      spec: spec,
+      styleId: spec.beatStyle || null,
+      xfadeBars: spec.xfadeBars,
+      vocalBoostDb: spec.vocalBoostDb,
+      tempoShift: spec.tempoShift,
+    };
+  }
+
+  function listPresets() {
+    var va = RM.v25arrange;
+    if (va && typeof va.listPresets === 'function') {
+      try { var l = va.listPresets(); if (Array.isArray(l) && l.length) return l; } catch (e) {}
+    }
+    return [];
+  }
+
+  function presetById(id) {
+    var va = RM.v25arrange;
+    if (va && typeof va.getPreset === 'function') {
+      try { return va.getPreset(id); } catch (e) {}
+    }
+    return null;
+  }
+
+  // Schroeder-style reverb: 4 parallel feedback combs + 2 series allpasses.
+  // Pure JS (no AudioContext) so node tests can run it too. wet: 0..1.
+  function schroederReverb(d, sr, wet) {
+    if (!(wet > 0) || !d || !d.length) return;
+    function delayLine(ms) {
+      return { buf: new Float32Array(Math.max(2, Math.round(ms * sr / 1000))), idx: 0 };
+    }
+    var combs = [29.7, 37.1, 41.1, 43.7].map(function (ms) {
+      var c = delayLine(ms); c.fb = 0.82; return c;
+    });
+    var aps = [5.0, 1.7].map(function (ms) {
+      var a = delayLine(ms); a.g = 0.5; return a;
+    });
+    var len = d.length, i, j;
+    var wetBuf = new Float32Array(len);
+    for (i = 0; i < len; i++) {
+      var x = d[i], acc = 0, c, a;
+      for (j = 0; j < combs.length; j++) {
+        c = combs[j];
+        var co = c.buf[c.idx];
+        acc += co;
+        c.buf[c.idx] = x + co * c.fb;
+        c.idx = (c.idx + 1) % c.buf.length;
+      }
+      acc *= 0.25;
+      for (j = 0; j < aps.length; j++) {
+        a = aps[j];
+        var ao = a.buf[a.idx];
+        var y = -a.g * acc + ao;
+        a.buf[a.idx] = acc + a.g * ao;
+        acc = y;
+        a.idx = (a.idx + 1) % a.buf.length;
+      }
+      wetBuf[i] = acc;
+    }
+    var peak = 0;
+    for (i = 0; i < len; i++) { var av = Math.abs(wetBuf[i]); if (av > peak) peak = av; }
+    var g = peak > 1e-6 ? Math.min(1, 0.9 / peak) : 0;
+    var dry = 1 - Math.min(0.6, wet);
+    for (i = 0; i < len; i++) d[i] = d[i] * dry + wetBuf[i] * g * wet;
+  }
+
+  // Feedback echo on the dotted-eighth of the grid tempo. wet: 0..1.
+  function feedbackEcho(d, sr, wet, bpm) {
+    if (!(wet > 0) || !d || !d.length) return;
+    var beat = 60 / ((isFinite(bpm) && bpm > 0) ? bpm : 100);
+    var n = Math.max(2, Math.round(beat * 0.75 * sr));
+    var dl = new Float32Array(n), idx = 0, fb = 0.32;
+    var dryG = 1 - Math.min(0.5, wet);
+    for (var i = 0; i < d.length; i++) {
+      var x = d[i];
+      var e = dl[idx];
+      dl[idx] = x + e * fb;
+      d[i] = x * dryG + e * wet;
+      idx = (idx + 1) % n;
+    }
+  }
+
+  function applyPresetSpace(buf, spec, sr, gridBpm) {
+    if (!isAudioBuffer(buf) || !spec) return buf;
+    sr = sr || buf.sampleRate || 44100;
+    var rWet = Math.max(0, Math.min(1, 0.16 * (Number(spec.reverbWet) || 0)));
+    var dWet = Math.max(0, Math.min(1, 0.14 * (Number(spec.delayWet) || 0)));
+    if (rWet <= 0 && dWet <= 0) return buf;
+    for (var ch = 0; ch < buf.numberOfChannels; ch++) {
+      var dch = buf.getChannelData(ch);
+      if (rWet > 0) schroederReverb(dch, sr, rWet);
+      if (dWet > 0) feedbackEcho(dch, sr, dWet, gridBpm);
+    }
+    return buf;
+  }
+
+  // applyPresetPost(buf, spec, riserPlan, gridBpm) — the preset post-chain:
+  // tone → space (reverb/echo) → risers → mastering LAST (so the output
+  // stays true-peak safe). In place; returns buf. Pure DSP, node-testable.
+  function applyPresetPost(buf, spec, riserPlan, gridBpm) {
+    var va = RM.v25arrange;
+    if (!isAudioBuffer(buf) || !spec || !va) return buf;
+    var sr = buf.sampleRate || 44100;
+    try {
+      if (typeof va.applyPresetTone === 'function') va.applyPresetTone(buf, spec, sr);
+      applyPresetSpace(buf, spec, sr, gridBpm);
+      if (riserPlan && typeof va.addRisers === 'function') va.addRisers(buf, riserPlan, spec, sr);
+      if (typeof va.applyMastering === 'function') va.applyMastering(buf, spec.mastering, sr);
+    } catch (e) {}
+    return buf;
+  }
+
+  // Riser placement from each engine's known arrangement structure.
+  function riserPlanForMega(meta) {
+    try {
+      var m = meta || {};
+      var bpm = Number(m.bpm1) || 100;
+      var n = Math.max(2, Math.min(8, Number(m.songs) || 2));
+      var cycles = Math.max(1, Math.min(4, Number(m.cycles) || 2));
+      // mega layout: 4-bar intro + cycles*n 8-bar vocal slots + 4-bar outro;
+      // the final chorus is the last vocal slot.
+      var startBar = 4 + (cycles * n - 1) * 8;
+      return { gridBpm: bpm, sections: [{ type: 'finalChorus', startBar: startBar, bars: 8 }] };
+    } catch (e) { return null; }
+  }
+  function riserPlanForExtended(masterBpm, songCount) {
+    var n = Math.max(2, Math.min(10, Number(songCount) || 2));
+    // extended pipeline: 4-bar intro + 2 cycles of 8-bar vocal slots.
+    var startBar = 4 + (2 * n - 1) * 8;
+    return { gridBpm: masterBpm, sections: [{ type: 'finalChorus', startBar: startBar, bars: 8 }] };
+  }
+
+  /* ---- card text (pure — the "BPM —"/"Key —" honest display) ---- */
+  function cardBpmText(song) {
+    if (!song) return '♪ BPM —';
+    if (song.analyzing) return '♪ Analyzing…';
+    return '♪ ' + (song.bpm ? song.bpm + ' BPM' : 'BPM —');
+  }
+  function cardKeyText(song) {
+    if (!song) return '𝄞 Key —';
+    if (song.analyzing) return '𝄞 Analyzing…';
+    return '𝄞 ' + (song.key ? keyLabel(song.key) : 'Key —');
+  }
+
   /* ================= songs ================= */
 
   function enabledSongs() {
@@ -201,6 +396,12 @@ window.RM = window.RM || {};
       '  <h2>Create Your Mashup</h2>' +
       '  <p class="muted v25-desc">Add at least 2 songs. Add as many songs as you want depending on available processing resources.</p>' +
       '  <p class="muted small v25-formats">Formats: MP3 · WAV · M4A · AAC · FLAC (as decoded by your device)</p>' +
+      '  <div class="v25-row-label" style="font-size:11px;font-weight:700;color:#8f8fa3;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.5px;">Mashup mode</div>' +
+      '  <div id="v25-modes" class="v25-chips"></div>' +
+      '  <div id="v25-mode-note" class="muted small"></div>' +
+      '  <div class="v25-row-label" style="font-size:11px;font-weight:700;color:#8f8fa3;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.5px;">Style preset <span class="muted small" style="text-transform:none;letter-spacing:0;">— Smart DSP colour</span></div>' +
+      '  <div id="v25-presets" class="v25-chips"></div>' +
+      '  <div id="v25-preset-desc" class="muted small"></div>' +
       '  <div id="v25-memwarn" class="v25-memwarn" hidden>⚠️ 8+ songs need more memory — processing will be slower.</div>' +
       '  <div id="v25-songs" class="v25-songs"></div>' +
       '  <button id="v25-add" class="btn big block">＋ Add Song</button>' +
@@ -313,10 +514,10 @@ window.RM = window.RM || {};
       dur.textContent = '⏱ ' + formatDuration(song.buffer.duration);
       var bpm = document.createElement('div');
       bpm.className = 'small';
-      bpm.textContent = song.analyzing ? '♪ Analyzing…' : '♪ ' + (song.bpm ? song.bpm + ' BPM' : 'BPM —');
+      bpm.textContent = cardBpmText(song);
       var key = document.createElement('div');
       key.className = 'small';
-      key.textContent = song.analyzing ? '𝄞 Analyzing…' : '𝄞 ' + (song.key ? keyLabel(song.key) : 'Key —');
+      key.textContent = cardKeyText(song);
       info.appendChild(dur);
       info.appendChild(bpm);
       info.appendChild(key);
@@ -342,6 +543,9 @@ window.RM = window.RM || {};
       return b;
     }
     bar.appendChild(mkBtn(song.buffer ? '↻ Re-pick' : '🎵 Pick audio', 'pick', 'Pick audio file'));
+    // w26: per-song audition — real AudioBufferSourceNode; stops the
+    // mashup preview and any other card's playback.
+    bar.appendChild(mkBtn(st.audId === song.id ? '⏸ Stop' : '▶ Play', 'aud', 'Play/pause this song', !song.buffer));
     bar.appendChild(mkBtn('↑', 'up', 'Move up', idx === 0));
     bar.appendChild(mkBtn('↓', 'down', 'Move down', idx === st.songs.length - 1));
     bar.appendChild(mkBtn(song.enabled ? '⏸ Disable' : '▶ Enable', 'toggle', 'Enable/disable this song', !song.buffer));
@@ -376,15 +580,190 @@ window.RM = window.RM || {};
     var b = $('v25-create'), hint = $('v25-hint');
     if (!b) return;
     var n = enabledSongs().length;
-    var ok = n >= MIN_SONGS && !st.creating;
+    // w26: validation follows the selected mode's engine contract.
+    var route = resolveEngine(st.mode, n);
+    var ok = !!route.engine && !st.creating;
     b.disabled = !ok;
     if (hint) {
       hint.hidden = ok;
-      if (!ok && !st.creating) {
-        hint.textContent = n === 0
-          ? 'Pick at least 2 songs to create a mashup.'
-          : 'Pick ' + (MIN_SONGS - n) + ' more song' + (MIN_SONGS - n > 1 ? 's' : '') + ' to create a mashup.';
+      if (!ok && !st.creating) hint.textContent = route.reason || 'Pick at least 2 songs to create a mashup.';
+    }
+    var mn = $('v25-mode-note');
+    if (mn) {
+      mn.textContent = st.mode === 'mega'
+        ? (n > 8 ? '9–10 songs use the extended pipeline (same Smart engines).'
+                 : '2–8 songs · vocals rotate over an auto-matched beat.')
+        : st.mode === 'swap' ? '2 songs · singers alternate every 8 bars.'
+        : '2 songs · vocals over the auto-matched beat.';
+    }
+  }
+
+  /* ================= w26: mode + preset chips ================= */
+
+  function chipStyle(active) {
+    return 'padding:7px 12px;border-radius:16px;border:1px solid ' +
+      (active ? '#00e676' : '#3a3a44') + ';background:' +
+      (active ? 'rgba(0,230,118,.14)' : '#1b1b21') + ';color:' +
+      (active ? '#7CFC98' : '#cfcfda') +
+      ';font-size:12px;margin:0 6px 8px 0;cursor:pointer;';
+  }
+
+  function renderModeChips() {
+    var wrap = $('v25-modes');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    MODES.forEach(function (m) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = m.label;
+      b.title = m.hint;
+      b.setAttribute('style', chipStyle(st.mode === m.id));
+      b.setAttribute('data-mode', m.id);
+      b.addEventListener('click', function () { selectMode(m.id); });
+      wrap.appendChild(b);
+    });
+  }
+
+  function renderPresetChips() {
+    var wrap = $('v25-presets');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    var list = listPresets();
+    var desc = $('v25-preset-desc');
+    if (!list.length) {
+      wrap.style.display = 'none';
+      if (desc) desc.textContent = '';
+      return;
+    }
+    wrap.style.display = '';
+    list.forEach(function (p) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = p.name;
+      b.title = p.tagline || p.name;
+      b.setAttribute('style', chipStyle(st.presetId === p.id));
+      b.setAttribute('data-preset', p.id);
+      b.addEventListener('click', function () { selectPreset(p.id); });
+      wrap.appendChild(b);
+    });
+    var cur = presetById(st.presetId);
+    if (desc) desc.textContent = cur ? (cur.description || cur.tagline || '') : '';
+  }
+
+  // Switching mode/preset clears a stale result — otherwise Preview/Export
+  // would act on a mashup built with a different mode or preset.
+  function clearStaleResult() {
+    stopPreview();
+    stopAudition();
+    st.result = null;
+    var r = $('v25-result');
+    if (r) r.hidden = true;
+  }
+
+  function selectMode(id) {
+    var found = false;
+    for (var i = 0; i < MODES.length; i++) if (MODES[i].id === id) found = true;
+    if (!found || st.mode === id) return;
+    st.mode = id;
+    clearStaleResult();
+    renderModeChips();
+    updateCreateState();
+  }
+
+  function selectPreset(id) {
+    if (st.presetId === id) return;
+    st.presetId = id;
+    clearStaleResult();
+    renderPresetChips();
+    updateCreateState();
+  }
+
+  /* ================= w26: per-song audition ================= */
+  // Real AudioBufferSourceNode per card. Only one audition plays at a
+  // time: starting one stops the mashup preview and any other card.
+  function stopAudition() {
+    if (st.audSrc) {
+      try { st.audSrc.onended = null; st.audSrc.stop(); } catch (e) {}
+      try { st.audSrc.disconnect(); } catch (e) {}
+      st.audSrc = null;
+    }
+    if (st.audId != null) {
+      st.audId = null;
+      refreshAudButtons();
+    }
+  }
+
+  function refreshAudButtons() {
+    var wrap = $('v25-songs');
+    if (!wrap || typeof wrap.querySelectorAll !== 'function') return;
+    var btns = wrap.querySelectorAll('[data-act="aud"]');
+    for (var i = 0; i < btns.length; i++) {
+      var id = parseInt(btns[i].getAttribute('data-id'), 10);
+      btns[i].textContent = (id === st.audId) ? '⏸ Stop' : '▶ Play';
+    }
+  }
+
+  function auditionSong(id) {
+    var a = A();
+    var song = getSong(id);
+    if (!song || !isAudioBuffer(song.buffer)) {
+      if (a) a.toast('Pick this song first 🎵');
+      return;
+    }
+    if (st.audId === id) { stopAudition(); return; } // user tap -> stop
+    stopPreview();  // never overlap with the mashup preview
+    stopAudition(); // never overlap with another card
+    try {
+      var ctx = RM.audio.ensureCtx();
+      var src = ctx.createBufferSource();
+      src.buffer = song.buffer;
+      src.connect(RM.audio.masterIn());
+      src.onended = function () {
+        if (st.audSrc === src) { st.audSrc = null; st.audId = null; refreshAudButtons(); }
+      };
+      st.audSrc = src;
+      st.audId = id;
+      src.start();
+      refreshAudButtons();
+    } catch (e) {
+      stopAudition();
+      if (a) a.toast((a.cleanErrMsg && a.cleanErrMsg(e)) || 'Could not play this song.');
+    }
+  }
+
+  /* ================= w26: pick bridge ================= */
+  // app.js's mashupIntercept only knows RM.mashupScreen.pickTarget, so a
+  // pick armed from THIS screen would otherwise land in the editor. We
+  // temporarily forward RM.mashupScreen.onPicked to our own onPicked and
+  // restore it the moment the pick resolves or is abandoned. The forwarder
+  // defers to the original handler when our pick is no longer pending, so
+  // the old screen's flow is never hijacked.
+  function armPickBridge(id) {
+    var ms = RM.mashupScreen;
+    if (!ms || typeof ms.onPicked !== 'function') return;
+    disarmPickBridge();
+    var orig = ms.onPicked;
+    st._bridge = { id: id, orig: orig };
+    ms.onPicked = function (slot, buffer, name) {
+      var cur = st._bridge;
+      disarmPickBridge();
+      if (cur && st.pickId === cur.id && getSong(cur.id)) {
+        onPicked(cur.id, buffer, name);
+      } else if (cur && typeof cur.orig === 'function') {
+        cur.orig.call(ms, slot, buffer, name);
       }
+    };
+    try { ms.pickTarget = 900 + id; } catch (e) {}
+  }
+
+  function disarmPickBridge() {
+    var b = st._bridge;
+    st._bridge = null;
+    if (!b) return;
+    var ms = RM.mashupScreen;
+    if (ms) {
+      try { if (typeof b.orig === 'function') ms.onPicked = b.orig; } catch (e) {}
+      try { if (ms.pickTarget > 900) ms.pickTarget = 0; } catch (e) {}
     }
   }
 
@@ -394,14 +773,16 @@ window.RM = window.RM || {};
     var a = A();
     if (!a) return;
     stopPreview();
+    stopAudition();
     st.pickId = id;
+    armPickBridge(id); // w26: route app.js's mashupIntercept to our onPicked
     try {
       if (RM.ux && typeof RM.ux.pickMusic === 'function') {
         RM.ux.pickMusic(); // same mechanism as the #cdx-pick button
       } else {
         a.show('import');
       }
-    } catch (e) { st.pickId = null; return; }
+    } catch (e) { st.pickId = null; disarmPickBridge(); return; }
     a.toast('Pick a song 🎵');
   }
 
@@ -409,6 +790,7 @@ window.RM = window.RM || {};
   // AudioBuffer + file name. Name = file name (no invented artist names).
   function onPicked(id, buffer, name) {
     var a = A();
+    disarmPickBridge(); // w26: pick resolved — restore the old screen's handler
     var song = (id != null) ? getSong(id) : null;
     if (!song || !isAudioBuffer(buffer)) {
       if (a) a.toast('Pick failed — try again');
@@ -449,9 +831,12 @@ window.RM = window.RM || {};
     if (idx < 0) return;
     var song = st.songs[idx];
     if (act === 'pick') { requestPick(id); }
+    else if (act === 'aud') { auditionSong(id); }
     else if (act === 'remove') {
       if (st.songs.length <= MIN_SONGS) return;
       stopPreview();
+      stopAudition();
+      if (st.pickId === id) { st.pickId = null; disarmPickBridge(); }
       st.songs.splice(idx, 1);
       renderSongs();
       if (a) a.toast('Song removed');
@@ -487,6 +872,7 @@ window.RM = window.RM || {};
     if (!a) return;
     if (st.pvSrc) { stopPreview(); return; }
     if (!st.result || !isAudioBuffer(st.result.buffer)) { a.toast('Create a mashup first ✨'); return; }
+    stopAudition(); // w26: never overlap with a per-song audition
     try {
       var ctx = RM.audio.ensureCtx();
       var src = ctx.createBufferSource();
@@ -608,14 +994,18 @@ window.RM = window.RM || {};
   /* ---- 2–8 songs: the real mega engine (its internals ARE stages
          1/2/4/6/7/8 — we map its callbacks onto our stage UI) ---- */
 
-  function buildViaMega(songs, onProgress) {
+  function buildViaMega(songs, onProgress, po) {
     if (!RM.mashupMega || typeof RM.mashupMega.build !== 'function') {
       return Promise.reject(new Error('Mashup engine not ready — update the app and retry.'));
     }
     var list = songs.map(function (s) { return { buffer: s.buffer, name: s.name }; });
     var token = (RM.mashupStems && typeof RM.mashupStems.makeToken === 'function')
       ? RM.mashupStems.makeToken() : null;
-    return RM.mashupMega.build(list, { token: token },
+    // w26: preset → real mega opts. styleId changes the beat pattern
+    // audibly; cycles stays at the engine default.
+    var megaOpts = { token: token };
+    if (po && po.styleId) megaOpts.styleId = po.styleId;
+    return RM.mashupMega.build(list, megaOpts,
       function (label, frac) {
         var lb = String(label || '');
         // Map the engine's REAL work onto our stage list.
@@ -634,6 +1024,59 @@ window.RM = window.RM || {};
         if (step === 'arrange') setStage('arrange', 'active', 'Building arrangement…');
         else if (step === 'done') { setStage('mix', 'done', 'Mixing ✓'); setStage('master', 'done', 'Mastering ✓'); }
       });
+  }
+
+  /* ---- w26: Classic (RM.mashup.build) + Vocal Swap (RM.mashupSwap.build).
+         2-song engines: no opts, no onStep — the stage UI is driven from
+         progress fractions so it never sits static. ---- */
+
+  function buildDuet(which, songs, onProgress) {
+    var isSwap = which === 'swap';
+    var mod = isSwap ? RM.mashupSwap : RM.mashup;
+    if (!mod || typeof mod.build !== 'function') {
+      return Promise.reject(new Error('Mashup engine not ready — update the app and retry.'));
+    }
+    var token = (isSwap && RM.mashupStems && typeof RM.mashupStems.makeToken === 'function')
+      ? RM.mashupStems.makeToken() : null;
+    function prog(label, frac) {
+      var f = Number(frac) || 0;
+      // Honest stage mapping of what these engines really do:
+      // isolate vocals → tempo/key match → mix → master.
+      var lb = String(label || '');
+      if (f < 0.45) {
+        setStage('bpm', 'active', 'Smart BPM detect');
+        setStage('key', 'active', 'Smart key detect');
+        setStage('stems', 'active', 'Separating stems — ' + lb);
+      } else if (f < 0.85) {
+        setStage('bpm', 'done', 'Smart BPM detect ✓');
+        setStage('key', 'done', 'Smart key detect ✓');
+        setStage('stems', 'done', 'Separating stems ✓');
+        setStage('arrange', 'active', 'Building arrangement — ' + lb);
+      } else {
+        setStage('arrange', 'done', 'Building arrangement ✓');
+        setStage('mix', 'active', 'Mixing — ' + lb);
+      }
+      onProgress(lb, f);
+    }
+    var p = isSwap
+      ? mod.build(songs[0].buffer, songs[1].buffer, prog, token)
+      : mod.build(songs[0].buffer, songs[1].buffer, prog);
+    return Promise.resolve(p).then(function (res) {
+      setStage('mix', 'done', 'Mixing ✓');
+      setStage('master', 'done', 'Mastering ✓');
+      var m = (res && res.meta) || {};
+      var tags = [];
+      ['engineTagVocal', 'engineTagInstr', 'engineTagSong1', 'engineTagSong2'].forEach(function (f2) {
+        if (m[f2]) tags.push(m[f2]);
+      });
+      var et = res && res.engineTags;
+      if (et && typeof et === 'object' && !Array.isArray(et)) {
+        for (var k in et) if (Object.prototype.hasOwnProperty.call(et, k) && et[k]) tags.push(et[k]);
+      }
+      var gridBpm = Number(m.bpm1) || Number(m.targetBpm) || 100;
+      return { buffer: res && res.buffer, meta: m, engineTags: tags,
+               duet: which, gridBpm: gridBpm };
+    });
   }
 
   /* ---- 9–10 songs: extended pipeline from the SAME real public
@@ -666,7 +1109,7 @@ window.RM = window.RM || {};
     return out;
   }
 
-  function buildExtended(songs, onProgress) {
+  function buildExtended(songs, onProgress, po) {
     var dsp = RM.mashupDSP;
     if (!dsp || typeof dsp.detectKey !== 'function' || typeof dsp.timeStretch !== 'function' ||
         typeof dsp.pitchShift !== 'function' || typeof dsp.semitonesBetween !== 'function') {
@@ -679,7 +1122,13 @@ window.RM = window.RM || {};
     if (!RM.mashupArrange || typeof RM.mashupArrange.buildTimeline !== 'function') {
       return Promise.reject(new Error('Arrangement engine not ready — update the app and retry.'));
     }
+    // w26: preset → real extended-pipeline opts (defaults = previous behaviour).
     var BPM_FALLBACK = 100, CYCLES = 2, BARS_PER_VOCAL = 8, XFADE_BARS = 0.5, INTRO_BARS = 4, OUTRO_BARS = 4;
+    var xfade = (po && isFinite(Number(po.xfadeBars))) ? Number(po.xfadeBars) : XFADE_BARS;
+    var vBoost = (po && isFinite(Number(po.vocalBoostDb))) ? Number(po.vocalBoostDb) : 3;
+    var tempoShift = (po && isFinite(Number(po.tempoShift)) && Number(po.tempoShift) > 0)
+      ? Number(po.tempoShift) : 1;
+    var styleId = (po && po.styleId) || null;
     var N = songs.length;
     var vocalSegs = [], tags = [], masterBpm = BPM_FALLBACK, masterKey = null, sampleRate = 0;
     var chain = Promise.resolve();
@@ -699,7 +1148,9 @@ window.RM = window.RM || {};
           tags.push(song.tag);
           if (i === 0) {
             sampleRate = vocal.sampleRate;
-            masterBpm = song.bpm || BPM_FALLBACK;
+            // w26: preset tempoShift scales the master grid (clamped 50–220).
+            var grid = (song.bpm || BPM_FALLBACK) * tempoShift;
+            masterBpm = Math.max(50, Math.min(220, grid));
             masterKey = song.key;
             p(1, displayName(song.name) + ' ready ✓');
             var seg0 = trimToBars(vocal, sampleRate, masterBpm, CYCLES * BARS_PER_VOCAL + 1);
@@ -749,7 +1200,7 @@ window.RM = window.RM || {};
       throwIfCancelled();
       setStage('arrange', 'active', 'Building arrangement — creating beat…');
       onProgress('Creating beat…', 0.58);
-      var style = nearestStyle(beats, masterBpm, null);
+      var style = nearestStyle(beats, masterBpm, styleId);
       if (!style) throw new Error('No beat styles available.');
       var totalBars = INTRO_BARS + CYCLES * N * BARS_PER_VOCAL + OUTRO_BARS;
       return beats.renderBeat(style.id, masterBpm, totalBars, { sampleRate: sampleRate });
@@ -764,7 +1215,8 @@ window.RM = window.RM || {};
         sampleRate: sampleRate,
         cycles: CYCLES,
         barsPerVocal: BARS_PER_VOCAL,
-        xfadeBars: XFADE_BARS,
+        xfadeBars: xfade,          // w26: preset crossfade style
+        vocalBoostDb: vBoost,      // w26: preset vocal focus
         introBars: INTRO_BARS,
         outroBars: OUTRO_BARS,
         beatDuckDb: tags.map(function (t) {
@@ -784,6 +1236,8 @@ window.RM = window.RM || {};
       var buffer = tl && tl.buffer;
       if (!isAudioBuffer(buffer)) throw new Error('Arrangement returned no audio.');
       setStage('master', 'done', 'Mastering ✓');
+      // w26: riser plan for the preset post-chain (known arrangement).
+      st._extPlan = riserPlanForExtended(masterBpm, N);
       return { buffer: buffer, meta: (tl && tl.meta) || {}, engineTags: tags };
     });
   }
@@ -794,11 +1248,17 @@ window.RM = window.RM || {};
     var a = A();
     if (!a || st.creating) return;
     var songs = enabledSongs();
-    if (songs.length < MIN_SONGS) { a.toast('Pick at least 2 songs first 🎵'); return; }
+    // w26: the engine is chosen by the mode selector — Classic/Swap are
+    // 2-song engines, Mega covers 2–8, 9–10 always use the extended pipeline.
+    var route = resolveEngine(st.mode, songs.length);
+    if (!route.engine) { a.toast(route.reason || 'Pick at least 2 songs first 🎵'); return; }
 
     stopPreview();
+    stopAudition();
     st.creating = true;
     st.result = null;
+    st._po = null;
+    st._extPlan = null;
     try { if (RM.mashupStems && typeof RM.mashupStems.clearCancel === 'function') RM.mashupStems.clearCancel(); } catch (e) {}
     var r = $('v25-result');
     if (r) r.hidden = true;
@@ -819,65 +1279,104 @@ window.RM = window.RM || {};
       var buf = res && res.buffer ? res.buffer : (isAudioBuffer(res) ? res : null);
       if (!buf) throw new Error('Mashup build produced no audio.');
       var meta = (res && res.meta) || {};
-      var tags = (res && res.engineTags) || songs.map(function (s) { return s.tag || 'smart DSP'; });
-      st.result = { buffer: buf, meta: meta, engine: honestEngineLabel(tags) };
+      // w26: style preset post-chain — real audible DSP (tone, reverb/echo,
+      // risers, mastering). Riser placement only where the arrangement
+      // structure is known. Runs after a paint so the UI never looks dead
+      // during the (1–3 s) processing.
+      var po = st._po || presetBuildOpts(st.presetId);
+      var plan = null, gridBpm = 100;
       try {
-        st.result.meta.name = 'Mashup (' + songs.length + ' songs)';
-        st.result.meta.style = 'v25create';
+        if (res && res.duet) { gridBpm = Number(res.gridBpm) || 100; }
+        else if (st._extPlan) { plan = st._extPlan; gridBpm = Number(plan.gridBpm) || 100; }
+        else if (meta && meta.style === 'mega') { plan = riserPlanForMega(meta); gridBpm = (plan && Number(plan.gridBpm)) || 100; }
       } catch (e) {}
-      st.creating = false;
-      if (c) c.hidden = true;
-      setProgress('Done', 1);
-      var pw2 = $('v25-progress');
-      if (pw2) pw2.hidden = true;
-      updateCreateState();
-      var tag = $('v25-engine');
-      if (tag) tag.textContent = '⚙️ ' + st.result.engine;
-      var me = $('v25-meta');
-      if (me) me.textContent = meta.durationSec ? (meta.durationSec + 's') : '';
-      var rr = $('v25-result');
-      if (rr) rr.hidden = false;
-      var play = $('v25-play');
-      if (play) play.textContent = '▶ Preview';
-      a.toast('Mashup ready ✨');
+      var finalize = function (fbuf) {
+        var tags = (res && res.engineTags) || songs.map(function (s) { return s.tag || 'smart DSP'; });
+        st.result = { buffer: fbuf, meta: meta, engine: honestEngineLabel(tags) };
+        try {
+          var nm;
+          if (route.engine === 'classic') nm = 'Classic Mashup (' + displayName(songs[0].name) + ' × ' + displayName(songs[1].name) + ')';
+          else if (route.engine === 'swap') nm = 'Vocal Swap (' + displayName(songs[0].name) + ' × ' + displayName(songs[1].name) + ')';
+          else if (route.engine === 'mega') nm = 'Mega Mashup (' + songs.length + ' songs)';
+          else nm = 'Mashup (' + songs.length + ' songs)';
+          st.result.meta.name = nm;
+          st.result.meta.style = 'v25create';
+          st.result.meta.mode = route.engine;
+        } catch (e) {}
+        st.creating = false;
+        if (c) c.hidden = true;
+        setProgress('Done', 1);
+        var pw2 = $('v25-progress');
+        if (pw2) pw2.hidden = true;
+        updateCreateState();
+        var tag = $('v25-engine');
+        if (tag) tag.textContent = '⚙️ ' + st.result.engine;
+        var me = $('v25-meta');
+        if (me) me.textContent = meta.durationSec ? (meta.durationSec + 's') : '';
+        var rr = $('v25-result');
+        if (rr) rr.hidden = false;
+        var play = $('v25-play');
+        if (play) play.textContent = '▶ Preview';
+        a.toast('Mashup ready ✨');
+      };
+      if (po && po.spec) {
+        setProgress('Applying style preset (' + po.spec.presetName + ')…', 1);
+        setTimeout(function () {
+          var fbuf = buf;
+          try {
+            fbuf = applyPresetPost(fbuf, po.spec, plan, gridBpm);
+            try { meta.preset = po.spec.presetName; } catch (e) {}
+          } catch (e) {}
+          finalize(fbuf);
+        }, 30);
+      } else {
+        finalize(buf);
+      }
     };
 
     Promise.resolve()
       .then(function () {
-        if (songs.length <= 8) {
-          // Stages 1/2/4: reuse the real per-song analysis already shown on
-          // the cards (or run it now if a card never finished it).
-          var pre = Promise.resolve();
-          songs.forEach(function (s) {
-            pre = pre.then(function () { throwIfCancelled(); return ensureBpmKey(s, function () {}); });
-          });
-          return pre.then(function () {
-            throwIfCancelled();
-            setStage('bpm', 'done', 'Smart BPM detect ✓');
-            setStage('key', 'done', 'Smart key detect ✓');
-            setStage('stems', 'active', 'Separating stems…');
-            setStage('arrange', 'pending', buildStageList()[3].sub);
-            return buildViaMega(songs, onProgress);
-          }).then(function (res) {
-            var m = (res && res.meta) || {};
-            var tags = [];
-            if (res && res.engineTags) {
-              if (Array.isArray(res.engineTags)) tags = res.engineTags;
-              else for (var k in res.engineTags) tags.push(res.engineTags[k]);
-            }
-            ['engineTagVocal', 'engineTagInstr', 'engineTagSong1', 'engineTagSong2'].forEach(function (f) {
-              if (m[f]) tags.push(m[f]);
-            });
-            return { buffer: res && res.buffer, meta: m, engineTags: tags };
+        // w26: preset params → real build opts (mega styleId; extended
+        // xfade/vocalBoost/tempoShift; duet engines take no opts).
+        var po = presetBuildOpts(st.presetId);
+        st._po = po;
+        if (route.engine === 'classic' || route.engine === 'swap') {
+          return buildDuet(route.engine, songs, onProgress);
+        }
+        if (route.engine === 'extended') {
+          // 9–10 songs: extended pipeline — stages 1/2/4 run directly here.
+          setStage('bpm', 'active', 'Smart BPM detect…');
+          setStage('key', 'active', 'Smart key detect…');
+          return analyzeRun(songs, 0.55, onProgress).then(function () {
+            setStage('stems', 'done', 'Separating stems ✓');
+            setStage('arrange', 'active', 'Building arrangement…');
+            return buildExtended(songs, onProgress, po);
           });
         }
-        // 9–10 songs: extended pipeline — stages 1/2/4 run directly here.
-        setStage('bpm', 'active', 'Smart BPM detect…');
-        setStage('key', 'active', 'Smart key detect…');
-        return analyzeRun(songs, 0.55, onProgress).then(function () {
-          setStage('stems', 'done', 'Separating stems ✓');
-          setStage('arrange', 'active', 'Building arrangement…');
-          return buildExtended(songs, onProgress);
+        // Stages 1/2/4: reuse the real per-song analysis already shown on
+        // the cards (or run it now if a card never finished it).
+        var pre = Promise.resolve();
+        songs.forEach(function (s) {
+          pre = pre.then(function () { throwIfCancelled(); return ensureBpmKey(s, function () {}); });
+        });
+        return pre.then(function () {
+          throwIfCancelled();
+          setStage('bpm', 'done', 'Smart BPM detect ✓');
+          setStage('key', 'done', 'Smart key detect ✓');
+          setStage('stems', 'active', 'Separating stems…');
+          setStage('arrange', 'pending', buildStageList()[3].sub);
+          return buildViaMega(songs, onProgress, po);
+        }).then(function (res) {
+          var m = (res && res.meta) || {};
+          var tags = [];
+          if (res && res.engineTags) {
+            if (Array.isArray(res.engineTags)) tags = res.engineTags;
+            else for (var k in res.engineTags) tags.push(res.engineTags[k]);
+          }
+          ['engineTagVocal', 'engineTagInstr', 'engineTagSong1', 'engineTagSong2'].forEach(function (f) {
+            if (m[f]) tags.push(m[f]);
+          });
+          return { buffer: res && res.buffer, meta: m, engineTags: tags };
         });
       })
       .then(function (res) { if (!done) finish(res); })
@@ -925,6 +1424,8 @@ window.RM = window.RM || {};
       st.songs.push({ id: st.nextId++, buffer: null, name: '', fileName: '', enabled: true, bpm: null, key: null, analyzing: false, err: null });
     }
     renderSongs();
+    renderModeChips();    // w26
+    renderPresetChips();  // w26
   }
 
   // Chain onto RM.app.onShow: leaving the screen always stops preview;
@@ -936,8 +1437,11 @@ window.RM = window.RM || {};
     st._hook = function (name) {
       try { if (typeof prev === 'function') prev(name); } catch (e) {}
       try {
-        if (name !== 'v25create') stopPreview();
-        if (name !== 'import' && name !== 'v25create' && st.pickId) st.pickId = null;
+        if (name !== 'v25create') { stopPreview(); stopAudition(); }
+        if (name !== 'import' && name !== 'v25create' && st.pickId) {
+          st.pickId = null;
+          disarmPickBridge(); // w26: abandoned pick — restore old screen's handler
+        }
       } catch (e) {}
     };
     a.onShow = st._hook;
@@ -979,6 +1483,19 @@ window.RM = window.RM || {};
       honestEngineLabel: honestEngineLabel,
       MIN_SONGS: MIN_SONGS,
       MAX_SONGS: MAX_SONGS,
+      // w26
+      MODES: MODES,
+      resolveEngine: resolveEngine,
+      cardBpmText: cardBpmText,
+      cardKeyText: cardKeyText,
+      presetSpec: presetSpec,
+      presetBuildOpts: presetBuildOpts,
+      listPresets: listPresets,
+      applyPresetSpace: applyPresetSpace,
+      applyPresetPost: applyPresetPost,
+      riserPlanForMega: riserPlanForMega,
+      riserPlanForExtended: riserPlanForExtended,
+      analyzeSong: analyzeSong,
     },
   };
   Object.defineProperty(RM.v25create, 'pickTarget', {

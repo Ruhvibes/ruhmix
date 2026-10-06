@@ -24,18 +24,20 @@ RM.v25shell = (function () {
   /* -------- tab -> screen map (spec §1) --------
      Home     -> screen-home      (existing)
      Projects -> screen-projects  (existing)
-     Create   -> screen-mashup    (existing: Auto Mashup create flow)
-     Studio   -> screen-studio    (NEW — W5 builds it; graceful fallback)
+     Create   -> screen-v25create (NEW W2 Create screen — w26: was screen-mashup)
+     Studio   -> screen-studio    (W5)
      Settings -> screen-settings  (existing) */
   const TABS = [
     { id: 'home',     label: 'Home',     icon: '🏠',  screen: 'home' },
     { id: 'projects', label: 'Projects', icon: '📁', screen: 'projects' },
-    { id: 'create',   label: 'Create',   icon: '✨',  screen: 'mashup', hero: true },
+    { id: 'create',   label: 'Create',   icon: '✨',  screen: 'v25create', hero: true },
     { id: 'studio',   label: 'Studio',   icon: '🎛️', screen: 'studio' },
     { id: 'settings', label: 'Settings', icon: '⚙️', screen: 'settings' },
   ];
-  // screen -> tab reverse map for active-tab highlight
-  const SCREEN_TO_TAB = { home: 'home', projects: 'projects', mashup: 'create', studio: 'studio', settings: 'settings' };
+  // screen -> tab reverse map for active-tab highlight.
+  // 'mashup' (the old auto-mashup screen, still reachable from Home/More)
+  // also highlights the Create tab.
+  const SCREEN_TO_TAB = { home: 'home', projects: 'projects', mashup: 'create', v25create: 'create', studio: 'studio', settings: 'settings' };
 
   let navEl = null;
   let booted = false;
@@ -49,6 +51,12 @@ RM.v25shell = (function () {
     if (t.screen === 'studio' && !$('screen-studio')) {
       // W5 builds #screen-studio — honest message instead of a dead tab.
       a.toast('Studio arrives with the next v25 build.');
+      return;
+    }
+    // w26: the Create tab goes through the v25 Create module so its
+    // self-built section is guaranteed to exist before navigation.
+    if (tabId === 'create' && RM.v25create && typeof RM.v25create.show === 'function') {
+      RM.v25create.show();
       return;
     }
     a.show(t.screen);
@@ -106,9 +114,8 @@ RM.v25shell = (function () {
   }
 
   // Real auto-mashup flow (HONESTY: not a dead button).
-  // The mashup screen IS the auto-mashup flow: it auto-detects BPM,
-  // separates vocals (neural/DSP) and mixes onto a beat with no audio
-  // required up-front (app.js "Auto Mashup home card: direct nav").
+  // w26: the OLD mashup screen (screen-mashup) keeps this entry point —
+  // the Create tab now opens the new W2 Create screen instead.
   function quickAiMashup() {
     const a = A();
     if (!a) return;
@@ -208,17 +215,140 @@ RM.v25shell = (function () {
     });
 
     const cImport = buildCard('v25-c-import', '', '🎵', 'Import Audio', 'MP3 • WAV • M4A • FLAC');
+    cImport.setAttribute('data-go', 'import'); // w26: orphan-audit route marker
     cImport.addEventListener('click', () => { if (a) a.show('import'); });
+
+    // w26: "More Tools" — the old #bottomnav's ⋯ destination (screen-more),
+    // which hosts the classic screens (Slowed, Stems, FX, Mastering…).
+    const cMore = buildCard('v25-c-more', '', '⋯', 'More Tools', 'Editor • Remix • Mixer • classic screens');
+    cMore.setAttribute('data-go', 'more'); // w26: orphan-audit route marker
+    cMore.addEventListener('click', () => { if (a) a.show('more'); });
 
     grid.appendChild(cCreate);
     grid.appendChild(cQuick);
     grid.appendChild(cProj);
     grid.appendChild(cRecent);
     grid.appendChild(cImport);
+    grid.appendChild(cMore);
     dash.appendChild(grid);
 
     home.insertBefore(dash, home.firstChild);
     updateRecentCount();
+  }
+
+  /* ================= w26: orphan audit + old bottomnav ============= */
+  // Every pre-v25 screen and where the v25 nav reaches it from.
+  //   'v25 tab'   -> a TABS entry whose screen matches, or a SCREEN_TO_TAB
+  //                  mapping onto an existing tab
+  //   'home card' -> a #v25-dash card with data-go="<screen>"
+  //   'more grid' -> a #more-grid button: ours carry data-go="<screen>";
+  //                  app.js's built-in cards are matched by their label
+  const ROUTES = [
+    { screen: 'home',      via: 'v25 tab' },
+    { screen: 'import',    via: 'home card' },
+    { screen: 'editor',    via: 'more grid' },
+    { screen: 'remix',     via: 'more grid' },
+    { screen: 'slowed',    via: 'more grid' },
+    { screen: 'mashup',    via: 'more grid' },  // old auto-mashup, kept reachable
+    { screen: 'stems',     via: 'more grid' },
+    { screen: 'aistem',    via: 'more grid' },
+    { screen: 'mixer',     via: 'more grid' },
+    { screen: 'fx',        via: 'more grid' },
+    { screen: 'master',    via: 'more grid' },
+    { screen: 'record',    via: 'more grid' },
+    { screen: 'export',    via: 'more grid' },
+    { screen: 'projects',  via: 'v25 tab' },
+    { screen: 'settings',  via: 'v25 tab' },
+    { screen: 'more',      via: 'home card' },
+    { screen: 'studio',    via: 'v25 tab' },
+    { screen: 'v25create', via: 'v25 tab' },
+  ];
+
+  // Labels of app.js's built-in #more-grid cards (MORE_LINKS in app.js).
+  const MORE_LABELS = {
+    slowed: 'Slowed+Reverb Studio', stems: 'Stem Separator',
+    aistem: 'AI Stem Separator', fx: 'FX Rack', master: 'Mastering',
+    record: 'Voice Recorder', export: 'Export',
+    projects: 'Projects', settings: 'Settings',
+  };
+
+  // Destinations the old #bottomnav reached that the v25 nav + More grid
+  // did not — added here so no screen is orphaned when #bottomnav retires.
+  const MORE_EXTRA = [
+    { screen: 'mashup', icon: '🎤', label: 'Classic Mashup' },
+    { screen: 'editor', icon: '🎚️', label: 'Editor' },
+    { screen: 'remix',  icon: '🎧', label: 'Remix FX' },
+    { screen: 'mixer',  icon: '🎛️', label: 'Mixer' },
+  ];
+
+  function augmentMore() {
+    const grid = $('more-grid');
+    if (!grid) return false;
+    const a = A();
+    MORE_EXTRA.forEach((m) => {
+      if (grid.querySelector('[data-go="' + m.screen + '"]')) return; // already added
+      const b = document.createElement('button');
+      b.className = 'home-card';
+      b.setAttribute('data-go', m.screen);
+      const ic = document.createElement('div');
+      ic.className = 'hc-icon';
+      ic.textContent = m.icon;
+      const lb = document.createElement('div');
+      lb.className = 'hc-label';
+      lb.textContent = m.label;
+      b.appendChild(ic);
+      b.appendChild(lb);
+      b.addEventListener('click', () => { if (a) a.show(m.screen); });
+      grid.appendChild(b);
+    });
+    return true;
+  }
+
+  function routeOk(r) {
+    if (r.via === 'v25 tab') {
+      if (TABS.some((t) => t.screen === r.screen)) return true;
+      const tab = SCREEN_TO_TAB[r.screen];
+      return !!tab && TABS.some((t) => t.id === tab);
+    }
+    if (r.via === 'home card') {
+      const dash = $('v25-dash');
+      return !!(dash && dash.querySelector('[data-go="' + r.screen + '"]'));
+    }
+    if (r.via === 'more grid') {
+      const grid = $('more-grid');
+      if (!grid) return false;
+      if (grid.querySelector('[data-go="' + r.screen + '"]')) return true;
+      const want = MORE_LABELS[r.screen];
+      if (!want) return false;
+      const labels = grid.querySelectorAll('.hc-label');
+      for (let i = 0; i < labels.length; i++) {
+        if (labels[i].textContent.trim() === want) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  function orphanScreens() {
+    return ROUTES.filter((r) => !routeOk(r)).map((r) => r.screen);
+  }
+
+  // Hides the old #bottomnav ONLY when zero screens are orphaned;
+  // otherwise it stays visible and the orphans are logged. Re-asserted
+  // on the same schedule as wrapOnShow so late DOM changes are covered.
+  function auditAndHideOldNav() {
+    augmentMore();
+    const orphans = orphanScreens();
+    const old = $('bottomnav');
+    if (old) {
+      if (orphans.length === 0) {
+        old.style.display = 'none';
+      } else {
+        old.style.display = '';
+        try { console.warn('[v25shell] old #bottomnav kept visible — orphaned screens:', orphans.join(',')); } catch (e) {}
+      }
+    }
+    return orphans;
   }
 
   /* ================= onShow hook (active tab sync) =================
@@ -243,10 +373,13 @@ RM.v25shell = (function () {
       document.body.classList.add('v25'); // enables v25-theme.css scoping
       buildNav();
       renderHome();
+      auditAndHideOldNav();
       syncTab('home');
       wrapOnShow();
       setTimeout(wrapOnShow, 600);
       setTimeout(wrapOnShow, 2000);
+      setTimeout(auditAndHideOldNav, 600);   // w26: re-assert after late DOM
+      setTimeout(auditAndHideOldNav, 2000);
       return;
     }
     if (attempts <= 0) return;
@@ -265,5 +398,10 @@ RM.v25shell = (function () {
     syncTab: syncTab,
     quickAiMashup: quickAiMashup,
     TABS: TABS,
+    // w26: orphan audit (node-test hooks)
+    ROUTES: ROUTES,
+    orphanScreens: orphanScreens,
+    auditAndHideOldNav: auditAndHideOldNav,
+    augmentMore: augmentMore,
   };
 })();

@@ -683,5 +683,152 @@ RM.fx = (function () {
     lofi:    { label: 'Lo-Fi Tape',    eqB: 2, eqM: 0, eqT: -5, thr: -10, knee: 14, ratio: 2,  atk: 0.02, rel: 0.5, makeup: 0.95 },
   };
 
-  return { makeChain, makeMasterChain, makeSpatial, makeSpatial360, SPATIAL_MODES, REVERB_ROOMS, EQ_PRESETS, EQ10_FREQS, MASTER_PRESETS };
+  /* ============ 7-band vocal EQ (v26 I6 — additive, nothing above touched) ==
+     RM.fx.eq7 — seven real biquads (RBJ cookbook, buffer- or node-domain):
+       Sub (lowshelf 60 Hz) · Bass (peaking 150 Hz) · Low Mid (peaking 400 Hz)
+       Mid (peaking 1 kHz) · High Mid (peaking 2.5 kHz) · Treble (highshelf 8 kHz)
+       Air (highshelf 14 kHz).
+     - eq7.applyToBuffer(buffer, gains): pure buffer-domain render; returns a
+       NEW AudioBuffer (input untouched). gains = {sub:db,…} or 7 numbers in
+       band order. Bands at |gain| < 0.05 dB are skipped (bit-exact bypass).
+     - eq7.makeChain(ctx): live Web Audio chain (input -> 7 biquads -> output)
+       with click-free setGains().
+     ===================================================================== */
+  const EQ7_BANDS = [
+    { id: 'sub',     label: 'Sub',      type: 'lowshelf',  freq: 60,    q: 0.7 },
+    { id: 'bass',    label: 'Bass',     type: 'peaking',   freq: 150,   q: 1.0 },
+    { id: 'lowmid',  label: 'Low Mid',  type: 'peaking',   freq: 400,   q: 1.0 },
+    { id: 'mid',     label: 'Mid',      type: 'peaking',   freq: 1000,  q: 1.0 },
+    { id: 'highmid', label: 'High Mid', type: 'peaking',   freq: 2500,  q: 1.0 },
+    { id: 'treble',  label: 'Treble',   type: 'highshelf', freq: 8000,  q: 0.7 },
+    { id: 'air',     label: 'Air',      type: 'highshelf', freq: 14000, q: 0.7 },
+  ];
+
+  function eq7Coeffs(bandId, gainDb, sr) {
+    let band = null;
+    for (let i = 0; i < EQ7_BANDS.length; i++)
+      if (EQ7_BANDS[i].id === bandId) { band = EQ7_BANDS[i]; break; }
+    if (!band) throw new Error('eq7: unknown band ' + bandId);
+    const w0 = 2 * Math.PI * band.freq / sr;
+    const cw = Math.cos(w0), sw = Math.sin(w0);
+    const A = Math.pow(10, gainDb / 40);
+    let b0, b1, b2, a0, a1, a2, alpha;
+    if (band.type === 'peaking') {
+      alpha = sw / (2 * band.q);
+      b0 = 1 + alpha * A; b1 = -2 * cw; b2 = 1 - alpha * A;
+      a0 = 1 + alpha / A; a1 = -2 * cw; a2 = 1 - alpha / A;
+    } else if (band.type === 'lowshelf') {
+      alpha = sw / 2 * Math.sqrt(2);
+      b0 = A * ((A + 1) - (A - 1) * cw + 2 * Math.sqrt(A) * alpha);
+      b1 = 2 * A * ((A - 1) - (A + 1) * cw);
+      b2 = A * ((A + 1) - (A - 1) * cw - 2 * Math.sqrt(A) * alpha);
+      a0 = (A + 1) + (A - 1) * cw + 2 * Math.sqrt(A) * alpha;
+      a1 = -2 * ((A - 1) + (A + 1) * cw);
+      a2 = (A + 1) + (A - 1) * cw - 2 * Math.sqrt(A) * alpha;
+    } else { // highshelf
+      alpha = sw / 2 * Math.sqrt(2);
+      b0 = A * ((A + 1) + (A - 1) * cw + 2 * Math.sqrt(A) * alpha);
+      b1 = -2 * A * ((A - 1) + (A + 1) * cw);
+      b2 = A * ((A + 1) + (A - 1) * cw - 2 * Math.sqrt(A) * alpha);
+      a0 = (A + 1) - (A - 1) * cw + 2 * Math.sqrt(A) * alpha;
+      a1 = 2 * ((A - 1) - (A + 1) * cw);
+      a2 = (A + 1) - (A - 1) * cw - 2 * Math.sqrt(A) * alpha;
+    }
+    return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
+  }
+
+  function eq7FilterInPlace(d, c) {
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < d.length; i++) {
+      const x = d[i];
+      const y = c.b0 * x + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y;
+      d[i] = y;
+    }
+  }
+
+  function eq7NormGains(gains) {
+    const g = {};
+    for (let i = 0; i < EQ7_BANDS.length; i++) {
+      const id = EQ7_BANDS[i].id;
+      let v = 0;
+      if (Array.isArray(gains)) v = +gains[i] || 0;
+      else if (gains && typeof gains === 'object') v = +gains[id] || 0;
+      g[id] = Math.max(-24, Math.min(24, v));
+    }
+    return g;
+  }
+
+  function eq7Alloc(nCh, len, sr) {
+    try {
+      if (RM.audio && typeof RM.audio.ensureCtx === 'function') {
+        const ctx = RM.audio.ensureCtx();
+        if (ctx && typeof ctx.createBuffer === 'function')
+          return ctx.createBuffer(nCh, Math.max(1, len), sr);
+      }
+    } catch (e) { /* fall through to shim */ }
+    const chans = [];
+    for (let c = 0; c < nCh; c++) chans.push(new Float32Array(Math.max(1, len)));
+    return {
+      numberOfChannels: nCh, length: Math.max(1, len), sampleRate: sr,
+      duration: Math.max(1, len) / sr,
+      getChannelData: function (c) { return chans[c]; },
+    };
+  }
+
+  function applyEq7ToBuffer(buffer, gains) {
+    if (!buffer || typeof buffer.getChannelData !== 'function')
+      throw new Error('eq7.applyToBuffer needs an audio buffer.');
+    const g = eq7NormGains(gains);
+    const sr = buffer.sampleRate, nCh = buffer.numberOfChannels;
+    const out = eq7Alloc(nCh, buffer.length, sr);
+    const active = [];
+    for (let i = 0; i < EQ7_BANDS.length; i++) {
+      const id = EQ7_BANDS[i].id;
+      if (Math.abs(g[id]) >= 0.05) active.push({ id: id, c: eq7Coeffs(id, g[id], sr) });
+    }
+    for (let ch = 0; ch < nCh; ch++) {
+      const d = out.getChannelData(ch);
+      d.set(buffer.getChannelData(ch).subarray(0, d.length));
+      for (let k = 0; k < active.length; k++) eq7FilterInPlace(d, active[k].c);
+    }
+    return out;
+  }
+
+  // Live Web Audio 7-band chain: input -> 7 Biquads -> output.
+  function makeEq7Chain(ctx, gains) {
+    const g0 = eq7NormGains(gains);
+    const input = ctx.createGain(), output = ctx.createGain();
+    const nodes = EQ7_BANDS.map(function (b) {
+      const f = ctx.createBiquadFilter();
+      f.type = b.type; f.frequency.value = b.freq; f.Q.value = b.q;
+      f.gain.value = g0[b.id];
+      return f;
+    });
+    input.connect(nodes[0]);
+    for (let i = 0; i < nodes.length - 1; i++) nodes[i].connect(nodes[i + 1]);
+    nodes[nodes.length - 1].connect(output);
+    return {
+      input: input, output: output, bands: nodes,
+      setGains: function (g, tc) {
+        const gg = eq7NormGains(g), t = tc || 0.03, now = ctx.currentTime;
+        for (let i = 0; i < nodes.length; i++)
+          nodes[i].gain.setTargetAtTime(gg[EQ7_BANDS[i].id], now, t);
+      },
+      dispose: function () {
+        try { input.disconnect(); } catch (e) {}
+        nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
+        try { output.disconnect(); } catch (e) {}
+      },
+    };
+  }
+
+  const EQ7 = {
+    BANDS: EQ7_BANDS,
+    coeffs: eq7Coeffs,
+    applyToBuffer: applyEq7ToBuffer,
+    makeChain: makeEq7Chain,
+  };
+
+  return { makeChain, makeMasterChain, makeSpatial, makeSpatial360, SPATIAL_MODES, REVERB_ROOMS, EQ_PRESETS, EQ10_FREQS, MASTER_PRESETS, eq7: EQ7 };
 })();
