@@ -206,7 +206,7 @@ function no(name, detail) { fail++; console.log('FAIL', name, detail ? ' — ' +
     `document.getElementById('exp-mastering-flag').style.display !== 'none'`,
     { timeout: 10000 });
   r = await page.evaluate(() => document.getElementById('exp-mastering-flag').textContent);
-  const flagOn = /Mastering:\s*ON/.test(r) && RM.v26mixdown.masteringEnabled();
+  const flagOn = /Mastering:\s*ON/.test(r) && await page.evaluate(() => RM.v26mixdown.masteringEnabled());
   await page.evaluate(() => {
     const cb = document.getElementById('mst-apply-export');
     cb.checked = false;

@@ -1424,6 +1424,28 @@ __rmRoot.RM = __rmRoot.RM || {};
     renderStudio: renderStudio,
     open: open,
     openFromMashup: openFromMashup,
+    // ---- v26 I6 vocal-chain bridge (additive; no existing logic touched) ----
+    // Read-only access to the Studio's live mix + section map, and a commit
+    // path that reuses replaceCurrent() (waveform/views re-render, so the
+    // result is audible in preview and present in export).
+    getMixBuffer: function () { return st.current; },
+    getSectionRanges: function () {
+      var out = [], t = 0, i, s;
+      for (i = 0; i < st.sections.length; i++) {
+        s = st.sections[i];
+        out.push({ kind: s.kind, name: s.name, vocalSong: s.vocalSong, aSec: t, bSec: t + s.lenSec });
+        t += s.lenSec;
+      }
+      return out;
+    },
+    getStems: function () { return st.stems; },
+    getLaneUI: function () { return st.laneUI; },
+    commitMixBuffer: function (nb, note) {
+      if (!nb || typeof nb.getChannelData !== 'function') return false;
+      var ok = replaceCurrent(nb, true);
+      if (ok) toast(note || 'Vocal chain applied \u2713');
+      return ok;
+    },
     // read-only state for the coordinator / tests
     getState: function () {
       return {
