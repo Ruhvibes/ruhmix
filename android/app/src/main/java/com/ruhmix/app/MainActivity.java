@@ -494,6 +494,7 @@ public class MainActivity extends ComponentActivity {
     }
 
     /** Professional runtime-permission UX: explain why, then ask, then run the action. */
+    /** Ultra-simple permission UX (Hasnain): straight to the system dialog, no extra dialogs. */
     private void ensureAudioPermission(Runnable after) {
         if (hasAudioReadPermission()) {
             after.run();
@@ -502,12 +503,12 @@ public class MainActivity extends ComponentActivity {
         pendingAudioAction = after;
         final String perm = audioPermission();
         if (audioPermDeniedBefore && !shouldShowRequestPermissionRationale(perm)) {
+            // Permanently denied: only way is Settings (single dialog, English).
             new AlertDialog.Builder(this)
-                    .setTitle("अनुमति चाहिए \uD83D\uDE4F")
-                    .setMessage("RuhMix आपकी ऑडियो फाइलों तक नहीं पहुंच पाया। " +
-                            "Settings > Apps > RuhMix > Permissions में जाकर अनुमति दें, " +
-                            "फिर ऑडियो चुन सकेंगे।")
-                    .setPositiveButton("सेटिंग्स खोलें", (d, w) -> {
+                    .setTitle("Permission needed")
+                    .setMessage("RuhMix could not access your audio files. " +
+                            "Please grant access in Settings > Apps > RuhMix > Permissions.")
+                    .setPositiveButton("Open Settings", (d, w) -> {
                         try {
                             Intent i = new Intent(
                                     android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -518,7 +519,7 @@ public class MainActivity extends ComponentActivity {
                         pendingAudioAction = null;
                         cancelPendingFileChooser();
                     })
-                    .setNegativeButton("अभी नहीं", (d, w) -> {
+                    .setNegativeButton("Not now", (d, w) -> {
                         pendingAudioAction = null;
                         cancelPendingFileChooser();
                     })
@@ -526,18 +527,8 @@ public class MainActivity extends ComponentActivity {
                     .show();
             return;
         }
-        new AlertDialog.Builder(this)
-                .setTitle("ऑडियो एक्सेस \uD83C\uDFB6")
-                .setMessage("ऑडियो चुनने और मिक्स बनाने के लिए RuhMix को " +
-                        "आपकी ऑडियो फाइलों तक पहुंच चाहिए।")
-                .setPositiveButton("अनुमति दें",
-                        (d, w) -> requestPermissions(new String[]{perm}, REQ_AUDIO_PERM))
-                .setNegativeButton("अभी नहीं", (d, w) -> {
-                    pendingAudioAction = null;
-                    cancelPendingFileChooser();
-                })
-                .setCancelable(false)
-                .show();
+        // First time: system dialog directly, no custom rationale in between.
+        requestPermissions(new String[]{perm}, REQ_AUDIO_PERM);
     }
 
     private void ensureMicPermission(Runnable after) {
@@ -549,11 +540,10 @@ public class MainActivity extends ComponentActivity {
         final String perm = Manifest.permission.RECORD_AUDIO;
         if (micPermDeniedBefore && !shouldShowRequestPermissionRationale(perm)) {
             new AlertDialog.Builder(this)
-                    .setTitle("अनुमति चाहिए \uD83D\uDE4F")
-                    .setMessage("RuhMix आपके माइक्रोफोन तक नहीं पहुंच पाया। " +
-                            "Settings > Apps > RuhMix > Permissions में जाकर अनुमति दें, " +
-                            "फिर रिकॉर्डिंग कर सकेंगे।")
-                    .setPositiveButton("सेटिंग्स खोलें", (d, w) -> {
+                    .setTitle("Permission needed")
+                    .setMessage("RuhMix could not access your microphone. " +
+                            "Please grant access in Settings > Apps > RuhMix > Permissions.")
+                    .setPositiveButton("Open Settings", (d, w) -> {
                         try {
                             Intent i = new Intent(
                                     android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -563,19 +553,13 @@ public class MainActivity extends ComponentActivity {
                         }
                         pendingMicAction = null;
                     })
-                    .setNegativeButton("अभी नहीं", (d, w) -> pendingMicAction = null)
+                    .setNegativeButton("Not now", (d, w) -> pendingMicAction = null)
                     .setCancelable(false)
                     .show();
             return;
         }
-        new AlertDialog.Builder(this)
-                .setTitle("माइक्रोफोन एक्सेस \uD83C\uDFA4")
-                .setMessage("ऑडियो रिकॉर्ड करने के लिए RuhMix को माइक्रोफोन की अनुमति चाहिए।")
-                .setPositiveButton("अनुमति दें",
-                        (d, w) -> requestPermissions(new String[]{perm}, REQ_MIC_PERM))
-                .setNegativeButton("अभी नहीं", (d, w) -> pendingMicAction = null)
-                .setCancelable(false)
-                .show();
+        // First time: system dialog directly, no custom rationale in between.
+        requestPermissions(new String[]{perm}, REQ_MIC_PERM);
     }
 
     @Override
@@ -593,7 +577,7 @@ public class MainActivity extends ComponentActivity {
                 audioPermDeniedBefore = true;
                 cancelPendingFileChooser();
                 Toast.makeText(this,
-                        "अनुमति नहीं मिली \u2014 Settings > Apps > RuhMix में जाकर अनुमति दें \uD83D\uDE4F",
+                        "Permission not granted \u2014 please allow access in Settings > Apps > RuhMix > Permissions",
                         Toast.LENGTH_LONG).show();
             }
         } else if (requestCode == REQ_MIC_PERM) {
@@ -604,9 +588,9 @@ public class MainActivity extends ComponentActivity {
                 if (after != null) after.run();
             } else {
                 micPermDeniedBefore = true;
-                callJs("if(window.onRecordingError){window.onRecordingError('माइक्रोफोन की अनुमति नहीं मिली')}");
+                callJs("if(window.onRecordingError){window.onRecordingError('Microphone permission not granted')}");
                 Toast.makeText(this,
-                        "अनुमति नहीं मिली \u2014 Settings > Apps > RuhMix में जाकर अनुमति दें \uD83D\uDE4F",
+                        "Permission not granted \u2014 please allow access in Settings > Apps > RuhMix > Permissions",
                         Toast.LENGTH_LONG).show();
             }
         } else if (requestCode == REQ_MUSIC_PERM) {
@@ -941,7 +925,7 @@ public class MainActivity extends ComponentActivity {
             String p = path.startsWith("file://") ? path.substring(7) : path;
             File file = new File(p);
             if (!file.exists()) {
-                Toast.makeText(this, "फ़ाइल नहीं मिली \uD83D\uDE1E", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "File not found", Toast.LENGTH_LONG).show();
                 return;
             }
             Uri uri = FileProvider.getUriForFile(this, FILEPROVIDER_AUTH, file);
@@ -953,7 +937,7 @@ public class MainActivity extends ComponentActivity {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(Intent.createChooser(i, "Share via"));
         } catch (Exception e) {
-            Toast.makeText(this, "शेयर नहीं हो पाया \uD83D\uDE1E", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Could not share the file", Toast.LENGTH_LONG).show();
         }
     }
 

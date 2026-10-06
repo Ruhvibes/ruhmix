@@ -205,8 +205,9 @@ async function back(page) {
     await p2.close();
 
     // A9: Pick Music (no bridge) -> import + Files tab, Music tab hidden
+    // CD-ROMantic home: button ab #cdx-pick hai
     await p.evaluate(() => window.RM.app.show('home'));
-    await p.evaluate(() => document.getElementById('home-pick-music').click());
+    await p.evaluate(() => document.getElementById('cdx-pick').click());
     await new Promise((r) => setTimeout(r, 400));
     const pm = await p.evaluate(() => ({
       screen: window.RM.app.state.screen,
@@ -245,22 +246,27 @@ async function back(page) {
     add('A11. Pro screen: no element, no dead links', !pro.screenEl && pro.dataAttr === 0 && pro.gridRef === 0,
       JSON.stringify(pro));
 
-    // A12: sitemap coverage (DOM): more-grid 9, home-grid 13, export buttons 7
+    // A12: sitemap coverage (DOM): more-grid 9, CD-ROMantic home (pick + 11 fx cards
+    // + share + 6 pro tools), export buttons 7
     const cov = await p.evaluate(() => ({
       more: document.querySelectorAll('#more-grid .home-card').length,
-      home: document.querySelectorAll('#home-grid .home-card').length,
+      cdxPick: !!document.getElementById('cdx-pick'),
+      cdxFx: document.querySelectorAll('#cdx-fxgrid .cdx-fxcard').length,
+      cdxShare: !!document.getElementById('cdx-share'),
+      cdxPro: document.querySelectorAll('#cdx-protools .cdx-procard').length,
       expBtns: Array.from(document.querySelectorAll('.ux-export-btn')).map((b) => b.getAttribute('data-from')),
     }));
     const expOk = ['editor', 'remix', 'slowed', 'stems', 'mixer', 'master', 'record']
       .every((s) => cov.expBtns.includes(s));
     console.log('STEP A12');
-    add('A12. sitemap DOM: more=9 home=13 export-btns=7', cov.more === 9 && cov.home === 13 && expOk,
-      `more=${cov.more} home=${cov.home} exp=${JSON.stringify(cov.expBtns)}`);
+    add('A12. sitemap DOM: more=9 cdx(pick+11fx+share+6pro) export-btns=7',
+      cov.more === 9 && cov.cdxPick && cov.cdxFx === 11 && cov.cdxShare && cov.cdxPro === 6 && expOk,
+      `more=${cov.more} fx=${cov.cdxFx} pro=${cov.cdxPro} exp=${JSON.stringify(cov.expBtns)}`);
     await p.close();
 
     /* ============ Page B: mock bridge, tracks OK ============ */
     const q = await newPage(browser, 'ok');
-    await q.evaluate(() => document.getElementById('home-pick-music').click());
+    await q.evaluate(() => document.getElementById('cdx-pick').click());
     await new Promise((r) => setTimeout(r, 500));
     const qm = await q.evaluate(() => ({
       screen: window.RM.app.state.screen,
@@ -285,7 +291,7 @@ async function back(page) {
 
     /* ============ Page C: mock bridge, permission denied ============ */
     const r = await newPage(browser, 'denied');
-    await r.evaluate(() => { window.RM.app.show('home'); document.getElementById('home-pick-music').click(); });
+    await r.evaluate(() => { window.RM.app.show('home'); document.getElementById('cdx-pick').click(); });
     await new Promise((r2) => setTimeout(r2, 500));
     const denied = await r.evaluate(() => ({
       html: document.getElementById('music-list').textContent,
@@ -342,10 +348,11 @@ async function back(page) {
     const idx = fs.readFileSync(WWW + '/index.html', 'utf8');
     const reach = new Set(TABS);
     const grab = (re, src) => { let m; while ((m = re.exec(src))) reach.add(m[1]); };
-    grab(/\['([a-z]+)',\s*'[^']*',\s*'[a-z_]*'\]/g, appJs); // HOME_CARDS + MORE_LINKS tuples
+    grab(/\['([a-z]+)',\s*'[^']*',\s*(?:'[A-Za-z_ ]*'|null)\]/g, appJs); // CDX_PRO + MORE_LINKS tuples
     grab(/data-from="([a-z]+)"/g, idx); // export buttons -> export screen
     if (/ux-export-btn/.test(idx)) reach.add('export');
     if (/openProject/.test(appJs)) reach.add('editor'); // projects -> editor
+    if (/cdx-pick/.test(idx)) reach.add('import'); // CD-ROMantic home: Pick Music -> import
     if (/aistem/.test(uxJs) || /aistem/.test(appJs)) reach.add('aistem');
     const unreachable = SCREENS.filter((s) => !reach.has(s));
     console.log('STEP D3');

@@ -35,16 +35,42 @@
     <h1>RuhMix</h1>
     <p class="muted" data-i18n="tagline">Professional Music &amp; Remix Studio</p>
     <p class="byline" data-i18n="by">By Hasnain Khan</p>
-    <button class="btn primary big" id="home-new">＋ <span data-i18n="new_project">New Project</span></button>
-    <button class="btn pick-music" id="home-pick-music"><span class="pm-title">🎵 Pick Music</span><span class="pm-sub">Choose from your music library</span></button>
-    <input id="home-search" class="textin" data-i18n-ph="search" placeholder="Search…" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">
   </div>
+
+  <!-- 1. Big Pick Music -->
+  <button class="btn cdx-pick" id="cdx-pick"><span class="cdx-pick-title">🎵 Pick Music</span><span class="cdx-pick-sub">Choose from your music library</span></button>
+
+  <!-- 2. Now-playing bar (hidden until a track is loaded) -->
+  <div id="cdx-nowbar" class="cdx-nowbar" hidden>
+    <canvas id="cdx-nowbar-wave"></canvas>
+    <div class="cdx-nowbar-row">
+      <button id="cdx-nowbar-play" class="cdx-nowbar-btn" aria-label="Play / Pause">▶</button>
+      <div class="cdx-nowbar-meta">
+        <div id="cdx-nowbar-name" class="cdx-nowbar-name">—</div>
+        <div id="cdx-nowbar-time" class="cdx-nowbar-time mono">0:00 / 0:00</div>
+      </div>
+    </div>
+  </div>
+
+  <input id="home-search" class="textin" data-i18n-ph="search" placeholder="Search…" lang="en" autocapitalize="off" autocomplete="off" spellcheck="false">
+
+  <!-- 3. One-tap effect cards -->
   <div class="sec-head">
-    <h3>🎵 Free Music</h3>
+    <h3>✨ One-Tap Effects</h3>
   </div>
-  <p class="muted small fm-sub">6 original tracks — more coming soon. Tap a track to open it in the Editor.</p>
-  <div id="free-music" class="fm-grid"></div>
-  <div class="card-grid" id="home-grid"></div>
+  <div id="cdx-fxgrid" class="cdx-fxgrid"></div>
+
+  <!-- 4. Big Share / Export -->
+  <button class="btn cdx-share" id="cdx-share"><span class="cdx-share-title">📤 Share / Export</span><span class="cdx-share-sub">MP3 • WAV • FLAC</span></button>
+
+  <!-- 5. Pro Tools -->
+  <div class="sec-head">
+    <h3>🛠️ Pro Tools</h3>
+  </div>
+  <div id="cdx-protools" class="cdx-progrid"></div>
+
+  <!-- kept: new project + recent projects -->
+  <button class="btn primary big" id="home-new">＋ <span data-i18n="new_project">New Project</span></button>
   <h3 data-i18n="recent">Recent Projects</h3>
   <div id="home-recent"></div>
   <div class="foot-note">RuhMix 1.0 • <span data-i18n="by">By Hasnain Khan</span></div>
@@ -273,6 +299,13 @@
     <div class="row"><label>Depth <input type="range" id="fx-16d-depth" data-param="depth" min="0" max="100" value="80"></label><span id="fx-16d-depth-v">80%</span></div>
     <div class="hint">🎧 Best with headphones</div>
   </div>
+  <div class="panel" data-effect="360">
+    <h4>🔄 360° Audio <label class="sw"><input type="checkbox" id="fx-360-on" data-param="on"><span>On</span></label></h4>
+    <p class="muted small">360° spatial rotation (HRTF) — full circular spin</p>
+    <div class="row"><label>Speed <input type="range" id="fx-360-speed" data-param="speed" min="1" max="100" value="25"></label><span id="fx-360-speed-v">25%</span></div>
+    <div class="row"><label>Depth <input type="range" id="fx-360-depth" data-param="depth" min="0" max="100" value="100"></label><span id="fx-360-depth-v">100%</span></div>
+    <div class="hint">🎧 Best with headphones</div>
+  </div>
   <div class="panel">
     <h4>Compressor <label class="sw"><input type="checkbox" id="fx-comp-on" checked><span>On</span></label></h4>
     <div class="row"><label>Threshold <input type="range" id="fx-comp-thr" min="-40" max="0" value="-18"></label><span id="fx-comp-thr-v">-18 dB</span></div>
@@ -486,5 +519,6 @@
 <script src="js/import-hardening.js"></script>
 <script src="js/app.js"></script>
 <script src="js/ux-flow.js"></script>
+<script src="js/cdx.js"></script>
 </body>
 </html>

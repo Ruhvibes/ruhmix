@@ -319,6 +319,9 @@ RM.app = (function () {
     state.project.audioRef = audioRef || { name: state.fileName, size: 0, type: '', lastModified: 0 };
     state.project.ops = [];
     state.redoStack = [];
+    state.cdxFx = null; // naya track -> one-tap highlight reset
+    try { document.querySelectorAll('#cdx-fxgrid .cdx-fxcard').forEach((c) => c.classList.remove('on')); } catch (e) {}
+    try { if (typeof cdxUpdateNow === 'function') cdxUpdateNow(); } catch (e) {}
     if (state.waveView) state.waveView.setBuffer(null, new Float32Array(0));
     RM.proj.invalidateView(buffer);
     refreshView().then(() => {
@@ -621,9 +624,24 @@ RM.app = (function () {
           console.log('[import] fetch failed for ' + name + ':', err && err.message);
           const c = importErr('unreadable', name);
           return dialog(c.title, importErrBody(c, name), 'OK', null).then(() => null);
+        })
+        .then((buf) => {
+          // Ultra-simple (Hasnain): music picker se single track -> decode hote hi editor
+          if (buf && music.directLoad) music.directBuf = { buffer: buf, name: name };
+          return buf;
         }));
     });
-    chain.then(() => { musicPendingClear(); show('import'); });
+    chain.then(() => {
+      musicPendingClear();
+      const d = music.directBuf;
+      music.directLoad = false; music.directBuf = null;
+      if (d && d.buffer) {
+        // Ultra-simple: song tap -> seedha editor (koi "Use" button nahi)
+        loadAudioBuffer(d.buffer, d.name, { name: d.name, size: 0, type: '', lastModified: Date.now() });
+        return;
+      }
+      show('import');
+    });
   }
 
   function fmtTime(sec) {
@@ -678,7 +696,7 @@ RM.app = (function () {
        {status:'ok', tracks:[{uri,title,artist,durationMs|duration}]} |
        {status:'permission-denied'} | 'permission-denied' | {status:'error', message}
      Bridge na ho to Music tab graceful hide hota hai. */
-  const music = { state: 'idle', tracks: [], query: '', pending: null, error: '' };
+  const music = { state: 'idle', tracks: [], query: '', pending: null, error: '', directLoad: false, directBuf: null };
   function initImportTabs() {
     const tabF = $('tab-files'), tabM = $('tab-music');
     if (!tabF || !tabM) return;
@@ -809,10 +827,11 @@ RM.app = (function () {
     if (!nat.method('importMusic')) { toast('Music import is unavailable'); return; }
     const title = String(t.title || 'song');
     music.pending = t.uri;
+    music.directLoad = true; music.directBuf = null; // ultra-simple: song tap -> seedha editor
     if (rowEl) rowEl.classList.add('busy');
     toast(('Loading: ') + title);
     try { nat.call('importMusic', String(t.uri)); }
-    catch (e) { music.pending = null; if (rowEl) rowEl.classList.remove('busy'); toast('Could not start import'); return; }
+    catch (e) { music.pending = null; music.directLoad = false; music.directBuf = null; if (rowEl) rowEl.classList.remove('busy'); toast('Could not start import'); return; }
     // Safety: Java callback kabhi na aaye to row hamesha busy na rahe.
     setTimeout(() => {
       if (music.pending === t.uri) { music.pending = null; renderMusicList(); }
@@ -1068,13 +1087,7 @@ Object.assign(RM.app, (function () {
     if (!A.state.buffer) { el.textContent = 'No audio'; return; }
     const p = A.state.project;
     const base = `${A.state.fileName} • ${A.fmtTime(A.state.buffer.duration)} • ${A.state.buffer.sampleRate} Hz • ${p.ops.length} edits`;
-    const isFreeMusic = p && p.audioRef && p.audioRef.type === 'freemusic';
-    if (isFreeMusic && A.MUSIC_LICENSE) {
-      el.innerHTML = A.escapeHtml(base) + '<br><span class="fm-free">' +
-        A.escapeHtml(A.MUSIC_LICENSE) + '</span>';
-    } else {
-      el.textContent = base;
-    }
+    el.textContent = base;
   }
   A.updateEditorMeta = updateEditorMeta;
 
@@ -1891,9 +1904,9 @@ Object.assign(RM.app, (function () {
     S('fx-comp-thr', (v) => { fx.comp.thr = v; $('fx-comp-thr-v').textContent = v + ' dB'; });
     S('fx-comp-ratio', (v) => { fx.comp.ratio = v; $('fx-comp-ratio-v').textContent = v + ':1'; });
     S('fx-out', (v) => { fx.out = v / 100; $('fx-out-v').textContent = v + '%'; });
-    // 8D/3D/16D spatial — radio behavior: sirf ek mode ek baar me.
+    // 8D/3D/16D/360° spatial — radio behavior: sirf ek mode ek baar me.
     // (Pehle ye toggles unwired the — dead UI. Ab live hain.)
-    const spatialModes = ['8d', '3d', '16d'];
+    const spatialModes = ['8d', '3d', '16d', '360'];
     const syncSpatialUI = () => {
       const m = (A.state.fx.spatial && A.state.fx.spatial.mode) || 'off';
       spatialModes.forEach((k) => { const el = $('fx-' + k + '-on'); if (el) el.checked = (m === k); });
@@ -2553,137 +2566,185 @@ Object.assign(RM.app, (function () {
     $('more-update').addEventListener('click', () => A.checkUpdate(true));
   }
 
-  /* ================= free music library ================= */
-  // Bundled copyright-free music library (www/music/*.mp3, rendered offline
-  // by tools/gen-free-music.py — 100% original synthesis, no samples, no
-  // copyrighted melodies). Tap a card -> same hardened decode path as a
-  // normal import -> straight into the Editor. ▶ previews in place.
-  const MUSIC_TRACKS = [
-    { id: 'pop',   name: 'Pop',   file: 'pop.mp3',   icon: '🎵', bpm: 120, dur: '0:32', tag: 'Upbeat' },
-    { id: 'lofi',  name: 'Lofi',  file: 'lofi.mp3',  icon: '🎧', bpm: 80,  dur: '0:37', tag: 'Chill' },
-    { id: 'edm',   name: 'EDM',   file: 'edm.mp3',   icon: '⚡', bpm: 128, dur: '0:31', tag: 'Energetic' },
-    { id: 'trap',  name: 'Trap',  file: 'trap.mp3',  icon: '🪤', bpm: 140, dur: '0:35', tag: 'Dark' },
-    { id: 'sufi',  name: 'Sufi',  file: 'sufi.mp3',  icon: '🪕', bpm: 85,  dur: '0:35', tag: 'Emotional' },
-    { id: 'piano', name: 'Piano', file: 'piano.mp3', icon: '🎹', bpm: 75,  dur: '0:34', tag: 'Emotional' },
+  /* ================= CD-ROMantic home (cdx-*, 2026-10-06) ================= */
+  // One-tap effect presets: remix STYLES ke honest DSP recipes reuse karo;
+  // jo remix me nahi hain unke liye chhote custom FX recipes.
+  const CDX_FX = [
+    { id: 'slowed',    emoji: '🐌', name: 'Slowed+Reverb', vibe: 'Deep & dreamy',      style: 'slowed' },
+    { id: 'nightcore', emoji: '⚡', name: 'Nightcore',      vibe: 'Fast & euphoric',
+      rate: 1.25, fx: { eq3: [2, 1, 4], filter: 19000, drive: 0, chorus: { on: false },
+        echo: { on: false }, reverb: { on: true, room: 'hall', wet: 0.25 },
+        comp: { on: true, thr: -16, ratio: 4, atk: 0.006, rel: 0.2 }, out: 1.0 } },
+    { id: 'spedup',    emoji: '🚀', name: 'Sped Up',        vibe: 'Chipmunk energy',
+      rate: 1.45, fx: { eq3: [1, 1, 3], filter: 19000, drive: 0, chorus: { on: false },
+        echo: { on: false }, reverb: { on: false, room: 'hall', wet: 0.2 },
+        comp: { on: true, thr: -16, ratio: 4, atk: 0.006, rel: 0.2 }, out: 1.0 } },
+    { id: 'lofi',      emoji: '🎧', name: 'Lofi',           vibe: 'Dusty & warm',       style: 'lofi' },
+    { id: 'vaporwave', emoji: '🌊', name: 'Vaporwave',      vibe: 'Retro neon haze',
+      rate: 0.75, fx: { eq3: [1, 2, -2], filter: 9000, drive: 0,
+        chorus: { on: true, rate: 1.2, depth: 0.004 },
+        echo: { on: true, time: 0.45, fb: 0.38, wet: 0.25 },
+        reverb: { on: true, room: 'church', wet: 0.5 },
+        comp: { on: true, thr: -14, ratio: 3, atk: 0.01, rel: 0.3 }, out: 0.92 } },
+    { id: '8d',        emoji: '🌀', name: '8D Audio',       vibe: 'Spinning in your head', rate: 1.0,
+      fx: 'spatial8d', note: 'Use headphones for the full 8D effect.' },
+    { id: 'emotional', emoji: '💜', name: 'Emotional',      vibe: 'Soft & heartfelt',   style: 'emotional' },
+    { id: 'edm',       emoji: '🔥', name: 'EDM',            vibe: 'Big & energetic',    style: 'edm' },
+    { id: 'bassboost', emoji: '🔊', name: 'Bass Boost',     vibe: 'Thumping lows',
+      rate: 1.0, fx: { eq3: [7, 2, 0], filter: 19000, drive: 0, chorus: { on: false },
+        echo: { on: false }, reverb: { on: false, room: 'hall', wet: 0.2 },
+        comp: { on: true, thr: -18, ratio: 5, atk: 0.005, rel: 0.2 }, out: 1.0 } },
+    { id: 'echo',      emoji: '🔁', name: 'Echo',           vibe: 'Trippy delays',
+      rate: 1.0, fx: { eq3: [0, 0, 1], filter: 19000, drive: 0, chorus: { on: false },
+        echo: { on: true, time: 0.375, fb: 0.4, wet: 0.4 },
+        reverb: { on: true, room: 'hall', wet: 0.3 },
+        comp: { on: true, thr: -14, ratio: 3, atk: 0.01, rel: 0.25 }, out: 1.0 } },
+    { id: '360',       emoji: '🔄', name: '360° Audio',     vibe: 'Full circular spin',
+      rate: 1.0, fx: 'spatial360',
+      note: '360° spatial rotation (HRTF) — best with headphones.' },
   ];
-  const MUSIC_LICENSE = '© Original — Free to use in your projects';
-  const fmCache = {};   // id -> decoded AudioBuffer (reused by preview + load)
-  const fmPrev = { id: null, src: null, btn: null };
-  function fmSetBtn(btn, playing) {
-    if (!btn) return;
-    btn.classList.toggle('playing', !!playing);
-    btn.textContent = playing ? '⏸' : '▶';
-  }
-  function stopFmPreview() {
-    if (fmPrev.src) { try { fmPrev.src.onended = null; fmPrev.src.stop(); } catch (e) {} }
-    fmSetBtn(fmPrev.btn, false);
-    fmPrev.id = null; fmPrev.src = null; fmPrev.btn = null;
-    A.fmPreviewId = null;
-  }
-  function fmBuffer(d) {
-    if (fmCache[d.id]) return Promise.resolve(fmCache[d.id]);
-    // Same hardened path as a normal import: fetch bytes -> staged decode.
-    return A.fetchFileUrl('music/' + d.file).then((ab) => {
-      if (!ab || ab.byteLength < 100) throw new Error('empty music file');
-      return A.tryDecodeStages(ab, d.file);
-    }).then((buf) => { fmCache[d.id] = buf; return buf; });
-  }
-  function toggleFmPreview(d, btn, ev) {
-    if (ev) ev.stopPropagation();
-    if (fmPrev.id === d.id) { stopFmPreview(); return; }
-    stopFmPreview();
-    fmBuffer(d).then((buf) => {
-      const ctx = RM.audio.ensureCtx();
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      const g = ctx.createGain(); g.gain.value = 0.9;
-      src.connect(g); g.connect(RM.audio.masterIn());
-      src.onended = () => { if (fmPrev.id === d.id) stopFmPreview(); };
-      fmPrev.id = d.id; fmPrev.src = src; fmPrev.btn = btn;
-      A.fmPreviewId = d.id;
-      fmSetBtn(btn, true);
-      try { src.start(); } catch (e) { stopFmPreview(); }
-    }).catch(() => A.toast('Preview failed'));
-  }
-  function loadFreeTrack(d, cardEl) {
-    stopFmPreview();
-    if (cardEl) cardEl.classList.add('loading');
-    A.toast('Loading ' + d.name + '…');
-    fmBuffer(d).then((buf) => {
-      A.loadAudioBuffer(buf, d.name + '.mp3', { name: d.file, size: 0, type: 'freemusic' });
-      if (cardEl) cardEl.classList.remove('loading');
-      A.show('editor');
-    }).catch((e) => {
-      if (cardEl) cardEl.classList.remove('loading');
-      console.log('[freemusic] load failed: ' + d.file, e);
-      A.dialog('Could not load track',
-        '<p>The track could not be loaded. Please try again.</p>', 'OK', null);
+  function applyCdxFx(p) {
+    if (!A.needAudio()) return;
+    let rate = 1.0, name = p.name;
+    if (p.style) {
+      // Remix screen ka wahi honest DSP recipe (rate + FX chain).
+      const s = RM.remix.get(p.style);
+      const fx = JSON.parse(JSON.stringify(s.fx));
+      fx.spatial = { mode: 'off', speed: 0.12, depth: 0.7 };
+      A.state.fx = fx;
+      rate = s.rate;
+    } else if (p.fx === 'spatial8d') {
+      const fx = A.defaultFx();
+      fx.spatial = { mode: '8d', speed: 0.12, depth: 0.85 };
+      A.state.fx = fx;
+      rate = p.rate;
+    } else if (p.fx === 'spatial360') {
+      const fx = A.defaultFx();
+      fx.spatial = { mode: '360', speed: 0.25, depth: 1 };
+      A.state.fx = fx;
+      rate = p.rate;
+    } else {
+      const fx = A.defaultFx();
+      const c = JSON.parse(JSON.stringify(p.fx));
+      Object.keys(c).forEach((k) => { fx[k] = c[k]; });
+      fx.spatial = { mode: 'off', speed: 0.12, depth: 0.7 };
+      A.state.fx = fx;
+      rate = p.rate;
+    }
+    A.applyFxToChain();
+    if (A.state.player) A.state.player.setRate(rate);
+    A.state.cdxFx = p.id;
+    document.querySelectorAll('#cdx-fxgrid .cdx-fxcard').forEach((c) => {
+      c.classList.toggle('on', c.dataset.id === p.id);
     });
+    A.toast('✓ ' + name + (p.note ? ' — ' + p.note : ''));
   }
-  function renderFreeMusic() {
-    const box = $('free-music');
-    if (!box) return;
-    box.innerHTML = '';
-    MUSIC_TRACKS.forEach((d) => {
-      const b = document.createElement('div');
-      b.className = 'fm-card';
-      b.setAttribute('role', 'button');
-      b.setAttribute('tabindex', '0');
-      b.dataset.label = (d.name + ' free music ' + d.tag).toLowerCase();
-      b.innerHTML = '<div class="fm-top"><div class="fm-icon">' + d.icon + '</div>' +
-        '<button class="fm-play" aria-label="Preview ' + A.escapeHtml(d.name) + '">▶</button></div>' +
-        '<div class="fm-name">' + A.escapeHtml(d.name) + '</div>' +
-        '<div class="fm-tag">' + A.escapeHtml(d.tag) + '</div>' +
-        '<div class="fm-meta">' + d.bpm + ' BPM • ' + d.dur + '</div>' +
-        '<div class="fm-free">© Free to use</div>';
-      b.querySelector('.fm-play').addEventListener('click', (ev) => toggleFmPreview(d, ev.currentTarget, ev));
-      b.addEventListener('click', () => loadFreeTrack(d, b));
-      b.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); loadFreeTrack(d, b); }
-      });
-      box.appendChild(b);
-    });
-  }
-
-  /* ================= home ================= */
-  const HOME_CARDS = [
-    ['import', '🆕', 'new_project'],
-    ['remix', '✨', 'auto_remix'],
-    ['slowed', '🐌', 'slowed'],
-    ['editor', '🎚️', 'audio_editor'],
-    ['stems', '🎤', 'stems'],
-    ['aistem', '🧠', 'ai_stems'],
-    ['record', '🎙️', 'recorder'],
-    ['fx', '🎚️', 'equalizer'],
-    ['master', '💎', 'mastering'],
-    ['mixer', '🎧', 'nav_mixer'],
-    ['export', '📤', 'export_title'],
-    ['projects', '📁', 'projects_title'],
-    ['settings', '⚙️', 'settings_title'],
+  const CDX_PRO = [
+    ['editor', '🎚️', 'Editor'],
+    ['mixer',  '🎧', 'Mixer'],
+    ['stems',  '🎤', 'Stems'],
+    ['master', '💎', 'Mastering'],
+    ['fx',     '🎛️', 'FX Rack'],
+    ['record', '🎙️', 'Voice Recorder'],
   ];
+  function openCdxPro(scr) {
+    if ((scr === 'editor' || scr === 'master') && !A.needAudio()) return;
+    A.show(scr);
+  }
+  /* Now-playing bar: mini waveform (RM.wave reuse) + transport. */
+  let cdxWave = null, cdxWaveBuf = null, cdxNowTimer = 0;
+  function cdxUpdateNow() {
+    const bar = $('cdx-nowbar');
+    if (!bar) return;
+    const has = !!(A.state && A.state.buffer);
+    bar.hidden = !has;
+    if (!has) return;
+    const buf = A.state.buffer;
+    $('cdx-nowbar-name').textContent = A.state.fileName || 'Track';
+    const dur = buf.duration || 0;
+    const p = A.state.player;
+    let pos = 0, playing = false;
+    if (p) {
+      playing = !!p.playing;
+      try { pos = playing ? p.position() : (A.state.waveView ? A.state.waveView.playheadSec : 0) || 0; } catch (e) {}
+    }
+    if (pos < 0) pos = 0;
+    $('cdx-nowbar-time').textContent = A.fmtTime(pos) + ' / ' + A.fmtTime(dur);
+    $('cdx-nowbar-play').textContent = playing ? '⏸' : '▶';
+    if (cdxWave && RM.wave) {
+      if (cdxWaveBuf !== buf) {
+        cdxWaveBuf = buf;
+        RM.wave.getPeaks(buf, 240).then((peaks) => {
+          if (cdxWaveBuf === buf) { cdxWave.setBuffer(buf, peaks); cdxWave.draw(); }
+        }).catch(() => {});
+      } else {
+        cdxWave.setPlayhead(pos);
+        cdxWave.draw();
+      }
+    }
+  }
+  A.updateNowBar = cdxUpdateNow;
+  function cdxInitNow() {
+    const canvas = $('cdx-nowbar-wave');
+    if (canvas && RM.wave) {
+      cdxWave = RM.wave.createView(canvas);
+      cdxWave.onSeek = (sec) => {
+        if (!A.state || !A.state.player) return;
+        A.ensureStudio();
+        const pl = A.state.player;
+        if (pl.playing) pl.play(sec); else { pl.offset = sec; }
+        cdxUpdateNow();
+      };
+    }
+    const playBtn = $('cdx-nowbar-play');
+    if (playBtn) playBtn.addEventListener('click', () => {
+      if (!A.state || !A.state.buffer) { A.needAudio(); return; }
+      A.ensureStudio();
+      const pl = A.state.player;
+      if (pl.playing) pl.pause(); else pl.play(0);
+      cdxUpdateNow();
+    });
+    if (!cdxNowTimer) cdxNowTimer = setInterval(cdxUpdateNow, 500);
+    cdxUpdateNow();
+  }
   function initHome() {
-    const grid = $('home-grid');
-    HOME_CARDS.forEach(([scr, icon, i18n]) => {
+    const fxGrid = $('cdx-fxgrid');
+    CDX_FX.forEach((p) => {
       const b = document.createElement('button');
-      b.className = 'home-card';
-      b.dataset.label = A.t(i18n).toLowerCase();
-      b.innerHTML = `<div class="hc-icon">${icon}</div><div class="hc-label" data-i18n="${i18n}">${A.t(i18n)}</div>`;
+      b.className = 'cdx-fxcard cdx-fx-' + p.id;
+      b.dataset.id = p.id;
+      b.dataset.label = (p.name + ' ' + p.vibe).toLowerCase();
+      b.innerHTML = `<div class="cdx-fx-emoji">${p.emoji}</div><div class="cdx-fx-name">${A.escapeHtml(p.name)}</div><div class="cdx-fx-vibe">${A.escapeHtml(p.vibe)}</div>`;
+      // One-tap engine (js/cdx.js): effect apply + preview auto-play (1 tap),
+      // toggle-off, highlight, export-safe tempo. Fallback: purana applyCdxFx.
       b.addEventListener('click', () => {
-        if (scr === 'aistem') { RM.aiStems.open(); return; }
-        if (scr === 'import' && !A.state.project) { A.newProject(); return; }
-        if ((scr === 'editor' || scr === 'remix' || scr === 'slowed' || scr === 'master') && !A.needAudio()) return;
-        A.show(scr);
+        if (window.RM && RM.cdx && typeof RM.cdx.applyEffect === 'function') RM.cdx.applyEffect(RM.cdx.normalizeId(p.id));
+        else applyCdxFx(p);
       });
-      grid.appendChild(b);
+      fxGrid.appendChild(b);
+    });
+    const proGrid = $('cdx-protools');
+    CDX_PRO.forEach(([scr, icon, label]) => {
+      const b = document.createElement('button');
+      b.className = 'cdx-procard';
+      b.dataset.label = label.toLowerCase();
+      b.innerHTML = `<div class="cdx-pro-emoji">${icon}</div><div class="cdx-pro-name">${A.escapeHtml(label)}</div>`;
+      b.addEventListener('click', () => openCdxPro(scr));
+      proGrid.appendChild(b);
+    });
+    const shareBtn = $('cdx-share');
+    if (shareBtn) shareBtn.addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      A.show('export');
     });
     $('home-search').addEventListener('input', (e) => {
       const q = e.target.value.trim().toLowerCase();
-      document.querySelectorAll('#home-grid .home-card, #free-music .fm-card').forEach((c) => {
+      document.querySelectorAll('#cdx-fxgrid .cdx-fxcard, #cdx-protools .cdx-procard').forEach((c) => {
         c.style.display = !q || (c.dataset.label || '').includes(q) ? '' : 'none';
       });
     });
     $('home-new').addEventListener('click', () => A.newProject());
-    renderFreeMusic();
+    cdxInitNow();
     renderHomeRecent();
   }
   function renderHomeRecent() {
@@ -2711,7 +2772,7 @@ Object.assign(RM.app, (function () {
       if (name === 'export') { refreshExportSource(); if (A.syncExpDefaults) A.syncExpDefaults(); }
       if (name === 'projects') renderProjects();
       if (name === 'settings') updateStorageInfo();
-      if (name === 'home') { renderHomeRecent(); }
+      if (name === 'home') { renderHomeRecent(); cdxUpdateNow(); }
       if (name === 'remix') A.updateRemixStemBadge();
     };    A.loadTheme();
     A.setLang('en');
@@ -2790,7 +2851,6 @@ Object.assign(RM.app, (function () {
     initMixer, initFxRack, initMastering, initBeat, initExport, initProjects,
     initSettings, initMore, initHome, init,
     refreshExportSource, renderProjects, openProject, sendToMixer, updateStorageInfo,
-    loadFreeTrack, renderFreeMusic, toggleFmPreview, stopFmPreview, MUSIC_TRACKS, MUSIC_LICENSE,
     getMixerTracks: () => mixer.tracks,
   };
   })());

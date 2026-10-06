@@ -54,7 +54,97 @@ RM.fx = (function () {
     '8d': { speed: 0.12, depth: 0.85, wet: 0.90, reverb: 0.30, delayWet: 0    },
     '3d': { speed: 0.07, depth: 0.45, wet: 0.55, reverb: 0.15, delayWet: 0    },
     '16d':{ speed: 0.50, depth: 1.00, wet: 1.00, reverb: 0.20, delayWet: 0.20 },
+    '360':{ speed: 0.25, depth: 1.00, wet: 1.00, reverb: 0,    delayWet: 0    },
   };
+
+  /* ============ 360° spatial rotation (HRTF) =====================
+     Real DSP: a PannerNode (panningModel='HRTF') orbits the listener on a
+     full 0→360° circle — X = r·sin(θ), Z = r·cos(θ) — driven by two
+     same-frequency oscillators 90° apart (cosine via createPeriodicWave,
+     since OscillatorType has no 'cosine'). The phase-locked pair keeps the
+     orbit a perfect circle even while the speed changes.
+     - True-mono feed into the panner (same reason as makeSpatial): an HRTF
+       panner sums a stereo feed unpredictably; 1-channel is textbook.
+     - HRTF is amplitude/phase filtering, so a mono sum (L+R) never cancels
+       the signal — mono-safe.
+     - LFOs never stop (click-free); enable/disable and slider changes are
+       dezippered via setTargetAtTime. The master gate keeps this branch
+       fully silent unless mode '360' is active (no double-dry against the
+       StereoPanner path in makeSpatial).
+     - Runs on any BaseAudioContext (realtime/offline) -> renders in export.
+     Honest: plain Web Audio HRTF panning — no AI involved.
+     ===================================================================== */
+  function makeSpatial360(ctx) {
+    const N = {};
+    const G = (v) => { const g = ctx.createGain(); g.gain.value = v; return g; };
+    // Dezipper: tc === 0 means a FRESH chain — direct .value jump, no glide
+    // (a glide here would fade the effect in over the first render second).
+    const t = (param, v, tc) => {
+      if (tc === 0) {
+        try { param.cancelScheduledValues(0); } catch (e) {}
+        param.value = v;
+      } else param.setTargetAtTime(v, ctx.currentTime, tc == null ? 0.03 : tc);
+    };
+
+    N.input = G(1);
+    N.dry = G(1);
+    N.wet = G(0);
+    N.gate = G(0); // master enable: 1 only while active
+    N.output = G(1);
+    // True-mono downmix (splitter -> 0.5+0.5 -> 1ch merger).
+    N.split = ctx.createChannelSplitter(2);
+    N.sumL = G(0.5); N.sumR = G(0.5);
+    N.mono = ctx.createChannelMerger(1);
+    // HRTF orbit: listener at origin, source on the unit circle (ear level).
+    N.panner = ctx.createPanner();
+    N.panner.panningModel = 'HRTF';
+    N.panner.distanceModel = 'inverse';
+    N.panner.refDistance = 1;
+    N.panner.maxDistance = 10000;
+    N.panner.rolloffFactor = 0; // constant distance -> no distance gain wobble
+    N.lfoX = ctx.createOscillator(); // sine -> positionX
+    N.lfoZ = ctx.createOscillator(); // cosine -> positionZ (90° apart)
+    N.lfoZ.setPeriodicWave(ctx.createPeriodicWave(
+      new Float32Array([0, 1]), new Float32Array([0, 0])));
+    N.radX = G(1); N.radZ = G(1); // orbit radius
+    N.lfoX.connect(N.radX); N.radX.connect(N.panner.positionX);
+    N.lfoZ.connect(N.radZ); N.radZ.connect(N.panner.positionZ);
+    N.lfoX.frequency.value = 0.25; N.lfoZ.frequency.value = 0.25;
+    N.lfoX.start(); N.lfoZ.start(); // starts front-center: sin=0, cos=1
+
+    N.input.connect(N.dry); N.dry.connect(N.gate);
+    N.input.connect(N.split);
+    N.split.connect(N.sumL, 0); N.split.connect(N.sumR, 1);
+    N.sumL.connect(N.mono, 0, 0); N.sumR.connect(N.mono, 0, 0);
+    N.mono.connect(N.panner); N.panner.connect(N.wet); N.wet.connect(N.gate);
+    N.gate.connect(N.output);
+
+    const st = { on: false, speed: 0.25, depth: 1 };
+    function apply(tc) {
+      const k = clamp(st.depth, 0, 1); // depth = orbit intensity vs dry
+      t(N.lfoX.frequency, clamp(st.speed, 0.05, 1), tc);
+      t(N.lfoZ.frequency, clamp(st.speed, 0.05, 1), tc);
+      t(N.dry.gain, 1 - k, tc);
+      t(N.wet.gain, k, tc);
+      t(N.gate.gain, st.on ? 1 : 0, tc);
+    }
+    const api = {
+      input: N.input, output: N.output, nodes: N,
+      // Enable/disable: gate glides (tc 0.3) — no abrupt orbit jump, no click.
+      setOn(on, immediate) { st.on = !!on; apply(immediate ? 0 : 0.3); },
+      // Same speed semantics as makeSpatial: 0.05–1 Hz, slow cinematic ↔ fast spin.
+      setSpeed(hz, immediate) { st.speed = clamp(+hz || 0.25, 0.05, 1); apply(immediate ? 0 : 0.03); },
+      setDepth(d, immediate) { st.depth = clamp(+d || 0, 0, 1); apply(immediate ? 0 : 0.03); },
+      getSettings() { return { on: st.on, speed: +st.speed.toFixed(3), depth: +st.depth.toFixed(3) }; },
+      dispose() {
+        try { N.lfoX.stop(); } catch (e) {}
+        try { N.lfoZ.stop(); } catch (e) {}
+        Object.keys(N).forEach((k) => { try { N[k].disconnect(); } catch (e) {} });
+      },
+    };
+    apply(0);
+    return api;
+  }
 
   function makeSpatial(ctx) {
     const N = {};
@@ -99,8 +189,17 @@ RM.fx = (function () {
     N.lfo2 = ctx.createOscillator(); N.lfo2.type = 'sine'; N.lfo2.frequency.value = 0.5;
     N.lfo2g = G(0.0025);
     N.lfo2.connect(N.lfo2g); N.lfo2g.connect(N.dly.delayTime); N.lfo2.start();
+    // 360° branch: HRTF circular-orbit sub-chain (makeSpatial360) — active
+    // only in mode '360'; its master gate is 0 in every other mode, so the
+    // dry signal can never double against this StereoPanner path.
+    // NOTE: N.output = G(1) ke BAAD wire karo — pehle connect karne se
+    // undefined pe connect hota hai (Overload resolution failed) aur pura
+    // makeChain/ensureStudio toot jata hai (koi audio load nahi hota).
+    N.s360 = makeSpatial360(ctx);
 
     N.output = G(1);
+    N.s360.output.connect(N.output);
+    N.input.connect(N.s360.input);
     N.input.connect(N.dry); N.dry.connect(N.output);
     N.input.connect(N.split);
     N.split.connect(N.sumL, 0); N.split.connect(N.sumR, 1);
@@ -113,12 +212,18 @@ RM.fx = (function () {
     function targets() {
       const m = SPATIAL_MODES[st.mode] || SPATIAL_MODES.off;
       const k = clamp(st.depth, 0, 1); // depth slider = intensity
+      const is360 = st.mode === '360';
       return {
         freq: clamp(st.speed, 0.05, 1),
         depth: m.depth * k,
-        wet: m.wet * k, dry: 1 - m.wet * k,
-        rvSend: m.reverb > 0 ? 1 : 0, rvWet: m.reverb * k,
-        dlyWet: m.delayWet * k,
+        // '360' mode: the HRTF branch carries the whole signal (own dry/wet);
+        // this StereoPanner path goes fully silent so nothing doubles.
+        wet: is360 ? 0 : m.wet * k,
+        dry: is360 ? 0 : 1 - m.wet * k,
+        rvSend: is360 ? 0 : (m.reverb > 0 ? 1 : 0),
+        rvWet: is360 ? 0 : m.reverb * k,
+        dlyWet: is360 ? 0 : m.delayWet * k,
+        s360: is360,
       };
     }
     // glide: enable/disable dheere (tc 0.3), sliders tez-dezippered (tc 0.03)
@@ -129,6 +234,12 @@ RM.fx = (function () {
       t(N.wet.gain, tg.wet, tc); t(N.dry.gain, tg.dry, tc);
       t(N.rvSend.gain, tg.rvSend, tc); t(N.rvWet.gain, tg.rvWet, tc);
       t(N.dlyWet.gain, tg.dlyWet, tc);
+      // 360° branch tracks the SAME speed/depth controls (existing sliders),
+      // gate opens only in '360' mode — everything dezippered, click-free.
+      const imm = tc === 0;
+      N.s360.setSpeed(tg.freq, imm);
+      N.s360.setDepth(st.depth, imm);
+      N.s360.setOn(tg.s360, imm);
     }
     const api = {
       input: N.input, output: N.output, nodes: N,
@@ -158,7 +269,11 @@ RM.fx = (function () {
       dispose() {
         try { N.lfo.stop(); } catch (e) {}
         try { N.lfo2.stop(); } catch (e) {}
-        Object.keys(N).forEach((k) => { try { N[k].disconnect(); } catch (e) {} });
+        try { N.s360.dispose(); } catch (e) {} // HRTF branch LFOs first
+        Object.keys(N).forEach((k) => {
+          if (k === 's360') return; // API object, not a node (disposed above)
+          try { N[k].disconnect(); } catch (e) {}
+        });
       },
     };
     apply(0.03);
@@ -271,7 +386,7 @@ RM.fx = (function () {
     N.output = G(1);
     N.clip = RM.audio.createSafetyClipper(ctx); // absolute final node
 
-    // 8D/3D/16D spatial auto-pan: limiter ke BAAD (comp/limiter kaam kar chuke
+    // 8D/3D/16D/360° spatial: limiter ke BAAD (comp/limiter kaam kar chuke
     // hain, pan ke baad dynamics nahi badalte), output se pehle. Mode 'off'
     // me poora sub-graph bypass hota hai (true bypass, neeche) — sirf dry=1
     // passthrough rakhne se uska convolver (1.0s IR) bekaar me chalta rehta.
@@ -286,7 +401,7 @@ RM.fx = (function () {
     //   comp -> limiter -> output
     // Echo and reverb are parallel SENDS (never inserts), so toggling them
     // never breaks the dry path.
-    // Spatial (8D/3D/16D): limiter -> spatial.input ... spatial.output -> output
+    // Spatial (8D/3D/16D/360°): limiter -> spatial.input ... spatial.output -> output
     N.input.connect(N.eqBass);
     N.eqBass.connect(N.eqMid); N.eqMid.connect(N.eqTreble);
     let head = N.eqTreble;
@@ -533,5 +648,5 @@ RM.fx = (function () {
     lofi:    { label: 'Lo-Fi Tape',    eqB: 2, eqM: 0, eqT: -5, thr: -10, knee: 14, ratio: 2,  atk: 0.02, rel: 0.5, makeup: 0.95 },
   };
 
-  return { makeChain, makeMasterChain, makeSpatial, SPATIAL_MODES, REVERB_ROOMS, EQ_PRESETS, EQ10_FREQS, MASTER_PRESETS };
+  return { makeChain, makeMasterChain, makeSpatial, makeSpatial360, SPATIAL_MODES, REVERB_ROOMS, EQ_PRESETS, EQ10_FREQS, MASTER_PRESETS };
 })();

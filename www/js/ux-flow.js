@@ -209,7 +209,7 @@ window.RM = window.RM || {};
         b.addEventListener('click', function () { openExport(b.getAttribute('data-from')); });
       })(btns[i]);
     }
-    var pm = $('home-pick-music');
+    var pm = $('cdx-pick');
     if (pm) pm.addEventListener('click', pickMusic);
   }
 
