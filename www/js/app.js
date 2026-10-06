@@ -1812,6 +1812,11 @@ Object.assign(RM.app, (function () {
       refreshTrackUI();
     });
     $('mx-stop-all').addEventListener('click', stopMixer);
+    // v26 (I5): "Export Mix" — offline mixdown (vol/pan/mute/solo) -> export flow.
+    $('mx-export-mix').addEventListener('click', () => {
+      if (window.RM && RM.v26mixdown) RM.v26mixdown.exportMixerMix();
+      else A.toast('Mixdown not ready');
+    });
   }
   function stopMixer() {
     mixer.tracks.forEach((tr) => { try { if (tr.player) tr.player.stop(true); } catch (e) {} });
@@ -2231,16 +2236,15 @@ Object.assign(RM.app, (function () {
     if (A.state.viewBuffer) opts.push({ kind: 'project', label: ('Current project') + ' (' + A.state.fileName + ')', get: () => ({ buffer: A.state.viewBuffer, rate: A.state.project.settings.speed || 1, fx: A.state.fx, name: A.state.fileName, vol: A.state.project.settings.volume, pan: A.state.project.settings.pan }) });
     RM.stems.results.forEach((s) => opts.push({ kind: 'stem', label: 'Stem: ' + s.name, get: () => ({ buffer: s.buffer, rate: 1, fx: A.defaultFx(), name: s.name }) }));
     A.state.imports.forEach((it) => opts.push({ kind: 'import', label: it.name, get: () => ({ buffer: it.buffer, rate: 1, fx: A.defaultFx(), name: it.name }) }));
-    if (!opts.length) {
-      box.innerHTML = `<div class="empty"><div class="empty-icon">📤</div>${'Load audio first to export'}</div>`;
-      return;
-    }
     // Stem row se "Export" dabane par exportSource {kind:'buffer', buffer, name}
     // set hota hai — use radio me explicit option banao aur select karo.
     // (Pehle radio hamesha index 0 check karta tha -> galat source export hota tha.)
     const es = A.state.exportSource;
     let checkedIdx = 0;
     if (es && es.kind === 'buffer' && es.buffer) {
+      // v26 (I5): "Export Mix" (mixer) ka mixdown bhi yahi se aata hai — koi
+      // aur source na ho tab bhi explicit option banna chahiye, isliye empty
+      // check se PEHLE unshift karo.
       // W5 (mashup-export.js): the mashup hands a finished mix and passes
       // its own fx (flatFx — compressor OFF, so the W3 loudness-matched
       // vocals+beat render exactly as previewed) and tail (0 — no dead-air
@@ -2250,6 +2254,10 @@ Object.assign(RM.app, (function () {
       checkedIdx = 0;
     } else if (es && typeof es.idx === 'number' && es.idx >= 0 && es.idx < opts.length) {
       checkedIdx = es.idx;
+    }
+    if (!opts.length) {
+      box.innerHTML = `<div class="empty"><div class="empty-icon">📤</div>${'Load audio first to export'}</div>`;
+      return;
     }
     opts.forEach((o, i) => {
       const l = document.createElement('label');
@@ -2347,7 +2355,7 @@ Object.assign(RM.app, (function () {
     // length limit) to bhi .catch tak pahunche aur Export button dobara
     // enable ho. Bina iske button hamesha disabled rehta (dead UI).
     stage('Preparing…', 0.02);
-    let chain;
+    let chain, mstChain = null;
     // Effect tail: RM.exp.tailForFx covers reverb IRs plus the echo RT60
     // (shared helper — the remix-buffer render below uses it too).
     const fxp = src.fx || A.defaultFx();
@@ -2376,10 +2384,18 @@ Object.assign(RM.app, (function () {
           outNode = xp;
         } else { outNode = xg; }
       }
+      // v26 (I5): mastering -> export. "Apply to export" toggle (mastering
+      // screen) ON: the SAME fx.makeMasterChain graph with the CURRENT mst-*
+      // settings becomes the FINAL stage. OFF: unchanged behavior.
+      if (window.RM && RM.v26mixdown && RM.v26mixdown.masteringEnabled()) {
+        const mc = RM.v26mixdown.applyMasterChainOffline(oc, outNode);
+        outNode = mc.out; mstChain = mc.chain;
+      }
       return outNode;
     }, { sampleRate: sr, rate: src.rate || 1, tail: (src.tail !== undefined ? src.tail : tailNeed) }))
       .then((rendered) => {
         try { if (chain) chain.dispose(); } catch (e) {}
+        try { if (mstChain) mstChain.dispose(); } catch (e) {}
         stage('Rendering… please wait', 0.35);
         const p2 = normalize
           ? RM.audio.normalizeBuffer(rendered, 0.71, (p) => setExpStage(('Normalizing: ') + Math.round(p * 100) + '%', 0.35 + p * 0.1))
