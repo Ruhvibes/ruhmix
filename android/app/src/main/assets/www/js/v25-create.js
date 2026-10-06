@@ -777,8 +777,10 @@ window.RM = window.RM || {};
     st.pickId = id;
     armPickBridge(id); // w26: route app.js's mashupIntercept to our onPicked
     try {
-      if (RM.ux && typeof RM.ux.pickMusic === 'function') {
-        RM.ux.pickMusic(); // same mechanism as the #cdx-pick button
+      if (RM.app && typeof RM.app.pickAudio === 'function') {
+        RM.app.pickAudio(); // DIRECT: native system picker; result returns via handleAudioPicked -> mashupIntercept -> bridge -> onPicked
+      } else if (RM.ux && typeof RM.ux.pickMusic === 'function') {
+        RM.ux.pickMusic(); // legacy fallback: old import screen
       } else {
         a.show('import');
       }
