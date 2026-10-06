@@ -60,6 +60,9 @@ __rmRoot.RM = __rmRoot.RM || {};
 '.stu-strip{display:flex;overflow-x:auto;gap:4px;padding:10px 4px;-webkit-overflow-scrolling:touch}' +
 '.stu-sec{flex:0 0 auto;border-radius:10px;padding:12px 8px;color:#fff;font-size:12px;line-height:1.25;min-width:84px;min-height:60px;text-align:center;border:2px solid transparent;cursor:pointer;touch-action:manipulation}' +
 '.stu-sec.sel{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.35)}' +
+'.stu-sec.drag-src{opacity:.3}' +
+'#stu-dropbar{position:fixed;width:4px;margin-left:-2px;background:#fff;border-radius:2px;z-index:9998;pointer-events:none;box-shadow:0 0 8px rgba(255,255,255,.9);display:none}' +
+'.stu-drag-ghost{position:fixed;z-index:9999;pointer-events:none;opacity:.92;transform:translate(-50%,-115%);margin:0;box-shadow:0 8px 24px rgba(0,0,0,.55)}' +
 '.stu-sec .k{display:block;font-size:10px;opacity:.85;margin-top:2px}' +
 '.stu-wave{width:100%;height:150px;display:block;border-radius:10px;touch-action:pan-x pan-y}' +
 '.stu-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}' +
@@ -96,7 +99,14 @@ __rmRoot.RM = __rmRoot.RM || {};
 '      <button class="btn small" id="stu-zin" aria-label="Zoom in">+</button></span></label></div>' +
 '    <div class="row"><label style="flex:1">Scroll <input type="range" id="stu-scroll" min="0" max="1000" value="0" aria-label="Timeline scroll"></label></div>' +
 '  </div>' +
-'  <div class="panel"><h4>Sections <span class="muted small">\u2014 tap to select &amp; edit</span></h4>' +
+'  <div class="panel"><h4>Sections <span class="muted small">\u2014 tap to select \u00B7 drag a section to reorder</span></h4>' +
+'    <div class="btn-row" role="toolbar" aria-label="Studio edit toolbar">' +
+'      <button class="btn small" id="stu-undo" aria-label="Undo last edit">\u21A9 Undo</button>' +
+'      <button class="btn small" id="stu-redo" aria-label="Redo">\u21AA Redo</button>' +
+'      <button class="btn small" id="stu-copy" aria-label="Copy selected section">\u29C9 Copy</button>' +
+'      <button class="btn small" id="stu-paste" aria-label="Paste copied section after selection">\uD83D\uDCCB Paste</button>' +
+'      <button class="btn small" id="stu-snap" aria-label="Toggle beat snap">\uD83E\uDDF2 Snap: On</button>' +
+'    </div>' +
 '    <div id="stu-sections" class="stu-strip"></div>' +
 '    <div id="stu-selinfo" class="stu-selinfo">Tap a section above to edit it.</div>' +
 '  </div>' +
@@ -168,8 +178,13 @@ __rmRoot.RM = __rmRoot.RM || {};
     ab: 'B',          // 'A' = original, 'B' = edited
     sel: -1,          // selected section index
     busy: false,
+    snap: true,       // I2: beat/bar snap for split + drag-drop targets
+    undo: [],         // I2: command stack (cap 50)
+    redo: [],         // I2: redo stack
+    clip: null,       // I2: studio clipboard {buf, meta}
+    _suppressClick: false, // I2: skip tap-select right after a drag
     zoom: 1,
-    _wired: false, _hook: null,
+    _wired: false, _hook: null, _keywired: false,
     _idc: 0,
   };
   function nextId(p) { st._idc++; return (p || 's') + st._idc; }
@@ -194,6 +209,17 @@ __rmRoot.RM = __rmRoot.RM || {};
     var c = clamp(Math.round(bSec * sr), 0, b.length);
     if (c <= a) return null;
     var o = actx().createBuffer(b.numberOfChannels, c - a, sr);
+    for (var ch = 0; ch < b.numberOfChannels; ch++)
+      o.getChannelData(ch).set(b.getChannelData(ch).subarray(a, c));
+    return o;
+  }
+  // Sample-exact slice (no float seconds involved) — used by the undo
+  // command patches so undo/redo restores byte-identical audio.
+  function sliceSamp(b, aSamp, bSamp) {
+    var a = clamp(Math.round(aSamp), 0, b.length);
+    var c = clamp(Math.round(bSamp), 0, b.length);
+    if (c <= a) return null;
+    var o = actx().createBuffer(b.numberOfChannels, c - a, b.sampleRate);
     for (var ch = 0; ch < b.numberOfChannels; ch++)
       o.getChannelData(ch).set(b.getChannelData(ch).subarray(a, c));
     return o;
@@ -421,7 +447,14 @@ __rmRoot.RM = __rmRoot.RM || {};
       d.appendChild(nm); d.appendChild(k);
       d.setAttribute('role', 'button');
       d.setAttribute('aria-label', 'Edit section ' + s.name);
-      (function (idx) { d.addEventListener('click', function () { selectSection(idx); }); })(i);
+      d.setAttribute('data-i', String(i));
+      (function (idx, div) {
+        div.addEventListener('click', function () {
+          if (st._suppressClick) return; // a drag just ended — not a tap
+          selectSection(idx);
+        });
+        div.addEventListener('pointerdown', function (e) { secDragDown(e, idx, div); });
+      })(i, d);
       wrap.appendChild(d);
     });
   }
@@ -460,6 +493,7 @@ __rmRoot.RM = __rmRoot.RM || {};
 
   function renderAll() {
     renderMeta(); renderStrip(); refreshWave(); renderEditPanel(); renderLanes(); updateAB();
+    updateUndoUI();
   }
 
   /* ---- edit panel ---- */
@@ -683,167 +717,546 @@ __rmRoot.RM = __rmRoot.RM || {};
     return st.sections[st.sel];
   }
 
-  // Split selected section at the playhead (or its midpoint). Buffer audio
-  // is untouched — the region is divided; the junction gets a click guard.
-  function splitSection() {
-    var s = needSel(); if (!s || st.busy) return;
-    var bd = bounds(), i = st.sel;
-    var at = tp.playing ? playheadNow() : tp.offset;
-    var rel = (at > bd[i].a + 0.1 && at < bd[i].b - 0.1) ? at - bd[i].a : s.lenSec / 2;
-    if (rel <= 0.1 || rel >= s.lenSec - 0.1) { toast('Section too short to split'); return; }
+  /* ================= I2: undo / redo / clipboard / snap / drag ================
+     Command stack with do/undo pairs. Three command kinds:
+       'patch' — one sample-exact region replacement {at, removed, inserted};
+       'perm'  — section reorder {orderB, orderA} (audio rebuilt by permutation);
+       'meta'  — sections/bounds metadata only (split: audio untouched).
+     Every entry stores before/after sections, bounds and selection, so
+     undo/redo restores the exact buffer (byte-identical) and the model.
+     New edits clear the redo stack. Cap: 50. */
+
+  var MAX_UNDO = 50;
+
+  function secClone() {
+    return st.sections.map(function (s) {
+      return { id: s.id, name: s.name, kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec };
+    });
+  }
+  function cmdBegin(label, kind) {
+    return {
+      label: label, kind: kind || 'patch',
+      secsB: secClone(), boundsB: st.bounds.slice(), selB: st.sel,
+      at: 0, removed: null, inserted: null, orderB: null, orderA: null,
+      secsA: null, boundsA: null, selA: 0,
+    };
+  }
+  function pushUndo(c) {
+    st.redo.length = 0;
+    st.undo.push(c);
+    if (st.undo.length > MAX_UNDO) st.undo.splice(0, st.undo.length - MAX_UNDO);
+    updateUndoUI();
+  }
+  function cmdEnd(c) {
+    c.secsA = secClone(); c.boundsA = st.bounds.slice(); c.selA = st.sel;
+    pushUndo(c);
+  }
+  function clearUndo() { st.undo.length = 0; st.redo.length = 0; updateUndoUI(); }
+
+  // Apply a command forward (dir>0) or backward (dir<0). For 'patch' the
+  // buffer is rebuilt from the stored sample-exact slices; for 'perm' the
+  // current per-section slices are concatenated in the target id order.
+  function applyCmd(c, dir) {
+    if (st.busy || !st.current) return false;
+    var fwd = dir > 0;
+    if (c.kind === 'patch') {
+      var rem = fwd ? c.removed : c.inserted;
+      var ins = fwd ? c.inserted : c.removed;
+      var remLen = rem ? rem.length : 0;
+      var old = st.current;
+      var nb = concatBufs([
+        sliceSamp(old, 0, c.at),
+        ins,
+        sliceSamp(old, c.at + remLen, old.length),
+      ]);
+      if (!nb) return false;
+      try { RM.wave.dropPeaks(old); } catch (e) {}
+      st.current = nb;
+      tp.offset = clamp(tp.offset, 0, nb.duration);
+    } else if (c.kind === 'perm') {
+      var order = fwd ? c.orderA : c.orderB;
+      var bd = bounds(), sl = {}, k;
+      for (k = 0; k < st.sections.length; k++)
+        sl[st.sections[k].id] = sliceSamp(st.current, Math.round(bd[k].a * st.current.sampleRate), Math.round(bd[k].b * st.current.sampleRate));
+      var parts = [];
+      for (k = 0; k < order.length; k++) parts.push(sl[order[k]]);
+      var old2 = st.current;
+      var nb2 = concatBufs(parts);
+      if (!nb2) return false;
+      try { RM.wave.dropPeaks(old2); } catch (e) {}
+      st.current = nb2;
+      tp.offset = clamp(tp.offset, 0, nb2.duration);
+    }
+    // 'meta': buffer untouched
+    st.sections = (fwd ? c.secsA : c.secsB).map(function (s) {
+      return { id: s.id, name: s.name, kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec };
+    });
+    st.bounds = (fwd ? c.boundsA : c.boundsB).slice();
+    st.sel = fwd ? c.selA : c.selB;
+    renderAll();
+    return true;
+  }
+
+  function doUndo() {
+    if (st.busy) return false;
+    var c = st.undo.pop();
+    if (!c) { toast('Nothing to undo'); return false; }
+    if (applyCmd(c, -1)) { st.redo.push(c); toast('Undid: ' + c.label); }
+    else st.undo.push(c);
+    updateUndoUI();
+    return true;
+  }
+  function doRedo() {
+    if (st.busy) return false;
+    var c = st.redo.pop();
+    if (!c) { toast('Nothing to redo'); return false; }
+    if (applyCmd(c, +1)) { st.undo.push(c); toast('Redid: ' + c.label); }
+    else st.redo.push(c);
+    updateUndoUI();
+    return true;
+  }
+
+  function updateUndoUI() {
+    var u = $('stu-undo'), r = $('stu-redo'), p = $('stu-paste'), sn = $('stu-snap');
+    if (u) {
+      u.disabled = !st.undo.length;
+      u.title = st.undo.length ? 'Undo: ' + st.undo[st.undo.length - 1].label : 'Nothing to undo';
+    }
+    if (r) {
+      r.disabled = !st.redo.length;
+      r.title = st.redo.length ? 'Redo: ' + st.redo[st.redo.length - 1].label : 'Nothing to redo';
+    }
+    if (p) {
+      p.disabled = !st.clip;
+      p.title = st.clip ? 'Paste "' + st.clip.meta.name + '" after the selected section' : 'Copy a section first';
+    }
+    if (sn) {
+      sn.textContent = '\uD83E\uDDF2 Snap: ' + (st.snap ? 'On' : 'Off');
+      try { sn.classList.toggle('primary', !!st.snap); } catch (e) {}
+    }
+  }
+  function toggleSnap() {
+    st.snap = !st.snap;
+    updateUndoUI();
+    toast(st.snap ? 'Snap on: splits & drops quantize to bar lines \uD83E\uDDF2' : 'Snap off: free positioning');
+  }
+
+  // Nearest bar line (bar = 240/st.bpm s, from the REAL detected bpm).
+  function snapToBar(t) {
+    var bar = st.barSec;
+    if (!(bar > 0) || !st.current) return t;
+    return clamp(Math.round(t / bar) * bar, 0, st.current.duration);
+  }
+  // Insertion index (into a lens array) whose boundary is nearest the
+  // bar-quantized drop time — drag-drop targets snap to bar boundaries.
+  function snapInsertIndex(lens, j) {
+    var bar = st.barSec;
+    if (!(bar > 0)) return j;
+    var cum = [0], k;
+    for (k = 0; k < lens.length; k++) cum.push(cum[k] + lens[k]);
+    j = clamp(Math.round(j), 0, lens.length);
+    var ts = Math.round(cum[j] / bar) * bar, best = j, bd = Math.abs(cum[j] - ts);
+    for (var q = 0; q <= lens.length; q++) {
+      var dd = Math.abs(cum[q] - ts);
+      if (dd < bd - 1e-9) { bd = dd; best = q; }
+    }
+    return best;
+  }
+
+  /* ---- studio clipboard ---- */
+
+  function copySection() {
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
+    var bd = bounds()[st.sel], sr = st.current.sampleRate;
+    var buf = sliceSamp(st.current, Math.round(bd.a * sr), Math.round(bd.b * sr));
+    if (!buf) { toast('Copy failed'); return false; }
+    st.clip = { buf: buf, meta: { name: s.name, kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec } };
+    updateUndoUI();
+    toast('Copied "' + s.name + '" \u29C9');
+    return true;
+  }
+  function pasteSection() {
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
+    if (!st.clip) { toast('Clipboard empty \u2014 copy a section first'); return false; }
+    var i = st.sel, bd = bounds(), sr = st.current.sampleRate;
+    var c = cmdBegin('Paste section');
+    c.at = Math.round(bd[i].b * sr);
+    c.removed = null;
+    c.inserted = dupBuf(st.clip.buf);
+    var m = st.clip.meta;
+    st.sections.splice(i + 1, 0, { id: nextId('s'), name: m.name + ' (paste)', kind: m.kind, vocalSong: m.vocalSong, lenSec: m.lenSec });
+    st.bounds.splice(i + 1, 0, 'cut');
+    st.sel = i + 1;
+    cmdEnd(c);
+    applyCmd(c, +1);
+    toast('Pasted \u2713');
+    return true;
+  }
+
+  // Reorder helper: builds a 'perm' command from an id order and applies it.
+  // The buffer is rebuilt by concatenating the CURRENT per-section slices in
+  // the new order, so model and audio can never disagree.
+  function permuteSections(label, newOrderIds, newSel) {
+    var c = cmdBegin(label, 'perm');
+    c.orderB = st.sections.map(function (s) { return s.id; });
+    c.orderA = newOrderIds.slice();
+    var byId = {};
+    st.sections.forEach(function (s) { byId[s.id] = s; });
+    c.secsA = newOrderIds.map(function (id) {
+      var s = byId[id];
+      return { id: s.id, name: s.name, kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec };
+    });
+    c.boundsA = [];
+    for (var k = 0; k < newOrderIds.length - 1; k++) c.boundsA.push('cut');
+    c.selA = (newSel == null ? st.sel : newSel);
+    pushUndo(c);
+    applyCmd(c, +1);
+  }
+
+  /* ================= edits (all REAL buffer ops, all undoable) ================= */
+
+  // Split section i at relSec (buffer audio untouched — metadata only).
+  function splitSectionAt(i, relSec) {
+    var s = st.sections[i];
+    if (!s || st.busy) return false;
+    if (!(relSec > 0.1) || !(relSec < s.lenSec - 0.1)) { toast('Section too short to split'); return false; }
+    var c = cmdBegin('Split section', 'meta');
     var jType = st.bounds[i] || 'cut';
-    var a = { id: nextId('s'), name: s.name + ' A', kind: s.kind, vocalSong: s.vocalSong, lenSec: rel };
-    var b = { id: nextId('s'), name: s.name + ' B', kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec - rel };
-    st.sections.splice(i, 1, a, b);
+    st.sections.splice(i, 1,
+      { id: nextId('s'), name: s.name + ' A', kind: s.kind, vocalSong: s.vocalSong, lenSec: relSec },
+      { id: nextId('s'), name: s.name + ' B', kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec - relSec });
     st.bounds.splice(i, 1, 'cut', jType);
     st.sel = i;
-    renderAll();
-    toast('Split ✓');
+    cmdEnd(c);
+    applyCmd(c, +1);
+    toast('Split \u2713');
+    return true;
+  }
+
+  // Split selected section at the playhead (or its midpoint). With snap ON
+  // the split point quantizes to the nearest bar line.
+  function splitSection() {
+    var s = needSel(); if (!s || st.busy) return false;
+    var i = st.sel, bd = bounds();
+    var at = tp.playing ? playheadNow() : tp.offset;
+    var rel = (at > bd[i].a + 0.1 && at < bd[i].b - 0.1) ? at - bd[i].a : s.lenSec / 2;
+    if (st.snap && st.current) {
+      var sq = snapToBar(bd[i].a + rel) - bd[i].a;
+      if (sq > 0.1 && sq < s.lenSec - 0.1) rel = sq;
+      // else: keep the unsnapped position (section shorter than a bar)
+    }
+    return splitSectionAt(i, rel);
   }
 
   function deleteSection() {
-    var s = needSel(); if (!s || st.busy) return;
-    if (st.sections.length <= 1) { toast('Cannot delete the only section'); return; }
-    var bd = bounds(), i = st.sel;
-    var parts = [];
-    if (bd[i].a > 0.001) parts.push(sliceBuf(st.current, 0, bd[i].a));
-    if (bd[i].b < st.current.duration - 0.001) parts.push(sliceBuf(st.current, bd[i].b, st.current.duration));
-    var nb = concatBufs(parts);
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
+    if (st.sections.length <= 1) { toast('Cannot delete the only section'); return false; }
+    var i = st.sel, bd = bounds(), sr = st.current.sampleRate;
+    var c = cmdBegin('Delete section');
+    c.at = Math.round(bd[i].a * sr);
+    c.removed = sliceSamp(st.current, Math.round(bd[i].a * sr), Math.round(bd[i].b * sr));
+    c.inserted = null;
     st.sections.splice(i, 1);
     st.bounds.splice(Math.min(i, st.bounds.length - 1), 1);
     resetBounds();
     st.sel = Math.min(i, st.sections.length - 1);
-    replaceCurrent(nb, true);
-    toast('Section deleted ✓');
+    cmdEnd(c);
+    applyCmd(c, +1);
+    toast('Section deleted \u2713');
+    return true;
   }
 
   function duplicateSection() {
-    var s = needSel(); if (!s || st.busy) return;
-    var bd = bounds(), i = st.sel;
-    var seg = sliceBuf(st.current, bd[i].a, bd[i].b);
-    var nb = concatBufs([sliceBuf(st.current, 0, bd[i].b), seg, sliceBuf(st.current, bd[i].b, st.current.duration)]);
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
+    var i = st.sel, bd = bounds(), sr = st.current.sampleRate;
+    var c = cmdBegin('Duplicate section');
+    c.at = Math.round(bd[i].b * sr);
+    c.removed = null;
+    c.inserted = sliceSamp(st.current, Math.round(bd[i].a * sr), Math.round(bd[i].b * sr));
     st.sections.splice(i + 1, 0, { id: nextId('s'), name: s.name + ' (copy)', kind: s.kind, vocalSong: s.vocalSong, lenSec: s.lenSec });
     st.bounds.splice(i + 1, 0, 'cut');
-    replaceCurrent(nb, true);
-    toast('Duplicated ✓');
+    st.sel = i + 1;
+    cmdEnd(c);
+    applyCmd(c, +1);
+    toast('Duplicated \u2713');
+    return true;
   }
 
   function moveSection(dir) {
-    var s = needSel(); if (!s || st.busy) return;
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
     var i = st.sel, j = i + dir;
-    if (j < 0 || j >= st.sections.length) { toast('Nowhere to move'); return; }
-    // Adjacent sections: rebuild the buffer with the two regions swapped.
+    if (j < 0 || j >= st.sections.length) { toast('Nowhere to move'); return false; }
+    // Adjacent sections: swap their positions (same audio result as the old
+    // two-region buffer swap, now via the permutation path).
     var lo = Math.min(i, j), hi = Math.max(i, j);
-    var L = bounds()[lo], R = bounds()[hi];
-    var nb = concatBufs([
-      sliceBuf(st.current, 0, L.a),
-      sliceBuf(st.current, R.a, R.b),
-      sliceBuf(st.current, L.a, L.b),
-      sliceBuf(st.current, R.b, st.current.duration),
-    ]);
-    var tmp = st.sections[lo]; st.sections[lo] = st.sections[hi]; st.sections[hi] = tmp;
-    resetBounds();
-    st.sel = j;
-    replaceCurrent(nb, true);
-    toast('Moved ✓');
+    var ids = st.sections.map(function (x) { return x.id; });
+    var t = ids[lo]; ids[lo] = ids[hi]; ids[hi] = t;
+    permuteSections('Move section', ids, j);
+    toast('Moved \u2713');
+    return true;
   }
 
   // Nudge = cut the section and re-insert ±bars in time (real reposition).
   function nudgeSection(bars) {
-    var s = needSel(); if (!s || st.busy) return;
-    var bd = bounds(), i = st.sel;
-    var seg = sliceBuf(st.current, bd[i].a, bd[i].b);
-    if (!seg) return;
-    var rest = concatBufs([
-      sliceBuf(st.current, 0, bd[i].a),
-      sliceBuf(st.current, bd[i].b, st.current.duration),
-    ]);
-    var target = clamp(bd[i].a + bars * st.barSec, 0, rest.duration);
-    var nb = concatBufs([sliceBuf(rest, 0, target), seg, sliceBuf(rest, target, rest.duration)]);
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
+    var i = st.sel, bd = bounds();
+    var total = st.current.duration;
+    var target = clamp(bd[i].a + bars * st.barSec, 0, total - s.lenSec);
     // Rebuild section order: remove i, re-insert at the position whose
     // cumulative time best matches the target.
-    var moved = st.sections.splice(i, 1)[0];
-    var t = 0, at = 0;
-    for (var k = 0; k <= st.sections.length; k++) {
-      if (t + (k < st.sections.length ? st.sections[k].lenSec / 2 : 0) >= target) { at = k; break; }
-      if (k < st.sections.length) t += st.sections[k].lenSec;
+    var rest = st.sections.slice();
+    var moved = rest.splice(i, 1)[0];
+    var t = 0, at = rest.length, k;
+    for (k = 0; k <= rest.length; k++) {
+      if (t + (k < rest.length ? rest[k].lenSec / 2 : 0) >= target) { at = k; break; }
+      if (k < rest.length) t += rest[k].lenSec;
       at = k + 1;
     }
-    st.sections.splice(at, 0, moved);
-    resetBounds();
-    st.sel = at;
-    replaceCurrent(nb, true);
-    toast('Nudged ' + (bars > 0 ? '+' : '') + bars + ' bar ✓');
+    rest.splice(at, 0, moved);
+    var newIds = rest.map(function (x) { return x.id; });
+    var same = newIds.every(function (id, q) { return id === st.sections[q].id; });
+    if (same) { toast('Nowhere to nudge'); return false; }
+    permuteSections('Nudge ' + (bars > 0 ? '+' : '') + bars + ' bar', newIds, at);
+    toast('Nudged ' + (bars > 0 ? '+' : '') + bars + ' bar \u2713');
+    return true;
   }
 
   function trimSection(edge, dSec) {
-    var s = needSel(); if (!s || st.busy) return;
+    var s = needSel(); if (!s || st.busy || !st.current) return false;
     var i = st.sel;
-    if (s.lenSec - dSec < 0.25) { toast('Section too short to trim'); return; }
-    var bd = bounds()[i];
-    var na = bd.a + (edge === 'start' ? dSec : 0);
-    var nb2 = bd.b - (edge === 'end' ? dSec : 0);
-    var nb = concatBufs([
-      sliceBuf(st.current, 0, bd.a),
-      sliceBuf(st.current, na, nb2),
-      sliceBuf(st.current, bd.b, st.current.duration),
-    ]);
+    if (s.lenSec - dSec < 0.25) { toast('Section too short to trim'); return false; }
+    var bd = bounds()[i], sr = st.current.sampleRate;
+    var c = cmdBegin('Trim section');
+    if (edge === 'start') {
+      c.at = Math.round(bd.a * sr);
+      c.removed = sliceSamp(st.current, Math.round(bd.a * sr), Math.round((bd.a + dSec) * sr));
+    } else {
+      c.at = Math.round((bd.b - dSec) * sr);
+      c.removed = sliceSamp(st.current, Math.round((bd.b - dSec) * sr), Math.round(bd.b * sr));
+    }
+    c.inserted = null;
     s.lenSec -= dSec;
     resetBounds();
-    replaceCurrent(nb, true);
-    toast('Trimmed ✓');
+    cmdEnd(c);
+    applyCmd(c, +1);
+    toast('Trimmed \u2713');
+    return true;
   }
 
   function resetBounds() {
     st.bounds = st.sections.slice(0, -1).map(function () { return 'cut'; });
   }
 
+  // Core of "Apply to section": fade in/out + volume + transition AFTER the
+  // section, as ONE undoable patch. jx covers the junction region so xfade
+  // (which shrinks the buffer) is captured exactly; lastJX reports the real
+  // samples removed by renderJunction.
+  function applySectionEditCore(i, fi, fo, vdb, tr) {
+    var s = st.sections[i];
+    if (!s || st.busy || !st.current) return false;
+    var n = st.sections.length, bd = bounds()[i], sr = st.current.sampleRate;
+    var jx = (i < n - 1) ? junctionHalfSec(i, tr) : 0;
+    var aS = Math.round(bd.a * sr), bS = Math.round((bd.b + jx) * sr);
+    var c = cmdBegin('Section edit');
+    c.at = aS;
+    c.removed = sliceSamp(st.current, aS, bS);
+    var nb = dupBuf(st.current);
+    if (fi > 0) fadeRegion(nb, bd.a, bd.b, Math.min(fi, s.lenSec / 2), 'in');
+    if (fo > 0) fadeRegion(nb, bd.a, bd.b, Math.min(fo, s.lenSec / 2), 'out');
+    if (vdb !== 0) gainRegion(nb, bd.a, bd.b, dbToGain(vdb));
+    lastJX = 0;
+    if (i < n - 1) {
+      st.bounds[i] = tr;
+      nb = renderJunction(nb, i, tr);
+    }
+    c.inserted = sliceSamp(nb, aS, aS + (bS - aS) - lastJX);
+    cmdEnd(c);   // captures secsA AFTER renderJunction's lens change
+    applyCmd(c, +1);
+    return true;
+  }
+
   // Apply fade in/out + volume + vocal source + transition for the section.
   // Vocal swap is async; the rest applies first, then the swap re-renders.
   function applySectionEdit() {
     var s = needSel(); if (!s || st.busy) return;
-    var i = st.sel, bd = bounds()[i];
-    var nb = dupBuf(st.current);
+    var i = st.sel;
     var fi = +($('stu-fadein') || {}).value || 0;
     var fo = +($('stu-fadeout') || {}).value || 0;
-    if (fi > 0) fadeRegion(nb, bd.a, bd.b, Math.min(fi, s.lenSec / 2), 'in');
-    if (fo > 0) fadeRegion(nb, bd.a, bd.b, Math.min(fo, s.lenSec / 2), 'out');
     var vdb = +(($('stu-vol') || {}).value || 0);
-    if (vdb !== 0) gainRegion(nb, bd.a, bd.b, dbToGain(vdb));
     // Transition AFTER this section (no-op on the last section — no "next").
     var tr = (($('stu-trans') || {}).value) || 'cut';
-    if (i < st.sections.length - 1) {
-      st.bounds[i] = tr;
-      nb = renderJunction(nb, i, tr);
-    }
-    var oldBuf = st.current;
-    st.current = nb;
-    try { RM.wave.dropPeaks(oldBuf); } catch (e) {}
+    applySectionEditCore(i, fi, fo, vdb, tr);
     // Vocal source swap (async, Smart DSP).
     var vsel = $('stu-vocal-src');
     var want = vsel && vsel.style.display !== 'none' ? parseInt(vsel.value, 10) : NaN;
     var vv = $('stu-vol-v'); if (vv) vv.textContent = '0 dB';
     var vr = $('stu-vol'); if (vr) vr.value = '0';
-    renderAll();
     if (!isNaN(want) && want !== s.vocalSong && s.kind === 'vocal') {
       swapVocalSource(i, want);
     } else {
-      toast('Section updated ✓');
+      toast('Section updated \u2713');
     }
+  }
+
+  /* ================= I2: drag-to-reorder (pointer events) =================
+     pointerdown on a section strip: mouse starts dragging past 8px; touch
+     arms a 350ms long-press (moving >12px first = a scroll, drag cancels).
+     While dragging a ghost follows the pointer and a white bar marks the
+     drop slot. On drop, dragCommit() reorders st.sections AND rebuilds
+     st.current by permutation (model and audio can never disagree), pushes
+     one undo command, and re-renders — so preview and export both change. */
+
+  var dragSt = null;
+  function secDragDown(e, idx, el) {
+    if (st.busy || st.sections.length < 2 || !st.current) return;
+    if (e.pointerType === 'mouse' && e.button) return;
+    if (dragSt) secDragCleanup();
+    dragSt = {
+      idx: idx, el: el, pid: e.pointerId, sx: e.clientX, sy: e.clientY,
+      active: false, timer: 0, ghost: null, bar: null, target: idx,
+      touch: (e.pointerType || 'mouse') === 'touch',
+    };
+    if (dragSt.touch) {
+      dragSt.timer = setTimeout(function () { secDragStart(); }, 350);
+      window.addEventListener('touchmove', secDragTouchMove, { passive: false });
+    }
+    window.addEventListener('pointermove', secDragMove);
+    window.addEventListener('pointerup', secDragUp);
+    window.addEventListener('pointercancel', secDragCancel);
+  }
+  function secDragTouchMove(e) {
+    if (dragSt && dragSt.active) { try { e.preventDefault(); } catch (x) {} }
+  }
+  function secDragStart() {
+    if (!dragSt || dragSt.active) return;
+    if (typeof document === 'undefined') return;
+    dragSt.active = true;
+    try { dragSt.el.setPointerCapture(dragSt.pid); } catch (x) {}
+    try { if (navigator.vibrate) navigator.vibrate(15); } catch (x) {}
+    var g = dragSt.el.cloneNode(true);
+    try { g.className += ' stu-drag-ghost'; } catch (x) {}
+    g.removeAttribute('data-i');
+    document.body.appendChild(g);
+    dragSt.ghost = g;
+    var bar = document.createElement('div');
+    bar.id = 'stu-dropbar';
+    document.body.appendChild(bar);
+    dragSt.bar = bar;
+    try { dragSt.el.classList.add('drag-src'); } catch (x) {}
+    secDragPlace(dragSt.sx, dragSt.sy);
+  }
+  function secDragPlace(px, py) {
+    if (!dragSt) return;
+    if (dragSt.ghost) { dragSt.ghost.style.left = px + 'px'; dragSt.ghost.style.top = py + 'px'; }
+    var wrap = $('stu-sections');
+    if (!wrap) return;
+    var kids = wrap.children, rects = [], k, r;
+    for (k = 0; k < kids.length; k++) {
+      var ii = parseInt(kids[k].getAttribute('data-i'), 10);
+      if (ii === dragSt.idx || isNaN(ii)) continue;
+      rects.push(kids[k].getBoundingClientRect());
+    }
+    var j = rects.length;
+    for (k = 0; k < rects.length; k++) {
+      r = rects[k];
+      if (px < r.left + r.width / 2) { j = k; break; }
+    }
+    dragSt.target = j;
+    if (dragSt.bar) {
+      var sr2 = wrap.getBoundingClientRect();
+      var x = (j < rects.length) ? rects[j].left
+        : (rects.length ? rects[rects.length - 1].right : sr2.right);
+      dragSt.bar.style.display = 'block';
+      dragSt.bar.style.left = x + 'px';
+      dragSt.bar.style.top = (sr2.top - 4) + 'px';
+      dragSt.bar.style.height = (sr2.height + 8) + 'px';
+    }
+  }
+  function secDragMove(e) {
+    if (!dragSt || e.pointerId !== dragSt.pid) return;
+    var dx = e.clientX - dragSt.sx, dy = e.clientY - dragSt.sy;
+    if (!dragSt.active) {
+      if (Math.hypot(dx, dy) > (dragSt.touch ? 12 : 8)) {
+        if (dragSt.touch) { secDragCleanup(); return; } // became a scroll
+        secDragStart();
+      }
+      return;
+    }
+    try { if (e.cancelable) e.preventDefault(); } catch (x) {}
+    secDragPlace(e.clientX, e.clientY);
+  }
+  function secDragUp(e) {
+    if (!dragSt || e.pointerId !== dragSt.pid) { secDragCleanup(); return; }
+    var wasActive = dragSt.active, d = dragSt.idx, j = dragSt.target;
+    secDragCleanup();
+    if (wasActive) {
+      // Suppress the tap-select click that follows a real drag.
+      st._suppressClick = true;
+      setTimeout(function () { st._suppressClick = false; }, 400);
+      dragCommit(d, j);
+    }
+  }
+  function secDragCancel() { secDragCleanup(); }
+  function secDragCleanup() {
+    if (!dragSt) return;
+    if (dragSt.timer) clearTimeout(dragSt.timer);
+    try {
+      if (dragSt.ghost && dragSt.ghost.parentNode) dragSt.ghost.parentNode.removeChild(dragSt.ghost);
+      if (dragSt.bar && dragSt.bar.parentNode) dragSt.bar.parentNode.removeChild(dragSt.bar);
+      dragSt.el.classList.remove('drag-src');
+    } catch (x) {}
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('touchmove', secDragTouchMove, { passive: false });
+      window.removeEventListener('pointermove', secDragMove);
+      window.removeEventListener('pointerup', secDragUp);
+      window.removeEventListener('pointercancel', secDragCancel);
+    }
+    dragSt = null;
+  }
+
+  // Commit a drag: move section d to insertion index j (j counts positions in
+  // the section array WITHOUT the dragged section). With snap ON, j snaps to
+  // the nearest bar-boundary slot. Model + buffer both update via one 'perm'
+  // undo command, so the rendered waveform AND the exported audio change.
+  function dragCommit(d, j) {
+    var n = st.sections.length;
+    if (st.busy || !st.current || d < 0 || d >= n || !n) return false;
+    var rest = st.sections.slice();
+    var mv = rest.splice(d, 1)[0];
+    j = clamp(Math.round(j), 0, rest.length);
+    if (st.snap) j = snapInsertIndex(rest.map(function (x) { return x.lenSec; }), j);
+    j = clamp(j, 0, rest.length);
+    rest.splice(j, 0, mv);
+    var newIds = rest.map(function (x) { return x.id; });
+    var same = newIds.every(function (id, q) { return id === st.sections[q].id; });
+    if (same) { renderAll(); return false; }
+    permuteSections('Drag reorder', newIds, j);
+    toast('Moved \u2713');
+    return true;
   }
 
   /* ---- junctions: re-render the boundary AFTER section i ----
      xfade: 0.5-bar equal-power crossfade (buffer shrinks by xSec;
             section i keeps its length, section i+1 shrinks).
      dip:   0.25-bar fade-out + fade-in (length unchanged).
-     cut:   5 ms click guard (length unchanged). */
+     cut:   5 ms click guard (length unchanged).
+     lastJX = samples the buffer shrank by (xfade only; 0 otherwise) —
+     the undo patch for applySectionEdit needs the exact value. */
+  var lastJX = 0;
+  function junctionHalfSec(i, type) {
+    if (type === 'xfade') return 0.5 * st.barSec;
+    if (type === 'dip') return Math.min(0.25 * st.barSec, 2);
+    return 0.005;
+  }
   function renderJunction(buf, i, type) {
+    lastJX = 0;
     if (i < 0 || i >= st.sections.length - 1) return buf;
     var bd = bounds(), at = bd[i].b, sr = buf.sampleRate;
     if (type === 'xfade') {
       var x = Math.round(0.5 * st.barSec * sr);
       x = Math.min(x, Math.floor(sr * at) - 1, buf.length - Math.floor(sr * at) - 1);
       if (x < 16) return buf;
+      lastJX = x;
       var halfPi = Math.PI / 2;
       var mixed = actx().createBuffer(buf.numberOfChannels, x, sr);
       for (var ch = 0; ch < buf.numberOfChannels; ch++) {
@@ -1242,6 +1655,8 @@ __rmRoot.RM = __rmRoot.RM || {};
     resetBounds();
     st.stems = null; st.laneUI = {}; laneViews = {};
     st.ab = 'B'; st.sel = -1; tp.offset = 0; st.zoom = 1;
+    st._suppressClick = false;
+    clearUndo(); st.clip = null; // I2: rebuild = new baseline
     var sc = $('stu-scroll'); if (sc) sc.value = '0';
     renderAll();
   }
@@ -1271,6 +1686,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     resetBounds();
     st.stems = null; st.laneUI = {}; laneViews = {};
     st.ab = 'B'; st.sel = -1; tp.offset = 0;
+    clearUndo(); // I2: "reset all" also clears the undo/redo history
     renderAll();
     toast('Edits reset ✓');
   }
@@ -1309,6 +1725,8 @@ __rmRoot.RM = __rmRoot.RM || {};
     resetBounds();
     st.stems = null; st.laneUI = {}; laneViews = {};
     st.ab = 'B'; st.sel = -1; tp.offset = 0; st.zoom = 1; st.busy = false;
+    st._suppressClick = false;
+    clearUndo(); st.clip = null; // I2: new baseline — history + clipboard reset
     var sc = $('stu-scroll'); if (sc) sc.value = '0';
     renderStudio();
     var empty = $('stu-empty'), main = $('stu-main');
@@ -1364,6 +1782,27 @@ __rmRoot.RM = __rmRoot.RM || {};
     on('stu-nudge-r', function () { nudgeSection(1); });
     on('stu-trim-s', function () { trimSection('start', 0.5); });
     on('stu-trim-e', function () { trimSection('end', 0.5); });
+    // I2: undo/redo/copy/paste/snap toolbar.
+    on('stu-undo', doUndo);
+    on('stu-redo', doRedo);
+    on('stu-copy', copySection);
+    on('stu-paste', pasteSection);
+    on('stu-snap', toggleSnap);
+    if (!st._keywired) {
+      st._keywired = true;
+      document.addEventListener('keydown', function (e) {
+        var t = e.target, tag = (t && t.tagName) ? String(t.tagName) : '';
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
+        var scr = $('screen-studio');
+        if (!scr || !scr.classList.contains('active')) return;
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+        var k = (e.key || '').toLowerCase();
+        if (k === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); }
+        else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); doRedo(); }
+        else if (k === 'c') { e.preventDefault(); copySection(); }
+        else if (k === 'v') { e.preventDefault(); pasteSection(); }
+      });
+    }
     on('stu-apply-edit', applySectionEdit);
     var vv = $('stu-vol-v'), vr = $('stu-vol');
     if (vr && vv) vr.addEventListener('input', function () { vv.textContent = vr.value + ' dB'; });
@@ -1373,6 +1812,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     on('stu-export', doExport);
     on('stu-reset', resetEdits);
     renderRegenGrid();
+    try { if (RM.v26fx && typeof RM.v26fx.init === 'function') RM.v26fx.init(document); } catch (e) {}
   }
 
   // Inserts <section id="screen-studio"> (idempotent) and wires controls.
@@ -1446,6 +1886,15 @@ __rmRoot.RM = __rmRoot.RM || {};
       if (ok) toast(note || 'Vocal chain applied \u2713');
       return ok;
     },
+    fxApi: { // v26 I3 studio-FX bridge: v26-studio-fx.js reads/replaces st.current (BPM/pitch/automation/transitions).
+      cur:function(){return st.current;}, bpm:function(){return st.bpm;}, secs:function(){return st.sections;},
+      auto:function(){return st.automation||null;}, setAuto:function(p){st.automation=p||null;},
+      apply:function(nb,o){o=o||{};var ob=st.current,od=ob?ob.duration:0,i;try{RM.wave.dropPeaks(ob);}catch(e){}
+        st.current=nb;if(o.bpm){st.bpm=o.bpm;st.barSec=240/o.bpm;}
+        if(o.sections){for(i=0;i<st.sections.length&&i<o.sections.length;i++)st.sections[i].lenSec=o.sections[i];}
+        else if(o.rescale&&od>0){var r=nb.duration/od;for(i=0;i<st.sections.length;i++)st.sections[i].lenSec*=r;}
+        if('automation'in o)st.automation=o.automation;try{tp.offset=Math.min(tp.offset,nb.duration);}catch(e){} renderAll();},
+      busy:function(v){if(v===undefined)return st.busy;st.busy=!!v;}, refresh:renderAll, toast:toast },
     // read-only state for the coordinator / tests
     getState: function () {
       return {
@@ -1455,6 +1904,26 @@ __rmRoot.RM = __rmRoot.RM || {};
       };
     },
     REGENS: REGENS.map(function (d) { return { id: d.id, name: d.name, param: d.param }; }),
+    // I2 test/debug surface (browser-harmless). Follows the v25-export-ui
+    // _t pattern: node tests drive the real edit/undo functions headlessly.
+    _t: {
+      st: function () { return st; },
+      tp: function () { return tp; },
+      bounds: bounds,
+      sliceBuf: sliceBuf, sliceSamp: sliceSamp, concatBufs: concatBufs, dupBuf: dupBuf,
+      splitSectionAt: splitSectionAt, splitSection: splitSection,
+      deleteSection: deleteSection, duplicateSection: duplicateSection,
+      moveSection: moveSection, nudgeSection: nudgeSection, trimSection: trimSection,
+      applySectionEditCore: applySectionEditCore,
+      copySection: copySection, pasteSection: pasteSection,
+      dragCommit: dragCommit, snapToBar: snapToBar, snapInsertIndex: snapInsertIndex,
+      toggleSnap: toggleSnap,
+      doUndo: doUndo, doRedo: doRedo, clearUndo: clearUndo,
+      doExport: doExport,
+      cmdBegin: cmdBegin, cmdEnd: cmdEnd, pushUndo: pushUndo, applyCmd: applyCmd,
+      permuteSections: permuteSections,
+      MAX_UNDO: MAX_UNDO,
+    },
   };
 
   // Node unit-test hook (browser-harmless): pure functions only.
@@ -1466,6 +1935,7 @@ __rmRoot.RM = __rmRoot.RM || {};
           detectMode: detectMode, getBpm: getBpm, deriveSections: deriveSections,
           fmtTime: fmtTime, dbToGain: dbToGain, clamp: clamp,
           REGEN_PARAMS: REGENS.map(function (d) { return { id: d.id, param: d.param }; }),
+          _t: RM.v25studio._t, // I2: undo/drag/clipboard/snap test surface
         },
       };
     }
