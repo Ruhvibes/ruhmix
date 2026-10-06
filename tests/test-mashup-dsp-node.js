@@ -178,10 +178,14 @@ async function main() {
     const res2 = await DSP.detectKey(buf2);
     console.log('  detected:', JSON.stringify(res2));
     ok(res2.key === 'A' && res2.mode === 'minor', 'detectKey finds A minor', JSON.stringify(res2));
-    // silence -> graceful, zero confidence
+    // silence -> honest null (w26: never an invented "C major")
     const sil = makeBuf(1, 1);
     const res3 = await DSP.detectKey(sil);
-    ok(res3.confidence === 0, 'detectKey silence -> confidence 0', JSON.stringify(res3));
+    ok(res3 === null, 'detectKey silence -> null (honest)', JSON.stringify(res3));
+    // too short to analyze -> honest null as well
+    const tiny = new FakeAudioBuffer(1, 1000, SR);
+    const res4 = await DSP.detectKey(tiny);
+    ok(res4 === null, 'detectKey too-short -> null (honest)', JSON.stringify(res4));
     // all 12 major roots at 44.1 kHz (guards low-frequency chroma resolution)
     const NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
     let rootsOk = 0;

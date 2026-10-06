@@ -159,6 +159,9 @@ RM.audio = (function () {
   // amplitude differences) -> autocorrelation over integer lags covering
   // 60..200 BPM -> parabolic interpolation around the best lag for sub-BPM
   // accuracy. Env computation is chunked to keep UI smooth.
+  // HONESTY (w26): returns null on digital silence (zero onset energy) —
+  // callers must handle null (v25-create shows "BPM —"; the mega/swap/
+  // classic engines fall back to 100 BPM internally and say so).
   function detectBPM(buffer, onProgress) {
     const sr = buffer.sampleRate;
     const len = Math.floor(Math.min(buffer.duration, 60) * sr);
@@ -184,7 +187,9 @@ RM.audio = (function () {
     }, onProgress ? (p) => onProgress(p * 0.9) : null).then(() => {
       let r0 = 0;
       for (let i = 0; i < frames; i++) r0 += env[i] * env[i];
-      if (!isFinite(r0) || r0 === 0) { if (onProgress) onProgress(1); return 120; }
+      // w26: digital silence (or pure DC) carries no tempo information —
+      // report null instead of inventing 120 BPM.
+      if (!isFinite(r0) || r0 === 0) { if (onProgress) onProgress(1); return null; }
       const minLag = Math.max(1, Math.round((60 / 200) * sr / hop));
       const maxLag = Math.min(frames - 1, Math.round((60 / 60) * sr / hop));
       const Rs = new Float64Array(maxLag + 2);
