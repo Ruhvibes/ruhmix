@@ -13,9 +13,11 @@
        analyze (< 2048 samples) — never an invented "C major". Callers
        must handle null (v25-create shows "Key —"; the mega/swap/
        classic engines skip the key match and say so).
-     timeStretch(audioBuffer, ratio, onProgress) -> Promise<AudioBuffer>
+     timeStretch(audioBuffer, ratio, onProgress, debug) -> Promise<AudioBuffer>
        WSOLA time-stretcher. ratio > 1 = longer duration, pitch
        preserved. ratio clamped to [0.5, 2.0]. Mono + stereo.
+       debug (optional object): filled with {params, offsets, scores}
+       describing the per-frame WSOLA offset search (diagnostics only).
      pitchShift(audioBuffer, semitones, onProgress) -> Promise<AudioBuffer>
        Linear-interp resample by 2^(st/12) (pitch + tempo change),
        then timeStretch back by 2^(st/12) to restore duration.
@@ -227,8 +229,74 @@ RM.mashupDSP = (function () {
     return { key: NOTE_NAMES[bestRoot], mode: bestMinor ? 'minor' : 'major', confidence };
   }
 
+  // v27: dominant period (in samples) of the input around `pos`, via
+  // normalized autocorrelation on the decimated signal, 30..800 Hz.
+  // (30 Hz, not 50: a longer ceiling lets quasi-periodic signals reveal a
+  // better near-common multiple — measured on the D-major test chord,
+  // lag 75 (~1200 samples) scores 0.99 vs 0.48 at lag 37 (~600), because
+  // 1200 is also a near-multiple of the F#3 period. More wraps land
+  // cleanly, fewer wraps happen at all.)
+  // Parabolic refinement gives sub-lag resolution. Returns 0 when nothing
+  // is periodic enough to trust (transients, noise, silence).
+  // Peak picking: local maxima within 90% of the best normalized peak;
+  // the SMALLEST such lag wins. Rationale: the smallest strong peak is the
+  // signal's true period (or a divisor of it, which then IS the period) —
+  // wrapping the offset walk by it is phase-exact. A larger peak is only
+  // safe when it is an integer multiple of the true period, which a
+  // boundary-truncated "peak" (or a coincidental near-multiple like
+  // 8.94 periods scoring 0.94) is not: measured on a 440 Hz sine, picking
+  // the largest peak wrapped by 8.94 periods -> 0.12-cycle jump per wrap
+  // -> fundamental -5..-8 dB, THD 84-136%. For quasi-periodic content
+  // (chords) the component periods never reach 90% of the common
+  // multiple's peak, so the common multiple (~600 samples for the D-major
+  // test chord) still wins — exactly the wrap the walk needs.
+  function estimatePeriod(mono, pos, W, sr, D, inLen) {
+    const a0 = Math.max(0, Math.floor(pos - W));
+    const a1 = Math.min(inLen, Math.ceil(pos + W));
+    const n = Math.floor((a1 - a0) / D);
+    const lagMin = Math.max(2, Math.floor(sr / 800 / D));
+    const lagMax = Math.ceil(sr / 30 / D);
+    if (n < lagMax + 8 || lagMax <= lagMin) return 0;
+    const norms = new Float64Array(lagMax + 1);
+    let best = 0.4;
+    for (let lag = lagMin; lag <= lagMax; lag++) {
+      // Normalized by the OVERLAPPING energy only: dividing by the full
+      // window energy would bias short lags upward ((n-lag)/n) and push
+      // the true peak below the threshold on short windows.
+      let ac = 0, e1 = 1e-12;
+      for (let i = 0; i + lag < n; i++) {
+        const v = mono[a0 + i * D];
+        ac += v * mono[a0 + (i + lag) * D];
+        e1 += v * v;
+      }
+      const nm = ac / e1;
+      norms[lag] = nm;
+      if (nm > best) best = nm;
+    }
+    if (best <= 0.4) return 0; // nothing periodic enough
+    let useLag = 0;
+    const thresh = 0.9 * best;
+    for (let lag = lagMin; lag <= lagMax; lag++) {
+      if (norms[lag] < thresh) continue;
+      const leftOk = lag === lagMin || norms[lag] >= norms[lag - 1];
+      const rightOk = lag === lagMax || norms[lag] >= norms[lag + 1];
+      // smallest strong peak = the true period (see comment above)
+      if (leftOk && rightOk && (useLag === 0 || lag < useLag)) useLag = lag;
+    }
+    if (useLag === 0) return 0;
+    // Parabolic refinement around the chosen peak (sub-lag resolution —
+    // the walk's wrap error is m*(pEst - P_true), so this matters).
+    let delta = 0;
+    if (useLag > lagMin && useLag < lagMax) {
+      const y0 = norms[useLag - 1], y1 = norms[useLag], y2 = norms[useLag + 1];
+      const den = y0 - 2 * y1 + y2;
+      if (den < -1e-9) delta = Math.max(-1, Math.min(1, 0.5 * (y0 - y2) / den));
+    }
+    return (useLag + delta) * D;
+  }
+
   /* ================= 2. WSOLA time-stretch ================= */
-  async function timeStretch(audioBuffer, ratio, onProgress) {
+  async function timeStretch(audioBuffer, ratio, onProgress, debug) {
     ratio = clamp(ratio || 1, 0.5, 2.0);
     const sr = audioBuffer.sampleRate;
     const nCh = audioBuffer.numberOfChannels;
@@ -236,6 +304,11 @@ RM.mashupDSP = (function () {
     const prog = (p) => { if (onProgress) onProgress(p); };
     if (inLen === 0) return makeBuffer(nCh, 0, sr);
     if (ratio === 1) return copyBuffer(audioBuffer, onProgress);
+    // Optional DSP diagnostics: pass an object and it is filled with the
+    // per-frame winning offsets and the WSOLA parameters used. Used by the
+    // v27 phase-coherence work to measure offset period-consistency.
+    // Never read by production callers; zero cost when omitted.
+    const dbg = (debug && typeof debug === 'object') ? debug : null;
 
     // WSOLA: step through the INPUT in analysis hops (Ha) and lay each
     // window down on the output in synthesis hops (Hs = Ha * ratio).
@@ -249,6 +322,13 @@ RM.mashupDSP = (function () {
     const Tol = Math.max(32, Math.round(0.005 * sr));// offset search range
     const D = 16;                                   // search decimation
     const outLen = Math.max(1, Math.round(inLen * ratio));
+    if (dbg) {
+      dbg.params = { W: W, Ha: Ha, nFrames: nFrames, Hs: Hs, Tol: Tol, D: D };
+      dbg.offsets = new Int16Array(nFrames);
+      dbg.scores = new Float32Array(nFrames);
+      dbg.pEst = new Float32Array(nFrames);
+      dbg.scores[0] = 1; // frame 0: direct copy, no search needed
+    }
 
     // One mono mix drives the offset search; the SAME winning offset is
     // applied to every channel, so the stereo image never drifts apart.
@@ -258,6 +338,7 @@ RM.mashupDSP = (function () {
     const chOut = [];
     for (let c = 0; c < nCh; c++) chOut.push(new Float32Array(outLen + W));
     const y0 = chOut[0]; // search reference: already-synthesized ch-0 overlap
+    let prevD = 0;          // v27: previous winning offset (consistency prior)
 
     await chunked(nFrames, 16, (fa, fb) => {
       for (let k = fa; k < fb; k++) {
@@ -276,28 +357,119 @@ RM.mashupDSP = (function () {
         // old W-step (proven path, unchanged).
         const xf = Math.max(1, Math.min(W - step, step));
         if (k > 0) {
-          // Best integer offset: maximize normalized cross-correlation
-          // between the synthesized overlap and the candidate input
-          // segment (decimated for speed; full-rate offset applied).
-          const L = Math.max(1, Math.floor(xf / D));
+          // v27: period-guided offset walk. Root cause of "thin" compression
+          // (measured): for quasi-periodic content — chords, detuned layers,
+          // real music, which have no single common period — the old
+          // per-frame argmax over a short (5.8 ms) correlation window saw
+          // competing maxima from each component's period and re-rolled the
+          // winner every join. D-major chord: -8..-27 dB per-note
+          // cancellation, THD 130-740% (phase modulation at the join rate
+          // turns carriers into inharmonic sidebands). Pure tones were
+          // already perfect (one sharp maximum) — the damage came purely
+          // from the search re-rolling, never from the signal.
+          //
+          // The offset MUST drift by (Hs-Ha) per frame on average, or the
+          // pitch shifts; it must wrap by period multiples to stay bounded.
+          // So instead of a fresh argmax each frame, the offset WALKS:
+          // exact drift between wraps (phase-perfect for every component,
+          // even under vibrato — both segments come from the same input
+          // timeline), wrapping by the measured dominant period pEst.
+          // Candidates are scored by long-window normalized xcorr
+          // (reference = synthesized output history up to W back, which is
+          // final, plus the written overlap; candidate contributes its
+          // lead-in), so a wrong period estimate still loses to a better
+          // wrap. Aperiodic frames (transients/noise/silence, pEst = 0)
+          // keep the classic full-range search — the transient safety net.
+          const pEst = estimatePeriod(mono, nat, W, sr, D, inLen);
+          const drift = Hs - Ha;
+          const dRaw = prevD + drift;
+          // Long correlation window for scoring: the reference is the
+          // already-synthesized output history (up to W back — always final,
+          // frames only write forward from their own synPos) plus the
+          // written overlap; the candidate contributes its matching
+          // lead-in. This lets the search see whole composite periods
+          // instead of just the xf crossfade slice.
+          const Lpre = Math.max(0, Math.min(W, synPos, nat - Tol));
+          const L = Math.max(1, Math.floor((Lpre + xf) / D));
           let refE = 0;
-          for (let n = 0; n < L; n++) { const v = y0[synPos + n * D]; refE += v * v; }
-          let bestScore = -1, bestD = 0;
-          for (let d = -Tol; d <= Tol; d++) {
+          for (let n = 0; n < L; n++) { const v = y0[synPos - Lpre + n * D]; refE += v * v; }
+          const xcorr = (d) => {
             const a = nat + d;
-            if (a < 0) continue;
+            if (a - Lpre < 0) return -1;
             let num = 0, segE = 0;
             for (let n = 0; n < L; n++) {
-              const idx = a + n * D;
+              const idx = a - Lpre + n * D;
               const v = idx < inLen ? mono[idx] : 0;
-              num += v * y0[synPos + n * D];
+              num += v * y0[synPos - Lpre + n * D];
               segE += v * v;
             }
-            const score = (refE > 1e-12 && segE > 1e-12)
-              ? num / Math.sqrt(refE * segE) : -1;
-            if (score > bestScore) { bestScore = score; bestD = d; }
+            return (refE > 1e-12 && segE > 1e-12) ? num / Math.sqrt(refE * segE) : -1;
+          };
+          let bestD = 0, bestRaw = -1;
+          // Keep the frame's kept region [synPos, synPos+step) reading real
+          // input: aStar + step <= inLen. (Without this, a large TolW wrap
+          // near the tail would zero-pad whole final frames; the old code
+          // had the same class of edge, smaller.)
+          const maxD = inLen - (nat + step);
+          if (pEst > 0) {
+            // Walk: drift exactly, wrap by period multiples. TolW covers the
+            // wrap landing (fixed 5 ms Tol could never reach a ~600-sample
+            // common multiple — the walk pinned at the boundary instead).
+            const TolW = Math.max(Tol, Math.ceil(pEst + Math.abs(drift) + Tol / 2));
+            const m0 = Math.round(-dRaw / pEst);
+            let bestS = -Infinity, bestFloat = dRaw;
+            for (let m = m0 - 1; m <= m0 + 1; m++) {
+              const dc = dRaw + m * pEst;
+              if (dc < -TolW || dc > TolW) continue;
+              const d = Math.round(dc);
+              if (maxD >= 0 && d > maxD) continue;
+              const s = xcorr(d);
+              // Genuine raw win overrides; near-ties keep smaller |d|
+              // (headroom for future wraps).
+              if (s > bestS + 1e-4 || (Math.abs(s - bestS) <= 1e-4 && Math.abs(d) < Math.abs(bestD))) {
+                bestS = s; bestD = d; bestRaw = s; bestFloat = dc;
+              }
+            }
+            if (bestS === -Infinity) { bestD = Math.max(-TolW, Math.min(TolW, maxD >= 0 ? maxD : Math.round(dRaw))); bestFloat = bestD; }
+            // Fine refinement: snap to the sample-exact local xcorr peak.
+            // pEst comes from parabolic interpolation on a decimated grid,
+            // so it carries sub-sample error; applied at every wrap that
+            // error accumulates into a systematic pitch shift (measured:
+            // -0.5 Hz on 440 Hz at ratio 0.7, +0.6 Hz at 2.0). The local
+            // argmax is unbiased, and because it only searches ±16 around
+            // the walk's choice it cannot re-roll the period decision.
+            const R = 16;
+            let rd = bestD, rs = bestRaw;
+            for (let d = bestD - R; d <= bestD + R; d++) {
+              if (d === bestD || d < -TolW || d > TolW) continue;
+              if (maxD >= 0 && d > maxD) continue;
+              const s = xcorr(d);
+              if (s > rs) { rs = s; rd = d; }
+            }
+            bestD = rd; bestRaw = rs;
+            // Absorb the refinement into the walk so its delta does not
+            // accumulate as drift; the fractional walk phase is preserved.
+            prevD = bestFloat + (rd - Math.round(bestFloat));
+          } else {
+            // Aperiodic: classic full-range search, center-out so ties keep
+            // the offset near the previous walk position.
+            let bestScore = -Infinity;
+            const c = Math.max(-Tol, Math.min(Tol, Math.round(dRaw)));
+            const hiD = maxD >= 0 ? Math.min(Tol, maxD) : Tol;
+            for (let r = 0; r <= Tol; r++) {
+              for (let s = 0; s < 2; s++) {
+                const d = s === 0 ? c + r : c - r;
+                if (s === 1 && r === 0) continue;
+                if (d < -Tol || d > hiD) continue;
+                const sc = xcorr(d);
+                if (sc > bestScore) { bestScore = sc; bestD = d; bestRaw = sc; }
+              }
+              if (c + r >= hiD && c - r <= -Tol) break;
+            }
+            prevD = bestD;
           }
           aStar = nat + bestD;
+          if (dbg) { dbg.offsets[k] = bestD; dbg.scores[k] = bestRaw; dbg.pEst[k] = pEst; }
         }
         for (let c = 0; c < nCh; c++) {
           const x = chIn[c], y = chOut[c];

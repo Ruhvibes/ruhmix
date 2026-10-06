@@ -154,6 +154,9 @@
     <div class="row"><label>Speed <input type="range" id="ed-speed" min="50" max="200" value="100"></label><span id="ed-speed-v">1.00×</span></div>
     <div class="honest">Pitch changes with tempo (no independent pitch-shift in v1).</div>
     <button class="btn small tog" id="ed-loop">🔁 Loop</button>
+    <button class="btn small" id="ed-loop-set" title="Set loop region from the current selection">Set region</button>
+    <span id="ed-loop-region" class="mono" style="display:none"></span>
+    <label class="mono" title="How many times the loop region repeats in the exported file">×<select id="ed-loop-times"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select></label>
   </div>
   <div class="panel">
     <h4>Markers</h4>
@@ -613,6 +616,7 @@
 <script src="js/mashup-dsp.js"></script>
 <script src="js/mashup.js"></script>
 <script src="js/mashup-swap.js"></script>
+<script src="js/v27-sections.js"></script>
 <script src="js/mashup-mega.js"></script>
 <script src="js/mashup-arrange.js"></script>
 <script src="js/mashup-stems.js"></script>
@@ -633,5 +637,8 @@
 <script src="js/v25-export-ui.js"></script>
 <script src="js/v25-shell.js"></script>
 <script src="js/v26-mixdown.js"></script>
+<script src="js/v27-cleanup.js"></script>
+<script src="js/v27-downbeat.js"></script>
+<script src="js/v27-loop.js"></script>
 </body>
 </html>

@@ -226,7 +226,8 @@ RM.audio = (function () {
   }
 
   // 16-bit PCM stereo WAV. Chunked to avoid blocking on long mixes.
-  function encodeWavBuffer(buf, onProgress) {
+  // opts: {dither: true} — TPDF dither when reducing 32-bit float to 16-bit.
+  function encodeWavBuffer(buf, onProgress, opts) {
     const sr = buf.sampleRate, len = buf.length;
     const ch0 = buf.getChannelData(0);
     const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : ch0;
@@ -237,24 +238,52 @@ RM.audio = (function () {
     dv.setUint16(22, 2, true); dv.setUint32(24, sr, true);
     dv.setUint32(28, sr * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true);
     wstr(36, 'data'); dv.setUint32(40, len * 4, true);
+    const dRng = (opts && opts.dither) ? mulberry32(0xD17E) : null;
     return runChunked(len, 1 << 18, (a, b) => {
       for (let i = a; i < b; i++) {
-        dv.setInt16(44 + i * 4, clamp(ch0[i], -1, 1) * 0x7FFF, true);
-        dv.setInt16(44 + i * 4 + 2, clamp(ch1[i], -1, 1) * 0x7FFF, true);
+        dv.setInt16(44 + i * 4, quant16(ch0[i], dRng), true);
+        dv.setInt16(44 + i * 4 + 2, quant16(ch1[i], dRng), true);
       }
     }, onProgress).then(() => dv.buffer);
   }
 
+  // Deterministic PRNG (mulberry32) for TPDF dither: a fixed seed per call
+  // keeps chunked conversion reproducible across runs while the noise stays
+  // decorrelated sample-to-sample. (No crypto needed — this is audio dither.)
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Float (-1..1) -> int16 sample. opts.dither: TPDF dither (±1 LSB,
+  // triangular) + round instead of plain truncation — audibly cleaner fades
+  // and reverb tails when reducing 32-bit float to 16-bit. Default off
+  // (callers opt in) so non-export paths keep their exact old behavior.
+  function quant16(x, dRng) {
+    const c = clamp(x, -1, 1);
+    if (!dRng) return Math.trunc(c * 0x7FFF);
+    const tpdf = (dRng() + dRng() - 1); // triangular in [-1, 1) LSB
+    const v = Math.round(c * 32768 + tpdf);
+    return v < -32768 ? -32768 : v > 32767 ? 32767 : v;
+  }
+
   // Float -> Int16 (for lamejs), chunked. Returns {left, right} Int16Arrays.
-  function floatToInt16(buf, onProgress) {
+  // opts: {dither: true} — TPDF dither when reducing bit depth (export).
+  function floatToInt16(buf, onProgress, opts) {
     const len = buf.length;
     const ch0 = buf.getChannelData(0);
     const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : ch0;
     const left = new Int16Array(len), right = new Int16Array(len);
+    const dRng = (opts && opts.dither) ? mulberry32(0xD17E) : null;
     return runChunked(len, 1 << 18, (a, b) => {
       for (let i = a; i < b; i++) {
-        left[i] = clamp(ch0[i], -1, 1) * 0x7FFF;
-        right[i] = clamp(ch1[i], -1, 1) * 0x7FFF;
+        left[i] = quant16(ch0[i], dRng);
+        right[i] = quant16(ch1[i], dRng);
       }
     }, onProgress).then(() => ({ left, right }));
   }
@@ -344,9 +373,16 @@ RM.audio = (function () {
       // Loop-range refresh: if loop is ON and a new (shorter/longer) buffer
       // arrives, the old loopEnd goes stale — the audio wraps at the buffer
       // duration but position() keeps counting to the old loopEnd (playhead
-      // drift). Loop always covers the whole buffer (no custom range in the
-      // UI), so sync the range on load.
-      if (p.loop && buffer) { p.loopStart = 0; p.loopEnd = buffer.duration; }
+      // drift). With no custom region the loop covers the whole buffer.
+      // v27 W3: a custom loop region (set via setLoop) is KEPT and clamped
+      // to the new buffer instead of being silently reset to whole-buffer.
+      if (p.loop && buffer) {
+        if (p.loopEnd > p.loopStart) {
+          p.loopStart = clamp(p.loopStart, 0, buffer.duration);
+          p.loopEnd = clamp(p.loopEnd, p.loopStart, buffer.duration);
+          if (!(p.loopEnd > p.loopStart)) { p.loopStart = 0; p.loopEnd = buffer.duration; }
+        } else { p.loopStart = 0; p.loopEnd = buffer.duration; }
+      }
     };
     p.play = (fromSec) => {
       if (!p.buffer) return false;

@@ -717,6 +717,26 @@ __rmRoot.RM = __rmRoot.RM || {};
     if (!RM.v25mix || typeof RM.v25mix.buildTransition !== 'function') { say('Transition engine not loaded'); return; }
     var at = 0;
     for (var i = 0; i <= ji; i++) at += secs[i].lenSec;
+    // v27: ONE clean hook — snap the transition start to the nearest
+    // ESTIMATED downbeat, but only when the estimate is trustworthy
+    // (confidence ≥ 0.6). snapTransitionTime is async (analysis is cached
+    // per buffer); on any failure the original junction time passes
+    // through untouched — a wrong snap is worse than no snap.
+    var proceed = function (snap) {
+      if (snap && snap.snapped) at = snap.time;
+      finishTransitionAt(fx, ji, type, bars, at, snap);
+    };
+    try {
+      if (RM.v27downbeat && typeof RM.v27downbeat.snapTransitionTime === 'function') {
+        say('Estimating downbeats…');
+        RM.v27downbeat.snapTransitionTime(fx.cur(), at, { bpm: fx.bpm() }).then(proceed, function () { proceed(null); });
+      } else proceed(null);
+    } catch (e) { proceed(null); }
+  }
+
+  // Continuation of applyTransitionUI after the (async) downbeat snap.
+  // `snap`: null | { time, snapped, alreadyAligned, confidence }.
+  function finishTransitionAt(fx, ji, type, bars, at, snap) {
     var sr = fx.cur().sampleRate;
     var juncSample = Math.round(at * sr);
     var desc;
@@ -763,7 +783,8 @@ __rmRoot.RM = __rmRoot.RM || {};
       function () { restore(pre); }, function () { restore(post); });
     say(tname + ' applied at ' + fmtTime(at) + ' \u2713 (beat-synced to ' +
       (Math.round(fx.bpm() * 10) / 10) + ' BPM' +
-      (desc.bars !== bars ? ', ' + desc.bars + ' bars (engine snap)' : '') + ')');
+      (desc.bars !== bars ? ', ' + desc.bars + ' bars (engine snap)' : '') +
+      (snap && snap.snapped ? '; snapped to estimated downbeat' : '') + ')');
     refreshPanel();
   }
 

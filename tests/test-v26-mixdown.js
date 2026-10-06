@@ -229,6 +229,7 @@ function no(name, detail) { fail++; console.log('FAIL', name, detail ? ' — ' +
     document.querySelector('input[name="expfmt"][value="wav"]').checked = true;
     document.getElementById('exp-normalize').checked = false; // isolate mastering effect
     RM.exp.deliver = (blob) => { window.__t26out = blob; return Promise.resolve({ method: 'test', name: 't26.wav' }); };
+    document.getElementById('exp-copyright-ack').checked = true; // v26 §25: mandatory ack — real user flow
     document.getElementById('exp-start').click();
     await new Promise((res, rej) => {
       const t0 = Date.now();

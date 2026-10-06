@@ -107,12 +107,23 @@ RM.wave = (function () {
         const bw = Math.max(1, (W / (c1 - c0 + 1)) * 0.7);
         g.fillRect(x - bw / 2, (H - h) / 2, bw, h);
       }
-      // markers
+      // markers (v27: style:'uncertain' markers render dashed + dim —
+      // the downbeat estimate was not confident, never fake it solid)
       view.markers.forEach((m) => {
         if (m.t < wA || m.t > wB) return;
         const x = ((m.t - wA) / (wB - wA)) * W;
-        g.fillStyle = m.color || '#ffd54a';
-        g.fillRect(x - 1, 0, 2, H * 0.28);
+        if (m.style === 'uncertain') {
+          g.save();
+          g.globalAlpha = 0.55;
+          g.strokeStyle = m.color || '#c98f4e';
+          g.lineWidth = 2;
+          g.setLineDash([5, 4]);
+          g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H * 0.28); g.stroke();
+          g.restore();
+        } else {
+          g.fillStyle = m.color || '#ffd54a';
+          g.fillRect(x - 1, 0, 2, H * 0.28);
+        }
       });
       // playhead
       if (view.playheadSec >= 0 && view.playheadSec >= wA && view.playheadSec <= wB) {

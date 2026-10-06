@@ -74,9 +74,16 @@ RM.v25exportui = (function () {
     return fmt === 'mp3' ? 'MP3' : fmt === 'wav' ? 'WAV' : 'FLAC';
   }
   function qualityLabel(fmt, kbps) {
-    if (fmt === 'mp3') return 'MP3 · ' + kbps + ' kbps · Good quality, small file';
-    if (fmt === 'wav') return 'WAV · 16-bit PCM · Best quality, larger file';
-    return 'FLAC · Lossless · Best quality, smaller than WAV';
+    if (fmt === 'mp3') {
+      // v27 W4: honest per-bitrate labels (lamejs encodes all four rates).
+      var q = kbps >= 320 ? 'Best MP3 quality, larger file'
+        : kbps >= 256 ? 'High quality'
+        : kbps >= 192 ? 'Good quality, small file'
+        : 'Compact file, basic quality';
+      return 'MP3 · ' + kbps + ' kbps · ' + q;
+    }
+    if (fmt === 'wav') return 'WAV · 16-bit PCM, TPDF dithered · Best quality, larger file';
+    return 'FLAC · Lossless, TPDF dithered · Best quality, smaller than WAV';
   }
   function estimateSize(fmt, seconds, kbps, sampleRate, channels) {
     seconds = Math.max(0, seconds || 0);
@@ -133,10 +140,24 @@ RM.v25exportui = (function () {
   function defaultDeps() {
     return {
       resample: function (b, sr, p) { return RM.audio.resampleBuffer(b, sr, p); },
-      floatToInt16: function (b, p) { return RM.audio.floatToInt16(b, p); },
+      floatToInt16: function (b, p, o) { return RM.audio.floatToInt16(b, p, o); },
       encodeMp3: function (i16, kbps, sr, p, t) { return RM.exp.encodeMp3(i16, kbps, sr, p, t); },
       encodeFlac: function (i16, sr, p, t) { return RM.exp.encodeFlac(i16, sr, p, t); },
-      encodeWav: function (b, p) { return RM.audio.encodeWavBuffer(b, p); },
+      encodeWav: function (b, p, o) { return RM.audio.encodeWavBuffer(b, p, o); },
+      // v27 W4: post-resample true-peak guard. Cubic resample interpolation
+      // can overshoot past +/-1 (QC ran pre-resample, so it never saw it) --
+      // without this the float->int16 clamp would clip SILENTLY. The limiter
+      // is bit-transparent below the -3 dBTP ceiling (gain stays exactly 1.0).
+      // canMutate=false -> works on a copy, never touching the caller's buffer.
+      limit: function (b, p, canMutate) {
+        if (!(window.RM && RM.v25qc && typeof RM.v25qc.applyTruePeakLimiter === 'function')) {
+          return Promise.resolve(b);
+        }
+        var work = canMutate ? Promise.resolve(b) : RM.v25qc.copyBuffer(b);
+        return work.then(function (c) {
+          return RM.v25qc.applyTruePeakLimiter(c, p).then(function () { return c; });
+        });
+      },
       deliver: function (blob, name, mime, p) { return RM.exp.deliver(blob, name, mime, p); },
     };
   }
@@ -159,13 +180,22 @@ RM.v25exportui = (function () {
     var passIfAlive = function (v) { if (cancelled()) throw new Error('cancelled'); return v; };
 
     var encodeP;
+    // v27 W4: custom test deps may not provide `limit` (older stubs) -- the
+    // guard is then a pass-through; real deps always provide it.
+    var limitFn = (deps && typeof deps.limit === 'function')
+      ? function (b, p, canMutate) { return deps.limit(b, p, canMutate); }
+      : function (b) { return Promise.resolve(b); };
+    // v27 W4: TPDF dither whenever 32-bit float is reduced to 16-bit.
+    var DITHER = { dither: true };
     if (fmt === 'mp3') {
       prog(0.02, 'Resampling…');
       encodeP = Promise.resolve()
         .then(passIfAlive)
-        .then(function () { return deps.resample(buffer, sr, function (p) { prog(0.02 + p * 0.15, 'Resampling… ' + Math.round(p * 100) + '%'); }); })
+        .then(function () { return deps.resample(buffer, sr, function (p) { prog(0.02 + p * 0.13, 'Resampling… ' + Math.round(p * 100) + '%'); }); })
         .then(passIfAlive)
-        .then(function (rs) { return deps.floatToInt16(rs, function (p) { prog(0.17 + p * 0.1, 'Preparing… ' + Math.round(p * 100) + '%'); }); })
+        .then(function (rs) { return limitFn(rs, function (p) { prog(0.15 + p * 0.04, 'Peak guard… ' + Math.round(p * 100) + '%'); }, rs !== buffer); })
+        .then(passIfAlive)
+        .then(function (rs) { return deps.floatToInt16(rs, function (p) { prog(0.19 + p * 0.08, 'Preparing… ' + Math.round(p * 100) + '%'); }, DITHER); })
         .then(passIfAlive)
         .then(function (i16) {
           prog(0.27, 'Encoding MP3…');
@@ -175,9 +205,11 @@ RM.v25exportui = (function () {
       prog(0.02, 'Resampling…');
       encodeP = Promise.resolve()
         .then(passIfAlive)
-        .then(function () { return deps.resample(buffer, sr, function (p) { prog(0.02 + p * 0.13, 'Resampling… ' + Math.round(p * 100) + '%'); }); })
+        .then(function () { return deps.resample(buffer, sr, function (p) { prog(0.02 + p * 0.11, 'Resampling… ' + Math.round(p * 100) + '%'); }); })
         .then(passIfAlive)
-        .then(function (rs) { return deps.floatToInt16(rs, function (p) { prog(0.15 + p * 0.1, 'Preparing… ' + Math.round(p * 100) + '%'); }); })
+        .then(function (rs) { return limitFn(rs, function (p) { prog(0.13 + p * 0.04, 'Peak guard… ' + Math.round(p * 100) + '%'); }, rs !== buffer); })
+        .then(passIfAlive)
+        .then(function (rs) { return deps.floatToInt16(rs, function (p) { prog(0.17 + p * 0.08, 'Preparing… ' + Math.round(p * 100) + '%'); }, DITHER); })
         .then(passIfAlive)
         .then(function (i16) {
           prog(0.25, 'Encoding FLAC…');
@@ -187,7 +219,7 @@ RM.v25exportui = (function () {
       prog(0.05, 'Encoding WAV…');
       encodeP = Promise.resolve()
         .then(passIfAlive)
-        .then(function () { return deps.encodeWav(buffer, function (p) { prog(0.05 + p * 0.77, 'Encoding WAV… ' + Math.round(p * 100) + '%'); }); })
+        .then(function () { return deps.encodeWav(buffer, function (p) { prog(0.05 + p * 0.77, 'Encoding WAV… ' + Math.round(p * 100) + '%'); }, DITHER); })
         .then(function (ab) { return new Blob([ab], { type: mime }); });
     }
 
@@ -305,6 +337,9 @@ RM.v25exportui = (function () {
       return '<div style="border-left:3px solid ' + col + ';padding:6px 8px;margin:6px 0;background:#ffffff06;border-radius:0 8px 8px 0;">' +
         '<div style="font-size:13.5px;font-weight:700;color:' + col + ';">' + esc(x.issue) + badge + '</div>' +
         (x.detail ? '<div style="font-size:12.5px;color:#9aa7b2;margin-top:2px;">' + esc(x.detail) + '</div>' : '') +
+        (x.autoFixable && x.fixDesc
+          ? '<div style="font-size:12.5px;color:#b8e6c3;margin-top:3px;">💡 One-tap fix: ' + esc(x.fixDesc) + ' <span style="color:#9aa7b2;">(tap “Fix Issues” below)</span></div>'
+          : '') +
         '</div>';
     }).join('');
     fixBtn.style.display = issues.some(function (x) { return x.autoFixable; }) ? '' : 'none';
@@ -315,7 +350,7 @@ RM.v25exportui = (function () {
   var SKIP_LABELS = {
     'bpm-mismatch': 'BPM match', 'key-mismatch': 'Key match',
     'vocal-overlap': 'Vocal overlap', 'click': 'Transition clicks',
-    'timing-drift': 'Timing drift',
+    'timing-drift': 'Timing drift', 'sep-quality': 'Separation quality',
   };
   function renderQcSkips(skipsBox, result) {
     if (!skipsBox) return;

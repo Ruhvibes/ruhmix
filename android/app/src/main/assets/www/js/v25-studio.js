@@ -105,7 +105,7 @@ __rmRoot.RM = __rmRoot.RM || {};
 '      <button class="btn small" id="stu-redo" aria-label="Redo">\u21AA Redo</button>' +
 '      <button class="btn small" id="stu-copy" aria-label="Copy selected section">\u29C9 Copy</button>' +
 '      <button class="btn small" id="stu-paste" aria-label="Paste copied section after selection">\uD83D\uDCCB Paste</button>' +
-'      <button class="btn small" id="stu-snap" aria-label="Toggle beat snap">\uD83E\uDDF2 Snap: On</button>' +
+'      <button class="btn small" id="stu-snap" aria-label="Toggle snap: off, bar, beat">\uD83E\uDDF2 Snap: Bar</button>' +
 '    </div>' +
 '    <div id="stu-sections" class="stu-strip"></div>' +
 '    <div id="stu-selinfo" class="stu-selinfo">Tap a section above to edit it.</div>' +
@@ -179,11 +179,13 @@ __rmRoot.RM = __rmRoot.RM || {};
     sel: -1,          // selected section index
     busy: false,
     snap: true,       // I2: beat/bar snap for split + drag-drop targets
+    snapRes: 'bar',   // v27 W3: snap grid resolution — 'bar' | 'beat' (button cycles Off→Bar→Beat)
     undo: [],         // I2: command stack (cap 50)
     redo: [],         // I2: redo stack
     clip: null,       // I2: studio clipboard {buf, meta}
     _suppressClick: false, // I2: skip tap-select right after a drag
     zoom: 1,
+    _downbeat: null, // v27: cached downbeat analysis for st.current (null until analyzed)
     _wired: false, _hook: null, _keywired: false,
     _idc: 0,
   };
@@ -429,6 +431,13 @@ __rmRoot.RM = __rmRoot.RM || {};
     bits.push(Math.round(st.bpm * 10) / 10 + ' BPM');
     bits.push(fmtTime(st.current ? st.current.duration : 0));
     if (st.engine) bits.push(st.engine);
+    // v27: honest downbeat status — "downbeats uncertain" when the
+    // estimate is not trustworthy, never a fake-confident label.
+    if (st._downbeat) {
+      var db = st._downbeat;
+      bits.push(db.uncertain || !db.downbeats.length ? 'Downbeats uncertain'
+        : 'Downbeats: estimated (' + Math.round(db.confidence * 100) + '%)');
+    }
     el.textContent = bits.join(' • ');
   }
 
@@ -488,6 +497,22 @@ __rmRoot.RM = __rmRoot.RM || {};
       waveView.setScroll(sc ? (+sc.value) / 1000 : 0);
       waveView.setPlayhead(tp.playing ? playheadNow() : tp.offset);
       waveView.draw();
+      // v27: downbeat tier (async, cached per buffer — never blocks the
+      // wave draw). Confident estimates get solid orange ticks; uncertain
+      // ones render dashed via the 'uncertain' marker style, and the meta
+      // line prints "Downbeats uncertain".
+      if (RM.v27downbeat && typeof RM.v27downbeat.analyze === 'function') {
+        RM.v27downbeat.analyze(buf, { bpm: st.bpm }).then(function (an) {
+          if (st.current !== buf) return; // superseded
+          st._downbeat = an;
+          try {
+            waveView.setMarkers(barBeatMarkers().concat(
+              RM.v27downbeat.buildDownbeatMarkers(an, buf.duration)));
+            waveView.draw();
+          } catch (e) {}
+          renderMeta();
+        }, function () { /* analysis failed: bar/beat markers stay */ });
+      }
     });
   }
 
@@ -706,6 +731,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     if (!nb) return false;
     try { RM.wave.dropPeaks(st.current); } catch (e) {}
     st.current = nb;
+    st._downbeat = null; // v27: audio changed — downbeats re-analyze on next wave draw
     if (!keepSections) { /* sections already updated by caller */ }
     tp.offset = clamp(tp.offset, 0, nb.duration);
     renderAll();
@@ -831,14 +857,19 @@ __rmRoot.RM = __rmRoot.RM || {};
       p.title = st.clip ? 'Paste "' + st.clip.meta.name + '" after the selected section' : 'Copy a section first';
     }
     if (sn) {
-      sn.textContent = '\uD83E\uDDF2 Snap: ' + (st.snap ? 'On' : 'Off');
+      sn.textContent = '\uD83E\uDDF2 Snap: ' + (!st.snap ? 'Off' : (st.snapRes === 'beat' ? 'Beat' : 'Bar'));
       try { sn.classList.toggle('primary', !!st.snap); } catch (e) {}
     }
   }
   function toggleSnap() {
-    st.snap = !st.snap;
+    // v27 W3: one button cycles Off → Bar → Beat → Off (no extra UI).
+    if (!st.snap) { st.snap = true; st.snapRes = 'bar'; }
+    else if (st.snapRes === 'bar') { st.snapRes = 'beat'; }
+    else { st.snap = false; }
     updateUndoUI();
-    toast(st.snap ? 'Snap on: splits & drops quantize to bar lines \uD83E\uDDF2' : 'Snap off: free positioning');
+    toast(!st.snap ? 'Snap off: free positioning'
+      : st.snapRes === 'beat' ? 'Snap on: splits & drops quantize to the BEAT grid \uD83E\uDDF2'
+      : 'Snap on: splits & drops quantize to bar lines \uD83E\uDDF2');
   }
 
   // Nearest bar line (bar = 240/st.bpm s, from the REAL detected bpm).
@@ -847,10 +878,30 @@ __rmRoot.RM = __rmRoot.RM || {};
     if (!(bar > 0) || !st.current) return t;
     return clamp(Math.round(t / bar) * bar, 0, st.current.duration);
   }
-  // Insertion index (into a lens array) whose boundary is nearest the
-  // bar-quantized drop time — drag-drop targets snap to bar boundaries.
-  function snapInsertIndex(lens, j) {
+  // Nearest BEAT line (beat = bar/4). Bar lines are stronger magnets: within
+  // half a beat of a bar line the bar wins, so a drop near a boundary
+  // quantizes to the bar instead of wobbling to the adjacent beat.
+  // "Sensible near boundaries" = the magnet radius is bounded (half a beat).
+  function snapToBeat(t) {
     var bar = st.barSec;
+    if (!(bar > 0) || !st.current) return t;
+    var beat = bar / 4;
+    var barQ = Math.round(t / bar) * bar;
+    var q = (Math.abs(t - barQ) <= beat / 2 + 1e-9) ? barQ
+      : Math.round(t / beat) * beat;
+    return clamp(q, 0, st.current.duration);
+  }
+  // The ONE quantizer every time-based clip position goes through when snap
+  // is on. 'bar' = legacy behavior, 'beat' = finer grid.
+  function snapTime(t) {
+    if (!st.snap || !st.current) return t;
+    return st.snapRes === 'beat' ? snapToBeat(t) : snapToBar(t);
+  }
+  // Insertion index (into a lens array) whose boundary is nearest the
+  // grid-quantized drop time — drag-drop targets snap to grid boundaries.
+  // grid: seconds per grid line (defaults to the bar; beat mode passes bar/4).
+  function snapInsertIndex(lens, j, grid) {
+    var bar = (grid > 0) ? grid : st.barSec;
     if (!(bar > 0)) return j;
     var cum = [0], k;
     for (k = 0; k < lens.length; k++) cum.push(cum[k] + lens[k]);
@@ -934,16 +985,17 @@ __rmRoot.RM = __rmRoot.RM || {};
   }
 
   // Split selected section at the playhead (or its midpoint). With snap ON
-  // the split point quantizes to the nearest bar line.
+  // the split point quantizes to the snap grid (bar lines in bar mode,
+  // beat lines in beat mode — v27 W3).
   function splitSection() {
     var s = needSel(); if (!s || st.busy) return false;
     var i = st.sel, bd = bounds();
     var at = tp.playing ? playheadNow() : tp.offset;
     var rel = (at > bd[i].a + 0.1 && at < bd[i].b - 0.1) ? at - bd[i].a : s.lenSec / 2;
     if (st.snap && st.current) {
-      var sq = snapToBar(bd[i].a + rel) - bd[i].a;
+      var sq = snapTime(bd[i].a + rel) - bd[i].a;
       if (sq > 0.1 && sq < s.lenSec - 0.1) rel = sq;
-      // else: keep the unsnapped position (section shorter than a bar)
+      // else: keep the unsnapped position (section shorter than the grid)
     }
     return splitSectionAt(i, rel);
   }
@@ -1216,7 +1268,7 @@ __rmRoot.RM = __rmRoot.RM || {};
 
   // Commit a drag: move section d to insertion index j (j counts positions in
   // the section array WITHOUT the dragged section). With snap ON, j snaps to
-  // the nearest bar-boundary slot. Model + buffer both update via one 'perm'
+  // the nearest grid-boundary slot (bar or beat, per snapRes). Model + buffer both update via one 'perm'
   // undo command, so the rendered waveform AND the exported audio change.
   function dragCommit(d, j) {
     var n = st.sections.length;
@@ -1224,7 +1276,11 @@ __rmRoot.RM = __rmRoot.RM || {};
     var rest = st.sections.slice();
     var mv = rest.splice(d, 1)[0];
     j = clamp(Math.round(j), 0, rest.length);
-    if (st.snap) j = snapInsertIndex(rest.map(function (x) { return x.lenSec; }), j);
+    // v27 W3: with snap ON, j snaps to the nearest grid-boundary slot —
+    // bar grid in bar mode, beat grid in beat mode. Model + buffer both
+    // update via one 'perm' command, so preview and export both change.
+    if (st.snap) j = snapInsertIndex(rest.map(function (x) { return x.lenSec; }), j,
+      st.snapRes === 'beat' ? st.barSec / 4 : st.barSec);
     j = clamp(j, 0, rest.length);
     rest.splice(j, 0, mv);
     var newIds = rest.map(function (x) { return x.id; });
@@ -1656,6 +1712,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     st.stems = null; st.laneUI = {}; laneViews = {};
     st.ab = 'B'; st.sel = -1; tp.offset = 0; st.zoom = 1;
     st._suppressClick = false;
+    st._downbeat = null; // v27: new audio — downbeats re-analyze on next wave draw
     clearUndo(); st.clip = null; // I2: rebuild = new baseline
     var sc = $('stu-scroll'); if (sc) sc.value = '0';
     renderAll();
@@ -1726,6 +1783,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     st.stems = null; st.laneUI = {}; laneViews = {};
     st.ab = 'B'; st.sel = -1; tp.offset = 0; st.zoom = 1; st.busy = false;
     st._suppressClick = false;
+    st._downbeat = null; // v27: new audio — downbeats re-analyze on next wave draw
     clearUndo(); st.clip = null; // I2: new baseline — history + clipboard reset
     var sc = $('stu-scroll'); if (sc) sc.value = '0';
     renderStudio();
@@ -1890,7 +1948,8 @@ __rmRoot.RM = __rmRoot.RM || {};
       cur:function(){return st.current;}, bpm:function(){return st.bpm;}, secs:function(){return st.sections;},
       auto:function(){return st.automation||null;}, setAuto:function(p){st.automation=p||null;},
       apply:function(nb,o){o=o||{};var ob=st.current,od=ob?ob.duration:0,i;try{RM.wave.dropPeaks(ob);}catch(e){}
-        st.current=nb;if(o.bpm){st.bpm=o.bpm;st.barSec=240/o.bpm;}
+        st.current=nb;st._downbeat=null; // v27: audio changed — downbeats re-analyze
+        if(o.bpm){st.bpm=o.bpm;st.barSec=240/o.bpm;}
         if(o.sections){for(i=0;i<st.sections.length&&i<o.sections.length;i++)st.sections[i].lenSec=o.sections[i];}
         else if(o.rescale&&od>0){var r=nb.duration/od;for(i=0;i<st.sections.length;i++)st.sections[i].lenSec*=r;}
         if('automation'in o)st.automation=o.automation;try{tp.offset=Math.min(tp.offset,nb.duration);}catch(e){} renderAll();},
@@ -1916,7 +1975,8 @@ __rmRoot.RM = __rmRoot.RM || {};
       moveSection: moveSection, nudgeSection: nudgeSection, trimSection: trimSection,
       applySectionEditCore: applySectionEditCore,
       copySection: copySection, pasteSection: pasteSection,
-      dragCommit: dragCommit, snapToBar: snapToBar, snapInsertIndex: snapInsertIndex,
+      dragCommit: dragCommit, snapToBar: snapToBar, snapToBeat: snapToBeat,
+      snapTime: snapTime, snapInsertIndex: snapInsertIndex,
       toggleSnap: toggleSnap,
       doUndo: doUndo, doRedo: doRedo, clearUndo: clearUndo,
       doExport: doExport,

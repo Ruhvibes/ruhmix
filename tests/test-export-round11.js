@@ -12,7 +12,7 @@
  * Exit 0 = all pass.
  */
 'use strict';
-const puppeteer = require('/tmp/smoke/node_modules/puppeteer');
+const puppeteer = require('/home/hatch/workspace/smoke/node_modules/puppeteer');
 
 const EXE = '/home/hatch/.cache/puppeteer/chrome-headless-shell/chrome-headless-shell-linux64/chrome-headless-shell';
 const INDEX = 'file:///home/hatch/workspace/ruhmix/www/index.html';
@@ -124,6 +124,8 @@ const waitFor = async (page, fn, timeout, what) => {
     await waitFor(page, 'document.querySelector("#screen-export").classList.contains("active")', 10000, 'export-screen');
     // Chhota export: WAV (tez), sample rate default.
     await page.evaluate(() => { document.getElementById('exp-format-wav').click(); });
+    // v26 §25: copyright checkbox mandatory before export (else doExport returns early).
+    await page.evaluate(() => { document.getElementById('exp-copyright-ack').checked = true; });
     await page.evaluate(() => { document.getElementById('exp-start').click(); });
     await waitFor(page, 'document.getElementById("exp-status").textContent.indexOf("Done") >= 0 || document.getElementById("exp-status").textContent.indexOf("Failed") >= 0', 120000, 'export-done');
     const status = await page.evaluate(() => document.getElementById('exp-status').textContent);

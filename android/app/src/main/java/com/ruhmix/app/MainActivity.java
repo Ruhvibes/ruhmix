@@ -432,6 +432,9 @@ public class MainActivity extends ComponentActivity {
 
         setContentView(webView);
         webView.loadUrl("file:///android_asset/www/index.html");
+        // v27 W5: prune stale temp files (share/, rec/) on every app start.
+        // Age-gated at 7 days; never touches projects, Music/RuhMix or imports/.
+        pruneTempCacheAsync(false);
     }
 
     @Override
@@ -937,6 +940,9 @@ public class MainActivity extends ComponentActivity {
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(Intent.createChooser(i, "Share via"));
+            // v27 W5: prune stale temp files left from earlier shares/exports
+            // (age-gated at 7 days — the just-shared file is never removed).
+            pruneTempCacheAsync(false);
         } catch (Exception e) {
             Toast.makeText(this, "Could not share the file", Toast.LENGTH_LONG).show();
         }
@@ -1007,6 +1013,65 @@ public class MainActivity extends ComponentActivity {
             }
         }
         return freed;
+    }
+
+    /**
+     * v27 W5 — Storage cleanup: prune temp files left in getCacheDir().
+     *
+     * Only the dedicated temp subdirs are visited: share/ (export/share
+     * staging written by saveFile) and rec/ (mic recordings). With
+     * includeImports=true the imports/ dir (picked-song copies) is also
+     * visited — used only by the explicit manual "Clear Cache".
+     *
+     * NEVER touched: the root cache dir's other files, the app bundle,
+     * the public Music/RuhMix library (MediaStore), the keystore, or user
+     * projects (those live in WebView localStorage, not here).
+     *
+     * Conservative rules: files only (never recurses into subdirs),
+     * and only files whose lastModified() is older than maxAgeMs —
+     * a just-shared or just-recorded file is never removed.
+     *
+     * @return bytes freed.
+     */
+    private long pruneTempCache(long maxAgeMs, boolean includeImports) {
+        long freed = 0;
+        long cutoff = System.currentTimeMillis() - maxAgeMs;
+        File cache = getApplicationContext().getCacheDir();
+        String[] dirs = includeImports
+                ? new String[]{"share", "rec", "imports"}
+                : new String[]{"share", "rec"};
+        for (String d : dirs) {
+            freed += pruneOlderThan(new File(cache, d), cutoff);
+        }
+        return freed;
+    }
+
+    private long pruneOlderThan(File dir, long cutoff) {
+        long freed = 0;
+        if (dir == null || !dir.isDirectory()) return 0;
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        for (File f : files) {
+            if (f.isDirectory()) continue; // never recurse into unknown subdirs
+            try {
+                if (f.lastModified() < cutoff) {
+                    freed += f.length();
+                    f.delete();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return freed;
+    }
+
+    /** v27 W5: prune on a worker thread so we never block the UI thread. */
+    private void pruneTempCacheAsync(boolean includeImports) {
+        new Thread(() -> {
+            try {
+                pruneTempCache(7L * 24 * 60 * 60 * 1000, includeImports);
+            } catch (Exception ignored) {
+            }
+        }).start();
     }
 
     /**
@@ -1343,6 +1408,9 @@ public class MainActivity extends ComponentActivity {
                     i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     startActivity(Intent.createChooser(i, "Share via"));
+                    // v27 W5: prune stale temp files left from earlier shares/exports
+                    // (age-gated at 7 days — the just-shared file is never removed).
+                    pruneTempCacheAsync(false);
                 } catch (Exception e) {
                     Toast.makeText(getApplicationContext(), "Could not share the file", Toast.LENGTH_LONG).show();
                 }
@@ -1362,6 +1430,17 @@ public class MainActivity extends ComponentActivity {
         @JavascriptInterface
         public long clearCache() {
             return clearCacheDir(getApplicationContext().getCacheDir());
+        }
+
+        /**
+         * v27 W5 — Storage cleanup. Deletes temp files older than 7 days from
+         * getCacheDir()/share/ and getCacheDir()/rec/ (and getCacheDir()/imports/
+         * when includeImports is true — manual clear only). Never touches
+         * projects, Music/RuhMix exports, or the keystore. Returns bytes freed.
+         */
+        @JavascriptInterface
+        public long cleanupOldTempFiles(boolean includeImports) {
+            return pruneTempCache(7L * 24 * 60 * 60 * 1000, includeImports);
         }
 
         @JavascriptInterface

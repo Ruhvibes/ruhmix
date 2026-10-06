@@ -45,6 +45,7 @@ RM.proj = (function () {
   function blankSettings() {
     return {
       speed: 1.0, volume: 0.9, pan: 0, loop: false,
+      loopRegion: null,    // v27 W3: {inSec, outSec, times} — RM.v27loop mirrors it
       fx: null,            // RM.fx preset object
       remixStyle: null,
       slowed: null,        // slowed+reverb studio settings

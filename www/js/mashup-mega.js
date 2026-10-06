@@ -184,13 +184,22 @@ RM.mashupMega = (function () {
      keeping whole 4-minute vocals for 8 songs would blow phone memory,
      so each stretched/key-matched vocal is trimmed to what the timeline
      needs (+1 bar slack). Silent tail padding if the vocal is shorter. */
-  function trimToBars(vocal, sampleRate, bpm, bars) {
+  function trimToBars(vocal, sampleRate, bpm, bars, startBars) {
     var needLen = Math.max(1, Math.round(bars * (240 / bpm) * sampleRate));
     if (vocal.length <= needLen) return vocal;
+    // v27 W2: optional start offset (bars) — the vocal slot starts at the
+    // detected hook instead of bar 0. Clamped so the full `bars` window
+    // still fits inside the vocal; never shortens the segment.
+    var barLen = Math.max(1, Math.round((240 / bpm) * sampleRate));
+    var start = 0;
+    if (isFinite(Number(startBars)) && Number(startBars) > 0) {
+      var maxStart = Math.floor((vocal.length - needLen) / barLen);
+      start = Math.max(0, Math.min(Math.round(Number(startBars)), Math.max(0, maxStart)));
+    }
     var ctx = RM.audio.ensureCtx();
     var out = ctx.createBuffer(vocal.numberOfChannels, needLen, sampleRate);
     for (var c = 0; c < vocal.numberOfChannels; c++) {
-      out.getChannelData(c).set(vocal.getChannelData(c).subarray(0, needLen));
+      out.getChannelData(c).set(vocal.getChannelData(c).subarray(start * barLen, start * barLen + needLen));
     }
     return out;
   }
@@ -365,10 +374,28 @@ RM.mashupMega = (function () {
       // v26: QC meta — songs 2..N are stretched onto the master grid (the
       // bpm-mismatch scan skips stretched songs); song 1 IS the master.
       qcSongs.push({ name: entry.name, bpm: Math.round(bpm * 100) / 100, key: qcKeyStr(keyRes), stretched: i > 0 });
+      // v27 W2: content-aware vocal-slot source — prefer the detected
+      // high-energy passage ("likely hook", DSP heuristic) as the slot
+      // source when its confidence ≥ threshold; otherwise start at bar 0
+      // exactly as before. Wrapped defensively: detection never fails
+      // the build.
+      var slotStartBar = 0, slotSource = 'bar-0';
+      try {
+        var vs27 = (typeof RM !== 'undefined') ? RM.v27sections : null;
+        if (vs27 && typeof vs27.detectSections === 'function' &&
+            typeof vs27.hookStartBar === 'function') {
+          prog(onProgress, songLabel + ': finding energetic passages (DSP)…', base + span * 0.94);
+          var det27 = vs27.detectSections(vocal, masterBpm);
+          if (det27 && !det27.fallback) {
+            var hb = vs27.hookStartBar(det27.sections, vs27.HOOK_CONF_THRESHOLD);
+            if (hb > 0) { slotStartBar = hb; slotSource = 'dsp-hook@bar' + hb; }
+          }
+        }
+      } catch (e) { slotStartBar = 0; slotSource = 'bar-0'; }
       // Trim to the bars the arrangement needs (memory: 8 full vocals
       // would be ~700 MB on a phone; trimmed segments are ~15 MB each).
-      vocal = trimToBars(vocal, sampleRate, masterBpm, cycles * BARS_PER_VOCAL + 1);
-      vocalSegs.push({ buffer: vocal, name: entry.name, index: i });
+      vocal = trimToBars(vocal, sampleRate, masterBpm, cycles * BARS_PER_VOCAL + 1, slotStartBar);
+      vocalSegs.push({ buffer: vocal, name: entry.name, index: i, slotSource: slotSource });
       prog(onProgress, songLabel + ': ready ✓', base + span);
       throwIfCancelled();
       await tick(); // let the UI paint between songs
@@ -461,6 +488,9 @@ RM.mashupMega = (function () {
       cycles: cycles,
       totalBars: totalBars,
       vocalOrder: Array.from({ length: cycles * N }, function (_, k) { return k % N; }),
+      // v27 W2: per-song vocal-slot source — 'bar-0' or 'dsp-hook@barN'
+      // (content-aware section detection, DSP heuristic — not AI).
+      slotSources: vocalSegs.map(function (v) { return v.slotSource || 'bar-0'; }),
       durationSec: buffer.duration,
       style: 'mega',
       beatStyle: style.id,

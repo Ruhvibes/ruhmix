@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 26 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 27 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -305,6 +305,8 @@ RM.app = (function () {
     state.redoStack = [];
     if (state.waveView) state.waveView.setBuffer(null, new Float32Array(0));
     RM.proj.markDirty();
+    RM.v27loop.syncFromSettings(state.project.settings, 0); // fresh project: loop reset
+    if (RM.app.updateLoopUI) RM.app.updateLoopUI();
     show('import');
   }
 
@@ -325,6 +327,11 @@ RM.app = (function () {
     if (state.waveView) state.waveView.setBuffer(null, new Float32Array(0));
     RM.proj.invalidateView(buffer);
     refreshView().then(() => {
+      // v27 W3: loop region belongs to the project — keep it across the new
+      // audio, clamped to the new duration, and re-point the player.
+      RM.v27loop.syncFromSettings(state.project.settings, state.buffer ? state.buffer.duration : 0);
+      RM.v27loop.applyToPlayer(RM.app.state.player);
+      if (RM.app.updateLoopUI) RM.app.updateLoopUI();
       RM.proj.autosave(state.project);
       toast(('Loaded: ') + state.fileName);
       if (state.screen === 'import') show('editor');
@@ -1174,19 +1181,47 @@ Object.assign(RM.app, (function () {
       $('ed-speed-v').textContent = r.toFixed(2) + '×';
       RM.proj.autosave(A.state.project);
     });
-    $('ed-loop').addEventListener('click', (e) => {
+    // v27 W3 — real loop region controls (RM.v27loop). ed-loop toggles the
+    // loop: the set region when one exists, the whole track otherwise
+    // (pre-v27 behavior). ed-loop-set captures the current selection as the
+    // region; ed-loop-times sets how many times the region repeats in export.
+    const loopDur = () => (A.state.viewBuffer ? A.state.viewBuffer.duration : 0);
+    A.updateLoopUI = () => {
+      const L = RM.v27loop, ls = L.state();
+      const btn = $('ed-loop'), lab = $('ed-loop-region'), tsel = $('ed-loop-times');
+      if (btn) btn.classList.toggle('on', ls.on);
+      if (tsel) tsel.value = String(ls.times);
+      if (lab) {
+        const txt = L.regionLabel();
+        lab.style.display = txt ? '' : 'none';
+        lab.textContent = txt ? ('🔁 ' + txt) : '';
+        lab.title = txt ? 'Loop region (in – out, × repeats baked into export)' : '';
+      }
+    };
+    $('ed-loop').addEventListener('click', () => {
       // No project yet (no audio loaded): friendly prompt, never a crash.
       if (!A.needAudio()) return;
       A.ensureStudio();
-      const s = A.state.project.settings;
-      s.loop = !s.loop;
-      const p = A.state.player;
-      // setLoop applies to the live source too, so toggling mid-playback
-      // takes effect immediately (no restart needed).
-      if (s.loop && A.state.viewBuffer) p.setLoop(true, 0, A.state.viewBuffer.duration);
-      else p.setLoop(s.loop);
-      e.target.classList.toggle('on', s.loop);
+      RM.v27loop.toggle(A.state.player, A.state.project.settings, loopDur());
       RM.proj.autosave(A.state.project);
+      A.updateLoopUI();
+    });
+    $('ed-loop-set').addEventListener('click', () => {
+      if (!A.needAudio()) return;
+      const r = selRange();
+      if (!RM.v27loop.setRegion(r.a, r.b, A.state.project.settings, loopDur())) {
+        A.toast('Make a selection first (min 0.05s)');
+        return;
+      }
+      RM.proj.autosave(A.state.project);
+      A.updateLoopUI();
+      A.toast('Loop region: ' + RM.v27loop.regionLabel());
+    });
+    $('ed-loop-times').addEventListener('change', (e) => {
+      if (!A.state.project) return;
+      RM.v27loop.setTimes(+e.target.value, A.state.project.settings);
+      RM.proj.autosave(A.state.project);
+      A.updateLoopUI();
     });
 
     // ops — har op guardOp me: button op render hone tak disabled rehta hai,
@@ -2363,7 +2398,24 @@ Object.assign(RM.app, (function () {
     // (shared helper — the remix-buffer render below uses it too).
     const fxp = src.fx || A.defaultFx();
     const tailNeed = RM.exp.tailForFx(fxp);
-    Promise.resolve().then(() => RM.exp.renderOffline(src.buffer, (oc, srcNode) => {
+    // v27 W3 — loop bake: loop ON with a valid region renders
+    // head + region×N + tail (RM.v27loop render spec), so the exported file
+    // contains exactly what the loop toggle promises during playback.
+    let expBuffer = src.buffer;
+    const loopSpec = (window.RM && RM.v27loop)
+      ? RM.v27loop.exportSpec(A.state.project && A.state.project.settings, src.buffer ? src.buffer.duration : 0)
+      : null;
+    if (loopSpec) {
+      try {
+        const mk = (nCh, len, sr) => RM.audio.ensureCtx().createBuffer(nCh, len, sr);
+        const looped = RM.v27loop.renderLooped(mk, src.buffer, loopSpec.inSec, loopSpec.outSec, loopSpec.times);
+        if (looped) {
+          expBuffer = looped;
+          A.toast('Baking loop ×' + loopSpec.times + ' into export');
+        }
+      } catch (e) { /* fall through: export the unlooped buffer */ }
+    }
+    Promise.resolve().then(() => RM.exp.renderOffline(expBuffer, (oc, srcNode) => {
       chain = RM.fx.makeChain(oc);
       chain.applyPreset(fxp);
       srcNode.connect(chain.input);
@@ -2407,10 +2459,33 @@ Object.assign(RM.app, (function () {
           // NOTE: normalizeBuffer normalizes IN PLACE and resolves to the peak
           // (a number), NOT the buffer — always use `rendered` here.
           const buf = rendered;
+          // v27 W4: no SILENT clipping anywhere in the export chain.
+          // (a) Post-render guard: without the normalize checkbox the render
+          //     can exceed +/-1 (stacked EQ boosts); the encoders' clamps
+          //     would clip it silently. The v24 true-peak limiter (ceiling
+          //     -3 dBTP) is bit-transparent below the ceiling, so clean
+          //     renders pass through untouched.
+          // (b) Post-resample guard: cubic Hermite interpolation can overshoot
+          //     past +/-1 even on a limited render (QC never sees the
+          //     resampled signal). Works on a copy when resample passed the
+          //     input through unchanged — the render buffer is never mutated.
+          // (c) TPDF dither on every 32-bit float -> 16-bit reduction.
+          const DITHER = { dither: true };
+          const hasLimiter = window.RM && RM.v25qc && typeof RM.v25qc.applyTruePeakLimiter === 'function';
+          const guardRender = hasLimiter
+            ? RM.v25qc.applyTruePeakLimiter(buf, (p) => setExpStage(('Peak guard: ') + Math.round(p * 100) + '%', 0.42 + p * 0.06))
+            : Promise.resolve();
+          const guardRs = (rs) => {
+            if (!hasLimiter) return Promise.resolve(rs);
+            const work = (rs === buf) ? RM.v25qc.copyBuffer(rs) : Promise.resolve(rs);
+            return work.then((c) => RM.v25qc.applyTruePeakLimiter(c, null).then(() => c));
+          };
+          return guardRender.then(() => {
           stage('Encoding…', 0.5);
           if (isFlac) {
             // FLAC: 16-bit PCM -> pure-JS FLAC encoder (offline, lossless)
-            return RM.audio.floatToInt16(buf, (p) => setExpStage(('Preparing: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
+            return guardRs(buf)
+              .then((gb) => RM.audio.floatToInt16(gb, (p) => setExpStage(('Preparing: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1), DITHER))
               .then((i16) => {
                 stage('Encoding FLAC…', 0.6);
                 return RM.exp.encodeFlac(i16, buf.sampleRate,
@@ -2418,16 +2493,18 @@ Object.assign(RM.app, (function () {
               });
           }
           if (!isMp3) {
-            return RM.audio.encodeWavBuffer(buf, (p) => setExpStage(('Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35))
+            return RM.audio.encodeWavBuffer(buf, (p) => setExpStage(('Encoding: ') + Math.round(p * 100) + '%', 0.5 + p * 0.35), DITHER)
               .then((ab) => new Blob([ab], { type: mime }));
           }
           // MP3: resample to the chosen sample rate (44100/48000 — both valid MPEG-1), then encode
           return RM.audio.resampleBuffer(buf, sr, (p) => setExpStage(('Resampling: ') + Math.round(p * 100) + '%', 0.5 + p * 0.1))
-            .then((rs) => RM.audio.floatToInt16(rs, (p) => setExpStage(('Preparing: ') + Math.round(p * 100) + '%', 0.6 + p * 0.1)))
+            .then(guardRs)
+            .then((rs) => RM.audio.floatToInt16(rs, (p) => setExpStage(('Preparing: ') + Math.round(p * 100) + '%', 0.6 + p * 0.1), DITHER))
             .then((i16) => {
               stage('Encoding MP3…', 0.7);
               return RM.exp.encodeMp3(i16, kbps, sr, (p) => setExpStage('MP3 ' + Math.round(p * 100) + '%', 0.7 + p * 0.2), expToken);
             });
+          });
         }).then((blob) => {
           stage('Saving…', 0.95);
           return RM.exp.deliver(blob, fileName, mime, (p) => setExpStage(('Saving… ') + Math.round(p * 100) + '%', 0.95));
@@ -2639,6 +2716,8 @@ Object.assign(RM.app, (function () {
     A.stopAll();
     A.state.project = p;
     RM.proj.restoreLive(p); // saved FX/slowed/mastering/remix settings wapas live state me
+    RM.v27loop.syncFromSettings(p.settings, 0); // v27 W3: loop region wapas
+    if (A.updateLoopUI) A.updateLoopUI();
     A.state.buffer = null;
     A.state.viewBuffer = null;
     A.state.viewGen++; // purane project ka koi in-flight render/peaks ab stale hai
@@ -2668,7 +2747,19 @@ Object.assign(RM.app, (function () {
   function clearTempData() {
     const nat = RM.audio.native;
     let nativeCleared = false;
-    if (nat.method('clearCache')) { try { nat.call('clearCache'); nativeCleared = true; } catch (e) {} }
+    // v27 W5: prefer the age-gated native prune (7 days, share/rec/imports)
+    // over the old full-cache wipe, which could nuke fresh imports that
+    // saved projects still reference. Fall back to clearCache on old shells.
+    if (nat.method('cleanupOldTempFiles')) {
+      try {
+        const freed = nat.call('cleanupOldTempFiles', true);
+        nativeCleared = true;
+        try { console.info('[RM.cleanup] manual clear: native freed bytes=' + freed); } catch (e2) {}
+      } catch (e) {}
+    } else if (nat.method('clearCache')) { try { nat.call('clearCache'); nativeCleared = true; } catch (e) {} }
+    try {
+      if (RM.cleanup && RM.cleanup.cleanupTemp) RM.cleanup.cleanupTemp({ reason: 'manual-clear', includeImports: true });
+    } catch (e) {}
     try {
       Object.keys(localStorage).filter((k) => k.indexOf('ruhmix.') === 0 && k !== 'ruhmix.projects.v1').forEach((k) => localStorage.removeItem(k));
     } catch (e) {}
@@ -2958,6 +3049,36 @@ Object.assign(RM.app, (function () {
   }
   A.renderHomeRecent = renderHomeRecent;
 
+  /* ============ crash recovery (v27 W3) ============
+     Extracted from init() so node tests can drive the REAL sequence
+     headlessly (see tests/test-v27-studio.js). Ordering is load-bearing:
+     needsRecovery() MUST be evaluated BEFORE markDirty() — markDirty()
+     overwrites the previous session's clean-exit flag, so checking after
+     it would show the banner after EVERY launch with an autosave on disk,
+     even after a clean exit. Returns true when the banner was shown. */
+  function checkCrashRecovery() {
+    const crashed = RM.proj.needsRecovery();
+    RM.proj.markDirty(); // this session is now live: a crash from here on is dirty
+    if (!crashed) return false;
+    const p = RM.proj.loadAutosave();
+    const banner = $('recovery-banner');
+    if (p && banner) {
+      $('recovery-text').innerHTML = ('Found a previous project: <b>') + A.escapeHtml(p.name) + '</b> — ' + ('Recover it?');
+      banner.style.display = '';
+      $('recovery-yes').addEventListener('click', () => {
+        banner.style.display = 'none';
+        openProject(p);
+      });
+      $('recovery-no').addEventListener('click', () => {
+        banner.style.display = 'none';
+        RM.proj.discardAutosave();
+        RM.proj.markCleanExit();
+      });
+      return true;
+    }
+    return false;
+  }
+
   /* ================= init ================= */
   function init() {
     A.onShow = (name) => {
@@ -3002,27 +3123,8 @@ Object.assign(RM.app, (function () {
       A.startRecording();
     });
     A.updateRecUI = A.updateRecUI || function () {};
-    // crash recovery
-    RM.proj.markDirty();
-    if (RM.proj.needsRecovery()) {
-      const p = RM.proj.loadAutosave();
-      const banner = $('recovery-banner');
-      if (p && banner) {
-        $('recovery-text').innerHTML = ('Found a previous project: <b>') + A.escapeHtml(p.name) + '</b> — ' + ('Recover it?');
-        banner.style.display = '';
-        $('recovery-yes').addEventListener('click', () => {
-          banner.style.display = 'none';
-          openProject(p);
-        });
-        $('recovery-no').addEventListener('click', () => {
-          banner.style.display = 'none';
-          RM.proj.discardAutosave();
-          RM.proj.markCleanExit();
-        });
-      }
-    } else {
-      RM.proj.markCleanExit();
-    }
+    // crash recovery (v27 W3: extracted — see checkCrashRecovery below)
+    checkCrashRecovery();
     window.addEventListener('pagehide', () => RM.proj.markCleanExit());
     // ensure audio on first touch (mobile autoplay policy)
     document.addEventListener('pointerdown', () => { try { RM.audio.ensureCtx(); } catch (e) {} }, { once: true });
@@ -3043,7 +3145,7 @@ Object.assign(RM.app, (function () {
     initMixer, initFxRack, initMastering, initBeat, initExport, initProjects,
     initSettings, initMore, initHome, init,
     refreshExportSource, renderProjects, openProject, sendToMixer, updateStorageInfo,
-    getMixerTracks: () => mixer.tracks,
+    getMixerTracks: () => mixer.tracks, checkCrashRecovery,
   };
   })());
 

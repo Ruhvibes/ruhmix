@@ -26,25 +26,34 @@
        fixes: [{id, title, before, after, detail}]. Caller should re-run
        runCheck() on the result to confirm.
 
-   The 12 checks (§18):
+   The 15 checks (§18 + v27 W4):
      1. bpm-mismatch    — a song BPM deviates >3% from master (unstretched)
      2. key-mismatch    — song key incompatible with master key (fifths)
      3. vocal-overlap   — two vocal slots active at once outside crossfades
      4. clipping        — true-peak (4x oversampled) > 0 dBTP or |x|>0.999
-     5. phase           — L/R correlation too low / negative sections
-     6. bass            — <80 Hz energy share > 30%
-     7. harsh           — 2–5 kHz energy share > 28%
-     8. volume-jump     — adjacent bars differ > 4 dB RMS
-     9. click           — discontinuity at a slot boundary (d2 spike)
-    10. timing-drift    — onsets drift > 60 ms off the bar grid
-    11. sep-artifacts   — HF crest heuristic for separation "wateriness"
-    (12. the returned list itself: [{issue, severity, autoFixable}])
+     5. clip-risk (v27)— true-peak in (-1, 0] dBTP: MP3 encode can add ~1 dB
+                         of MDCT overshoot and push it over. One-tap: -2 dB.
+     6. phase           — L/R correlation too low / negative sections
+     7. bass            — <80 Hz energy share > 30% (warn); > 40% (error —
+                         phone speakers buzz, v24 field finding)
+     8. harsh           — 2–5 kHz energy share > 28%
+     9. quiet-mix (v27)— overall RMS < -26 dBFS: much quieter than other
+                         songs. One-tap: normalize peak to -3 dBTP.
+    10. sep-quality(v27)— vocal engine tag is Smart DSP fallback, not
+                         neural AI — expect bleed. Manual: re-separate via AI.
+    11. volume-jump     — adjacent bars differ > 4 dB RMS
+    12. click           — discontinuity at a slot boundary (d2 spike)
+    13. timing-drift    — onsets drift > 60 ms off the bar grid
+    14. sep-artifacts   — HF crest heuristic for separation "wateriness"
+   (15. the returned list itself: [{issue, severity, autoFixable}])
 
    Auto-fixable: clipping (true-peak limiter, ceiling 0.71 = -3 dBTP),
-   clicks (2 ms de-click V-fade), volume jumps (per-bar smoothing),
-   bass (low-shelf cut <80 Hz), harshness (peaking cut @3.2 kHz).
+   clip-risk (-2 dB safety gain), clicks (2 ms de-click V-fade),
+   volume jumps (per-bar smoothing), bass (low-shelf cut <80 Hz),
+   harshness (peaking cut @3.2 kHz), quiet-mix (peak normalize to 0.71).
    NOT auto-fixable (need a re-render, honestly reported): bpm/key
-   mismatch, vocal overlap, phase, timing drift, separation artifacts.
+   mismatch, vocal overlap, phase, sep-quality (re-separate via AI),
+   timing drift, separation artifacts.
    ===================================================================== */
 window.RM = window.RM || {};
 
@@ -251,6 +260,11 @@ RM.v25qc = (function () {
       boundariesSec: Array.isArray(meta.boundariesSec) ? meta.boundariesSec : [],
       xfadeSec: (typeof meta.xfadeSec === 'number') ? meta.xfadeSec
         : (typeof meta.xfadeBars === 'number' ? meta.xfadeBars * barLenSec : Math.min(0.5, barLenSec / 2)),
+      // v27 W4: vocal separation engine tags for the sep-quality warning
+      // (per-song 'smart DSP' / 'neural stems' strings from the builders).
+      vocalTags: Array.isArray(meta.vocalTags) ? meta.vocalTags.slice() : [],
+      engineTags: Array.isArray(meta.engineTags) ? meta.engineTags.slice() : [],
+      sepEngine: (typeof meta.sepEngine === 'string') ? meta.sepEngine : null,
     };
   }
 
@@ -380,7 +394,12 @@ RM.v25qc = (function () {
     var cf = biquad('lowpass', 80, 0.707, 0, buf.sampleRate);
     return bandShare(buf, cf, null).then(function (share) {
       var issues = [];
-      if (share > 0.30) {
+      if (share > 0.40) {
+        issues.push(mkIssue('bass',
+          'Bass overload: ' + (share * 100).toFixed(1) + '% of energy is below 80 Hz (over 40%)',
+          'At this level phone speakers audibly buzz and distort ("beat fat raha hai" — measured 43% on a real phone). "Fix Issues" applies a low-shelf cut below 80 Hz.',
+          'error', true, 'Low-shelf cut below 80 Hz (iterative, up to 3 passes × −18 dB).'));
+      } else if (share > 0.30) {
         issues.push(mkIssue('bass',
           'Excessive bass: ' + (share * 100).toFixed(1) + '% of energy is below 80 Hz (over 30%)',
           'Too much sub-bass overloads phone speakers ("beat fat raha hai"). "Fix Issues" applies a low-shelf cut below 80 Hz.',
@@ -402,6 +421,57 @@ RM.v25qc = (function () {
       }
       return { issues: issues, share: share };
     });
+  }
+
+  /* v27 W4: very quiet mix — overall RMS below -26 dBFS. */
+  function checkQuiet(buf) {
+    var nCh = buf.numberOfChannels, len = buf.length;
+    var chs = [];
+    for (var c = 0; c < nCh; c++) chs.push(buf.getChannelData(c));
+    var e = 0, n = 0;
+    return runC(len, CHUNK, function (a, b) {
+      for (var i = a; i < b; i += 2) {
+        var mm = 0;
+        for (var c = 0; c < nCh; c++) mm += chs[c][i];
+        mm /= nCh; e += mm * mm; n++;
+      }
+    }, null).then(function () {
+      var issues = [];
+      var rmsDb = n > 0 ? 10 * Math.log10(Math.max(1e-12, e / n)) : -120;
+      if (rmsDb < -26) {
+        issues.push(mkIssue('quiet-mix',
+          'Very quiet mix: overall level ' + rmsDb.toFixed(1) + ' dBFS RMS (under \u221226 dBFS)',
+          'This export will sound much quieter than other songs on the same phone. "Fix Issues" normalizes the peak to \u22123 dBTP without clipping.',
+          'warn', true, 'Peak-normalize to 0.71 (\u22123 dBTP) — raises the whole mix, no clipping.'));
+      }
+      return { issues: issues, rmsDb: rmsDb };
+    });
+  }
+
+  /* v27 W4: low separation quality — the vocal engine tag says the vocals
+     came from the on-device Smart DSP fallback, not neural AI. Reads
+     meta.vocalTags (per-song 'smart DSP' / 'neural stems' strings, as the
+     mega/swap builders emit) or meta.sepEngine. Missing tags -> honest
+     skip (handled by the runCheck guard), never fabricated. */
+  function checkSepQuality(m) {
+    var issues = [];
+    var tags = [];
+    if (Array.isArray(m.vocalTags)) tags = m.vocalTags.slice();
+    else if (Array.isArray(m.engineTags)) tags = m.engineTags.slice();
+    if (typeof m.sepEngine === 'string' && m.sepEngine) tags.push(m.sepEngine);
+    var norm = tags.map(function (t) { return String(t || '').toLowerCase(); });
+    var dspCount = norm.filter(function (t) {
+      return t.indexOf('dsp') >= 0 && t.indexOf('neural') < 0;
+    }).length;
+    if (dspCount > 0) {
+      var allDsp = dspCount === norm.length;
+      issues.push(mkIssue('sep-quality',
+        'Vocal separation quality: ' + (allDsp ? 'all' : dspCount + ' of ' + norm.length) + ' vocal(s) used the on-device Smart DSP fallback, not neural AI',
+        'Smart DSP (beta) is classical signal processing — expect some bleed and thinner vocals compared to neural separation. ' +
+        'To fix: re-separate the vocals with the AI backend (Settings \u2192 AI Server), then rebuild the mashup. This cannot be repaired on the finished mix.',
+        'warn', false, 'Re-separate vocals with the AI backend (Settings \u2192 AI Server), then rebuild.'));
+    }
+    return issues;
   }
 
   function checkVolumeJumps(buf, m) {
@@ -621,6 +691,16 @@ RM.v25qc = (function () {
         function () {
           return checkClipping(renderBuf).then(function (r) {
             issues.push.apply(issues, r.issues); measurements.truePeak = r.tp.peak; measurements.digitalClip = r.tp.digitalClip;
+            // v27 W4: clip-risk tier — no hard clip yet, but the MP3 encode
+            // adds ~1 dB of MDCT overshoot, so anything over -1 dBTP is a
+            // real clipping risk. One-tap fix: -2 dB safety gain.
+            if (!r.issues.length && r.tp.peak > Math.pow(10, -1 / 20)) {
+              var dbtp = 20 * Math.log10(Math.max(1e-9, r.tp.peak));
+              issues.push(mkIssue('clip-risk',
+                'Clipping risk: true peak ' + dbtp.toFixed(1) + ' dBTP (over \u22121 dBTP)',
+                'Not clipping yet — but MP3 encoding typically adds ~1 dB of overshoot, which would push this over 0 dBTP and distort. "Fix Issues" lowers the whole mix by 2 dB (one tap).',
+                'warn', true, 'Lower the whole mix by 2 dB (\u22122 dB static gain — inaudible loudness change, removes the risk).'));
+            }
           });
         }],
       ['Stereo phase', 'phase', null,
@@ -635,6 +715,16 @@ RM.v25qc = (function () {
         function () {
           return checkHarsh(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.harshShare = r.share; });
         }],
+      ['Quiet mix (v27)', 'quiet-mix', null,
+        function () {
+          return checkQuiet(renderBuf).then(function (r) { issues.push.apply(issues, r.issues); measurements.rmsDb = r.rmsDb; });
+        }],
+      ['Separation quality (v27)', 'sep-quality',
+        function () {
+          return (m.vocalTags.length || m.engineTags.length || m.sepEngine)
+            ? null : 'no vocal engine info in the export meta — cannot tell DSP from neural';
+        },
+        function () { issues.push.apply(issues, checkSepQuality(m)); }],
       ['Volume jumps', 'volume-jump', null,
         function () {
           return checkVolumeJumps(renderBuf, m).then(function (r) {
@@ -819,6 +909,37 @@ RM.v25qc = (function () {
     return pass(0, 0, 0);
   }
 
+  // Static gain in dB over the whole buffer (chunked, in place).
+  function applyGainDb(buf, db, onProgress) {
+    var g = Math.pow(10, db / 20);
+    var nCh = buf.numberOfChannels, len = buf.length;
+    var chs = [];
+    for (var c = 0; c < nCh; c++) chs.push(buf.getChannelData(c));
+    return runC(len, CHUNK, function (a, b) {
+      for (var c = 0; c < nCh; c++) { var d = chs[c]; for (var i = a; i < b; i++) d[i] *= g; }
+    }, onProgress).then(function () { return g; });
+  }
+
+  // Peak-normalize to a target linear peak (chunked, in place).
+  function normalizePeak(buf, target, onProgress) {
+    var nCh = buf.numberOfChannels, len = buf.length;
+    var chs = [];
+    for (var c = 0; c < nCh; c++) chs.push(buf.getChannelData(c));
+    var peak = 0;
+    return runC(len, CHUNK, function (a, b) {
+      for (var c = 0; c < nCh; c++) {
+        var d = chs[c];
+        for (var i = a; i < b; i++) { var v = d[i] < 0 ? -d[i] : d[i]; if (v > peak) peak = v; }
+      }
+    }, null).then(function () {
+      if (peak < 1e-9) return { applied: 0, peak: 0 };
+      var g = target / peak;
+      return runC(len, CHUNK, function (a, b) {
+        for (var c = 0; c < nCh; c++) { var d = chs[c]; for (var i = a; i < b; i++) d[i] *= g; }
+      }, onProgress).then(function () { return { applied: 20 * Math.log10(g), peak: peak }; });
+    });
+  }
+
   function fixAll(renderBuf, issues, meta, onProgress) {
     var prog = onProgress ? function (f, label) { try { onProgress(f, label); } catch (e) {} } : null;
     return copyBuffer(renderBuf).then(function (buf) {
@@ -836,6 +957,28 @@ RM.v25qc = (function () {
               after: 'true peak ' + (20 * Math.log10(Math.max(1e-9, after.peak))).toFixed(1) + ' dBTP (ceiling −3 dBTP)',
               detail: 'Causal limiter, 0.8 ms attack / 60 ms release, 4x-oversampled peak sensing; re-measured after apply (static trim safety net if needed).',
             });
+          });
+        });
+      }]);
+      if (ids['clip-risk']) steps.push(['Safety gain', function () {
+        if (prog) prog(0.18, 'Fixing: clipping risk (-2 dB)\u2026');
+        return applyGainDb(buf, -2, null).then(function () {
+          fixes.push({
+            id: 'clip-risk', title: 'Lowered 2 dB (clipping-risk headroom)',
+            before: 'true peak over \u22121 dBTP — MP3 overshoot risk',
+            after: 'true peak 2 dB lower (verified on re-check)',
+            detail: 'Static \u22122 dB gain over the whole mix — inaudible loudness change, removes the MP3-overshoot clipping risk.',
+          });
+        });
+      }]);
+      if (ids['quiet-mix']) steps.push(['Normalize', function () {
+        if (prog) prog(0.24, 'Fixing: quiet mix (normalize)\u2026');
+        return normalizePeak(buf, TP_CEIL, null).then(function (r) {
+          fixes.push({
+            id: 'quiet-mix', title: 'Normalized to \u22123 dBTP peak',
+            before: 'peak ' + (20 * Math.log10(Math.max(1e-9, r.peak))).toFixed(1) + ' dBFS',
+            after: 'peak \u22123.0 dBTP (' + (r.applied >= 0 ? '+' : '') + r.applied.toFixed(1) + ' dB applied)',
+            detail: 'Whole-mix static gain so the loudest sample hits 0.71 — no clipping possible, mix now matches commercial loudness ballpark.',
           });
         });
       }]);
@@ -910,6 +1053,10 @@ RM.v25qc = (function () {
   return {
     runCheck: runCheck,
     fixAll: fixAll,
+    // v27 W4: export-chain guards (the v24 -3 dBTP ceiling, enforced after
+    // resampling so cubic-interp overshoot can never silently clip).
+    applyTruePeakLimiter: applyTruePeakLimiter,
+    copyBuffer: copyBuffer,
     issueLabel: issueLabel,
     slotMeta: slotMeta,
     TP_CEIL: TP_CEIL,
