@@ -114,21 +114,45 @@ window.RM = window.RM || {};
   function make() {
     var a = A();
     if (!a || ms.building) return;
-    if (!ms.slot1 || !ms.slot2) {
-      a.toast(!ms.slot1 && !ms.slot2 ? 'Pick both songs first 🎤🥁' : (!ms.slot1 ? 'Pick Song 1 — Vocals first 🎤' : 'Pick Song 2 — Beat first 🥁'));
+    var src = (BU && BU.beatSource) || 'builtin';
+    if (!ms.slot1) {
+      a.toast('Pick Song 1 — Vocals first 🎤');
       return;
     }
-    if (!RM.mashup || typeof RM.mashup.build !== 'function') {
+    if (src === 'song2' && !ms.slot2) {
+      a.toast('Pick Song 2 — Beat first 🥁');
+      return;
+    }
+    // Engine contract (W3): RM.mashup.buildAuto(voxBuffer, styleId, onProgress, onStep)
+    // -> Promise<{ buffer, meta }>; W3's engine calls onStep('vocals'|'beat'|'mix'|'done').
+    var canBuiltin = RM.mashup && typeof RM.mashup.buildAuto === 'function';
+    var canSong2 = RM.mashup && typeof RM.mashup.build === 'function';
+    if ((src === 'builtin' && !canBuiltin) || (src === 'song2' && !canSong2)) {
       a.toast('Mashup engine not ready — update the app and retry.');
       return;
     }
     stopPreview();
     setBuildUI(true);
+    BU.resetSteps();
     setProgress('Analyzing…', 0);
     var done = false;
     var onProg = function (label, frac) { if (!done) setProgress(label, frac); };
+    // Song 2 mode: the classic build() has no onStep — drive the 3-step
+    // indicator from progress fractions so it never sits static.
+    var onProgSong2 = function (label, frac) {
+      onProg(label, frac);
+      try {
+        if (frac >= 1) BU.onStep('done');
+        else if (frac >= 0.6) BU.onStep('mix');
+        else if (frac >= 0.25) BU.onStep('beat');
+        else BU.onStep('vocals');
+      } catch (e) {}
+    };
     Promise.resolve()
-      .then(function () { return RM.mashup.build(ms.slot1.buffer, ms.slot2.buffer, onProg); })
+      .then(function () {
+        if (src === 'builtin') return RM.mashup.buildAuto(ms.slot1.buffer, BU.selectedStyle, onProg, BU.onStep);
+        return RM.mashup.build(ms.slot1.buffer, ms.slot2.buffer, onProgSong2);
+      })
       .then(function (res) {
         done = true;
         var buf = res && res.buffer ? res.buffer : (res instanceof AudioBuffer ? res : null);
@@ -151,9 +175,18 @@ window.RM = window.RM || {};
           meta: m,
           engine: engineLabel,
         };
-        // Friendly export name from the two picked songs.
+        // Friendly export name: picked song(s) (+ built-in beat style name).
         try {
-          ms.result.meta.name = 'Mashup ' + (ms.slot1.name || 'A') + ' x ' + (ms.slot2.name || 'B');
+          var nm = 'Mashup ' + (ms.slot1.name || 'A') + ' x ';
+          if (src === 'builtin') {
+            var stN = BU.styleById(BU.selectedStyle);
+            nm += (stN && stN.name) ? stN.name + ' Beat' : (BU.selectedStyle ? 'Built-in Beat' : 'Auto Beat');
+          } else {
+            nm += (ms.slot2.name || 'B');
+          }
+          ms.result.meta.name = nm;
+          // W5 export uses meta.style for the "RuhMix-mashup-<style>.mp3" filename.
+          ms.result.meta.style = (src === 'builtin') ? (BU.selectedStyle || 'auto') : 'song2';
         } catch (e) {}
         setBuildUI(false);
         var meta = $('mashup-meta');
@@ -177,6 +210,8 @@ window.RM = window.RM || {};
       try { ms.pvSrc.disconnect(); } catch (e) {}
       ms.pvSrc = null;
     }
+    // Also stop any beat-card preview so mix preview and beat preview never overlap.
+    try { if (RM.BeatsPreview && typeof RM.BeatsPreview.stop === 'function') RM.BeatsPreview.stop(); } catch (e) {}
     var play = $('mashup-play');
     if (play) play.textContent = '▶ Preview';
   }
@@ -188,6 +223,8 @@ window.RM = window.RM || {};
     if (!a) return;
     if (isPreviewing()) { stopPreview(); return; } // user tap -> stop
     if (!ms.result || !ms.result.buffer) { a.toast('Create a mashup first ✨'); return; }
+    // Stop any beat-card preview first — mix preview and beat preview never overlap.
+    try { if (RM.BeatsPreview && typeof RM.BeatsPreview.stop === 'function') RM.BeatsPreview.stop(); } catch (e) {}
     // User tapped ▶ — the ONLY place preview ever starts. No autoplay anywhere.
     try {
       var ctx = RM.audio.ensureCtx();
@@ -222,6 +259,162 @@ window.RM = window.RM || {};
     }
   }
 
+  /* ================= W2: beat source + built-in beats + step indicator =========== */
+
+  var BU = (RM.BeatsUI = RM.BeatsUI || {});
+  BU.beatSource = 'builtin';   // 'builtin' (default) | 'song2'
+  BU.selectedStyle = null;     // RM.Beats style id (W1 module)
+
+  var CONSENT_BUILTIN = 'Built-in original beat (copyright-free, synthesized in-app) • vocals auto-matched. No fake AI claims.';
+  var CONSENT_SONG2 = 'Smart DSP vocal isolation • tempo & key auto-matched. No fake AI claims.';
+  var STEP2_BUILTIN = '🎹 Creating copyright-free beat…';
+  var STEP2_SONG2 = '🥁 Preparing Song 2 beat…';
+
+  function beatStyles() {
+    try {
+      var s = RM.Beats && RM.Beats.STYLES;
+      return (s && s.length) ? s : [];
+    } catch (e) { return []; }
+  }
+
+  BU.styleById = function (id) {
+    var styles = beatStyles();
+    for (var i = 0; i < styles.length; i++) if (styles[i] && styles[i].id === id) return styles[i];
+    return null;
+  };
+
+  // Hook for W4 (beat preview playback). W4 implements RM.BeatsPreview.play
+  // or RM.Beats.preview; until then this degrades to a toast. NEVER autoplays
+  // on its own — it fires only from the user's tap on a card's ▶ button.
+  BU.onPreviewClick = function (styleId) {
+    var a = A();
+    try {
+      // Stop the mix preview first so beat preview and mix preview never overlap.
+      if (RM.mashupScreen && typeof RM.mashupScreen.stopPreview === 'function') RM.mashupScreen.stopPreview();
+    } catch (e) {}
+    try {
+      if (RM.BeatsPreview && typeof RM.BeatsPreview.play === 'function') { RM.BeatsPreview.play(styleId); return; }
+      if (RM.Beats && typeof RM.Beats.preview === 'function') { RM.Beats.preview(styleId); return; }
+    } catch (e) {}
+    if (a) a.toast('Beat preview coming soon 🎹');
+  };
+
+  function selectStyle(id) {
+    // id may be null = "Auto" (engine picks nearest-BPM style itself).
+    BU.selectedStyle = id;
+    var grid = $('mashup-beat-grid');
+    if (!grid) return;
+    var cards = grid.querySelectorAll('.beat-card');
+    for (var i = 0; i < cards.length; i++) {
+      var cid = cards[i].getAttribute('data-style') || null;
+      cards[i].classList.toggle('sel', cid === id);
+    }
+  }
+
+  // "✨ Auto" card — lets the engine pick the nearest-BPM style automatically.
+  function renderAutoCard(grid) {
+    var card = document.createElement('div');
+    card.className = 'beat-card beat-auto';
+    card.setAttribute('data-style', '');
+    var main = document.createElement('div');
+    main.className = 'bc-main';
+    var nm = document.createElement('div');
+    nm.className = 'bc-name';
+    nm.textContent = '✨ Auto';
+    var meta = document.createElement('div');
+    meta.className = 'bc-meta';
+    meta.textContent = 'Matches your song\u2019s tempo';
+    main.appendChild(nm);
+    main.appendChild(meta);
+    card.appendChild(main);
+    card.addEventListener('click', function () { selectStyle(null); });
+    grid.appendChild(card);
+  }
+
+  // Renders the 8 beat cards from W1's RM.Beats.STYLES. Defensive: an empty
+  // grid (with a placeholder note) when the module isn't loaded yet.
+  BU.renderBeats = function () {
+    var grid = $('mashup-beat-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    var styles = beatStyles();
+    if (!styles.length) {
+      var ph = document.createElement('div');
+      ph.className = 'muted small';
+      ph.textContent = 'Beat styles loading…';
+      grid.appendChild(ph);
+      return;
+    }
+    renderAutoCard(grid);
+    styles.forEach(function (st) {
+      if (!st || !st.id) return;
+      var card = document.createElement('div');
+      card.className = 'beat-card';
+      card.setAttribute('data-style', st.id);
+      var main = document.createElement('div');
+      main.className = 'bc-main';
+      var nm = document.createElement('div');
+      nm.className = 'bc-name';
+      nm.textContent = st.name || st.id;
+      var meta = document.createElement('div');
+      meta.className = 'bc-meta';
+      meta.textContent = (st.bpm ? st.bpm + ' BPM' : '') + (st.desc ? ' • ' + st.desc : '');
+      main.appendChild(nm);
+      main.appendChild(meta);
+      var prev = document.createElement('button');
+      prev.className = 'btn small beat-prev';
+      prev.setAttribute('data-style', st.id);
+      prev.setAttribute('aria-label', 'Preview ' + (st.name || st.id));
+      prev.textContent = '▶';
+      prev.addEventListener('click', function (e) { e.stopPropagation(); BU.onPreviewClick(st.id); });
+      card.appendChild(main);
+      card.appendChild(prev);
+      card.addEventListener('click', function () { selectStyle(st.id); });
+      grid.appendChild(card);
+    });
+    // Default = Auto (engine picks the nearest-BPM style itself).
+    if (BU.selectedStyle) selectStyle(BU.selectedStyle);
+    else selectStyle(null);
+  };
+
+  BU.setBeatSource = function (src) {
+    if (src !== 'builtin' && src !== 'song2') return;
+    BU.beatSource = src;
+    var sb = $('mashup-src-builtin'), ss = $('mashup-src-song2');
+    if (sb) sb.classList.toggle('on', src === 'builtin');
+    if (ss) ss.classList.toggle('on', src === 'song2');
+    var bw = $('mashup-beats-wrap'), sw = $('mashup-song2-wrap');
+    if (bw) bw.hidden = src !== 'builtin';
+    if (sw) sw.hidden = src !== 'song2';
+    var h = $('mashup-honest');
+    if (h) h.textContent = src === 'builtin' ? CONSENT_BUILTIN : CONSENT_SONG2;
+    var s2li = $('mstep-beat'), s2lb = s2li ? s2li.querySelector('.mstep-label') : null;
+    if (s2lb) s2lb.textContent = src === 'builtin' ? STEP2_BUILTIN : STEP2_SONG2;
+    BU.resetSteps();
+  };
+
+  /* ---- 3-step indicator: W3's engine calls BU.onStep('vocals'|'beat'|'mix'|'done') ---- */
+
+  var STEP_ORDER = ['vocals', 'beat', 'mix'];
+
+  BU.resetSteps = function () {
+    STEP_ORDER.forEach(function (k) {
+      var li = $('mstep-' + k);
+      if (li) li.classList.remove('active', 'done');
+    });
+  };
+
+  BU.onStep = function (step) {
+    var i = STEP_ORDER.indexOf(step);
+    STEP_ORDER.forEach(function (k, j) {
+      var li = $('mstep-' + k);
+      if (!li) return;
+      li.classList.remove('active', 'done');
+      if (step === 'done' || (i >= 0 && j < i)) li.classList.add('done');
+      else if (j === i) li.classList.add('active');
+    });
+  };
+
   /* ================= wiring ================= */
 
   function wire() {
@@ -236,6 +429,12 @@ window.RM = window.RM || {};
     if (playB) playB.addEventListener('click', togglePreview);
     var expB = $('mashup-export');
     if (expB) expB.addEventListener('click', doExport);
+    // W2: beat source segmented control + built-in beat cards.
+    var sb = $('mashup-src-builtin'), ss = $('mashup-src-song2');
+    if (sb) sb.addEventListener('click', function () { BU.setBeatSource('builtin'); });
+    if (ss) ss.addEventListener('click', function () { BU.setBeatSource('song2'); });
+    BU.renderBeats();
+    BU.setBeatSource(BU.beatSource || 'builtin');
     renderNames();
   }
 
@@ -287,6 +486,9 @@ window.RM = window.RM || {};
     requestPick: requestPick,
     stopPreview: stopPreview,
     getResult: function () { return ms.result; },
+    // W2/W3: 3-step progress receiver — the engine calls it with
+    // 'vocals' | 'beat' | 'mix' | 'done'.
+    onStep: function (s) { return BU.onStep(s); },
   };
   // pickTarget is a live accessor so app.js interception always sees the
   // current value, and onPicked clearing it internally stays in sync.

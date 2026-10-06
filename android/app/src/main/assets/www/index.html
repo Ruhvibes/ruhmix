@@ -210,13 +210,40 @@
   <h2>🤖 Auto Mashup</h2>
   <p class="muted">Smart BPM + key matching</p>
   <p id="mashup-engine-tag" class="mashup-tag"></p>
-  <button class="btn big" id="mashup-pick1">🎤 Song 1 — Vocals</button>
+  <button class="btn big block" id="mashup-pick1">🎤 Song 1 — Vocals</button>
   <div id="mashup-name1" class="muted">No song selected</div>
-  <button class="btn big" id="mashup-pick2">🥁 Song 2 — Beat</button>
-  <div id="mashup-name2" class="muted">No song selected</div>
-  <p class="muted small" id="mashup-honest">Smart DSP vocal isolation • tempo &amp; key auto-matched. No fake AI claims.</p>
-  <button class="btn primary big" id="mashup-make">✨ Create Auto Mashup</button>
-  <div id="mashup-progress" hidden><div id="mashup-prog-label"></div><div class="prog"><div id="mashup-prog-bar"></div></div></div>
+
+  <!-- Beat source: built-in original beats (default) or a second song -->
+  <div class="panel" id="mashup-beatsrc-panel">
+    <div class="row"><strong>🎹 Beat source</strong></div>
+    <div class="seg" id="mashup-beatsrc-seg" role="group" aria-label="Beat source">
+      <button class="btn tog on" id="mashup-src-builtin" data-src="builtin">🎹 Built-in Beats <span class="small">Copyright-Free</span> <span class="beta">Recommended</span></button>
+      <button class="btn tog" id="mashup-src-song2" data-src="song2">🎵 Pick Song 2</button>
+    </div>
+  </div>
+
+  <!-- Built-in beats: 8 original styles, synthesized in-app (default) -->
+  <div id="mashup-beats-wrap">
+    <p class="muted small">🎹 Original Beats — synthesized in RuhMix, 100% copyright-free</p>
+    <div class="card-grid" id="mashup-beat-grid"></div>
+  </div>
+
+  <!-- Song 2 beat: shown only when "Pick Song 2" is the beat source -->
+  <div id="mashup-song2-wrap" hidden>
+    <button class="btn big block" id="mashup-pick2">🥁 Song 2 — Beat</button>
+    <div id="mashup-name2" class="muted">No song selected</div>
+  </div>
+
+  <p class="muted small" id="mashup-honest">Built-in original beat (copyright-free, synthesized in-app) • vocals auto-matched. No fake AI claims.</p>
+  <button class="btn primary big block" id="mashup-make">✨ Create Auto Mashup</button>
+  <div id="mashup-progress" hidden>
+    <ol id="mashup-steps" class="msteps">
+      <li id="mstep-vocals"><span class="mstep-dot"></span><span class="mstep-label">🎤 Extracting vocals…</span></li>
+      <li id="mstep-beat"><span class="mstep-dot"></span><span class="mstep-label">🎹 Creating copyright-free beat…</span></li>
+      <li id="mstep-mix"><span class="mstep-dot"></span><span class="mstep-label">🎚️ Mixing…</span></li>
+    </ol>
+    <div id="mashup-prog-label"></div><div class="prog"><div id="mashup-prog-bar"></div></div>
+  </div>
   <div id="mashup-result" hidden>
     <div id="mashup-meta" class="muted"></div>
     <button class="btn big" id="mashup-play">▶ Preview</button>
@@ -537,6 +564,8 @@
 <script src="js/export.js"></script>
 <script src="js/projects.js"></script>
 <script src="js/import-hardening.js"></script>
+<script src="js/beats.js"></script>
+<script src="js/beats-preview.js"></script>
 <script src="js/mashup-dsp.js"></script>
 <script src="js/mashup.js"></script>
 <script src="js/mashup-stems.js"></script>

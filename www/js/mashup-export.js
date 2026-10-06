@@ -4,22 +4,35 @@
    Bridge: 🤖 Auto Mashup  ->  existing Export screen.
 
    Contract: RM.mashupExport.sendToExport(audioBuffer, meta)
-     - audioBuffer: AudioBuffer with the fully-built mashup mix.
-     - meta (optional): { name, stop } where `stop` is a function that
-       stops any mashup preview playback owned by the mashup builder.
+     - audioBuffer: AudioBuffer with the fully-built mashup mix. This also
+       covers the W3 beat-mashup: RM.Mashup.makeWithBeat() returns the final
+       mixed AudioBuffer (vocals + synthesized beat, loudness-matched,
+       peak-limited) — a normal AudioBuffer, no special-casing needed.
+     - meta (optional): { name, style, stop } where `stop` is a function
+       that stops any mashup preview playback owned by the mashup builder,
+       and `style` is the beat style (W3) used for the export filename.
 
    Mechanism (reuses the app's own explicit-source hook, same as the
    Stem-deck "Export" buttons in stem-deck.js — export.js untouched):
      1. Stop mashup preview playback (meta.stop, then RM.mashup.stopPreview,
         then the main studio player as a defensive last resort). Nothing
         autoplays after this.
-     2. A.state.exportSource = { kind: 'buffer', buffer, name } — this is
+     2. A.state.exportSource = { kind: 'buffer', buffer, name, fx, tail } —
         the slot app.js refreshExportSource() already understands: it
         unshifts a "🎯 Selected: <name>" radio option and auto-checks it.
+        fx = flatFx() (compressor OFF) and tail = 0 because the mashup is a
+        FINISHED mix: the preview plays buffer -> masterIn() (brickwall
+        limiter + safety clip only, no studio compressor), so exporting
+        through A.defaultFx() (comp ON, -18 dB / 4:1) would squash the W3
+        loudness balance and pump the beat's transients. flatFx matches the
+        preview path exactly — same treatment as the finished stem-mix and
+        remix-buffer exports. tail = 0: no 2.5 s of dead air appended.
      3. RM.app.show('export') — the app's own navigation. The onShow hook
         (app.js init) calls refreshExportSource() + syncExpDefaults(), so
         the mashup is selected with current format/bitrate defaults and
         MP3 (128/192/256/320), WAV, FLAC + Share all work unchanged.
+        Filename: "RuhMix-mashup-<style>.mp3" when meta.style is set
+        (sanitized by the export screen), else the friendly mashup name.
 
    Normal editor→export flow is untouched: we only ever set
    A.state.exportSource at the moment the mashup's Export/Share button is
@@ -62,6 +75,19 @@ RM.mashupExport = (function () {
     return !!(b && typeof b.duration === 'number' && b.duration > 0 && b.length > 0);
   }
 
+  // Finished-mix FX for the export render: flatFx() = defaultFx with the
+  // compressor OFF, everything else neutral. Matches the mashup preview
+  // path (buffer -> masterIn: limiter + safety clip, no comp), so the W3
+  // loudness match (vocals + beat) exports exactly as previewed. Same
+  // treatment the finished stem-mix / remix-buffer exports already get.
+  function finishedMixFx() {
+    try {
+      var A = app();
+      if (A && typeof A.flatFx === 'function') return A.flatFx();
+    } catch (e) {}
+    return null;
+  }
+
   function sendToExport(audioBuffer, meta) {
     var A = app();
     if (!A) { toast('Export unavailable'); return false; }
@@ -76,12 +102,22 @@ RM.mashupExport = (function () {
     }
     stopPreview(meta);
     lastBuffer = buf;
-    lastName = meta.name || 'AI Mashup';
+    // Filename scheme: beat-mashup -> "RuhMix-mashup-<style>.mp3" (W3 passes
+    // the beat style in meta.style; the export screen sanitizes it).
+    // Classic mashup keeps its friendly "Mashup A x B" name; fallback "AI Mashup".
+    var style = (meta.style != null ? String(meta.style).trim() : '');
+    lastName = style ? ('RuhMix-mashup-' + style) : (meta.name || 'AI Mashup');
     // Established explicit-source hook (see refreshExportSource in
     // app.js: {kind:'buffer'} unshifts "🎯 Selected: <name>" and checks
     // it). Do NOT touch state.buffer/viewBuffer — the editor's current
     // project stays exactly as it was.
-    A.state.exportSource = { kind: 'buffer', buffer: buf, name: lastName };
+    var es = { kind: 'buffer', buffer: buf, name: lastName };
+    // Finished mix: flat FX (no studio compressor — the beat must render
+    // exactly as W3 loudness-matched it) and no effect tail appended.
+    var ffx = finishedMixFx();
+    if (ffx) es.fx = ffx;
+    es.tail = 0;
+    A.state.exportSource = es;
     A.show('export');
     // onShow already runs refreshExportSource(); repeat defensively so a
     // race between nav and render can never leave the wrong source

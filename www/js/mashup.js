@@ -37,6 +37,11 @@
    rate; anything else is resampled to it via RM.audio.resampleBuffer.
    Buffer state: build() keeps NO module state between calls — a failed
    build leaves nothing partial behind.
+
+   buildAuto(song1Buffer, styleId, onProgress, onStep) (Worker 3 — Song 1
+   + built-in beat) is a method on THIS same RM.mashup namespace, below:
+   fully automatic (vocal isolate -> BPM detect -> beat render -> mix),
+   NO autoplay, separate path from build() which is left untouched.
    ===================================================================== */
 window.RM = window.RM || {};
 
@@ -382,8 +387,343 @@ RM.mashup = (function () {
     });
   }
 
+
+  /* =====================================================================
+     buildAuto: Song 1 + BUILT-IN BEAT (Worker 3).
+     Fully automatic — the user does nothing but pick the song (2 taps:
+     Song pick -> Auto Mashup):
+
+       1. Song 1's vocals are isolated AUTOMATICALLY (the registered stem
+          provider — Smart DSP default; neural when the user configured
+          their own HF Space — the same provider build() uses).
+       2. Song 1's BPM is detected (RM.audio.detectBPM — reused, never
+          duplicated), the nearest beat style is picked (or the explicit
+          styleId), and the beat is rendered at EXACTLY the song's BPM.
+       3. Strict auto-mix (radio-ready, no mixer needed):
+            vocals -> -18 dBFS RMS (0.126)
+            beat    -> -18 dBFS RMS (0.126)
+            vocals  x 10^(3/20) = 1.4125  (+3 dB: vocals sit above the beat bed)
+            sum, equal-power fade in/out (click-free), hard peak limit 0.98
+       4. The final buffer is RETURNED. No autoplay — the caller (W2 UI)
+          decides about preview/export.
+
+     ±3 BPM TOLERANCE LOGIC: the beat is ALWAYS rendered at the exact
+     detected song BPM (renderBeat(styleId, exactBpm, bars)), so there is
+     NO tempo mismatch by construction — drums have no pitch, only time
+     matters, and the time is identical. Style SELECTION is nearest-BPM:
+     Auto mode picks the style whose native BPM is closest to the song's.
+     A style's pattern stays musical at any nearby BPM because the
+     pattern is time-scaled, never pitch-shifted.
+
+     API: buildAuto(song1Buffer, styleId, onProgress, onStep)
+            -> Promise<{ buffer, meta }>
+       song1Buffer : decoded AudioBuffer. Null/invalid -> clean rejection.
+       styleId     : explicit style id, or null/undefined for Auto.
+                     Unknown styleId -> Auto fallback + honest note.
+       onProgress  : fn(label, frac 0..1) — same style as build().
+       onStep(step, info) : UI step indicator; step is one of
+                     'vocals' -> 'beat' -> 'mix' -> 'done'.
+                     Every step yields a macrotask first so the browser
+                     can paint before the heavy DSP runs.
+       meta = { bpm, bpmFallback, bpmNote, styleId, styleName, styleAuto,
+                engineTagVocal, durationSec }
+
+     Fallbacks: null song -> graceful reject; BPM detect fail/junk ->
+     100 BPM + honest note; unknown styleId -> Auto + note; nearest-BPM
+     tie -> hiphop over lofi (AUTO_TIEBREAK).
+
+     Dependencies: audio-engine.js, mashup-dsp.js, stems.js (same as
+     build()), PLUS W1's beats.js (RM.Beats.STYLES + renderBeat) — checked
+     at CALL time so beats.js may land later. build() never requires it.
+     ===================================================================== */
+  var AUTO_VOCAL_RMS = 0.126;   // -18 dBFS — vocal reference level
+  var AUTO_BEAT_RMS = 0.126;    // -18 dBFS — beat reference level
+  var AUTO_VOCAL_BOOST_DB = 3;  // +3 dB: vocals sit above the beat bed
+  var AUTO_VOCAL_BOOST = Math.pow(10, AUTO_VOCAL_BOOST_DB / 20); // 1.4125
+  var AUTO_LOOP_BARS = 4;       // short loop-perfect render, tiled across
+                                // the song — memory sane even for a 10-min
+                                // song (a few MB, not 200+)
+  var AUTO_BPM_FALLBACK = 100;  // when tempo detection fails
+  var AUTO_TIEBREAK = ['hiphop', 'lofi']; // nearest-BPM tie: hiphop first
+
+  function checkBeatDeps() {
+    var beats = RM.Beats;
+    if (!beats || typeof beats.renderBeat !== 'function' || !beats.STYLES)
+      throw new Error('Beat engine not ready — beats.js (RM.Beats.STYLES + renderBeat) must load before buildAuto runs.');
+    return beats;
+  }
+
+  // Calls onStep(step, info), then yields a macrotask so the browser can
+  // paint the step indicator before the heavy DSP runs. Never throws.
+  function autoStep(onStepCb, name, info) {
+    try {
+      if (typeof onStepCb === 'function') onStepCb(name, info);
+    } catch (e) { /* UI callback must never break the pipeline */ }
+    return new Promise(function (resolve) { setTimeout(resolve, 0); });
+  }
+
+  // Normalizes RM.Beats.STYLES (object map OR array) to [{id, style}].
+  function autoStyleList(styles) {
+    var out = [];
+    if (Array.isArray(styles)) {
+      styles.forEach(function (s, i) {
+        if (s) out.push({ id: (s.id != null ? String(s.id) : String(i)), style: s });
+      });
+    } else if (styles && typeof styles === 'object') {
+      Object.keys(styles).forEach(function (k) {
+        if (styles[k]) out.push({ id: k, style: styles[k] });
+      });
+    }
+    return out;
+  }
+
+  function autoStyleName(entry) {
+    if (!entry) return 'Unknown';
+    var s = entry.style || {};
+    return String(s.name || s.title || entry.id || 'Unknown');
+  }
+
+  // Explicit styleId wins (matched against id, s.id, s.name, s.title).
+  // Auto: minimum |songBpm - style.bpm|; tie -> AUTO_TIEBREAK order.
+  function pickAutoStyle(beats, songBpm, styleId) {
+    var list = autoStyleList(beats.STYLES);
+    if (!list.length)
+      throw new Error('RM.Beats.STYLES is empty — no beat styles to choose from.');
+    var want = (styleId != null) ? String(styleId).trim().toLowerCase() : '';
+    if (want) {
+      for (var i = 0; i < list.length; i++) {
+        var s = list[i].style || {};
+        var cands = [list[i].id, s.id, s.name, s.title];
+        for (var j = 0; j < cands.length; j++) {
+          if (cands[j] != null && String(cands[j]).trim().toLowerCase() === want)
+            return { entry: list[i], auto: false, note: '' };
+        }
+      }
+      // Unknown styleId -> honest Auto fallback, never a crash.
+    }
+    var best = null, bestDiff = Infinity, ties = [];
+    list.forEach(function (e) {
+      var b = Number(e.style && e.style.bpm);
+      if (!isFinite(b) || b <= 0) return;
+      var d = Math.abs(songBpm - b);
+      if (d < bestDiff - 1e-9) { bestDiff = d; best = e; ties = [e]; }
+      else if (Math.abs(d - bestDiff) < 1e-9) ties.push(e);
+    });
+    if (!best) best = list[0]; // degenerate: none had a numeric bpm
+    if (ties.length > 1) {
+      var tiedIds = {};
+      ties.forEach(function (e) { tiedIds[String(e.id).toLowerCase()] = e; });
+      for (var k = 0; k < AUTO_TIEBREAK.length; k++) {
+        var hit = tiedIds[AUTO_TIEBREAK[k]];
+        if (hit) { best = hit; break; }
+      }
+    }
+    var note = want
+      ? ('Style "' + styleId + '" not found — picked the nearest style automatically.')
+      : '';
+    return { entry: best, auto: true, note: note };
+  }
+
+  // Renders AUTO_LOOP_BARS at the EXACT song BPM (time-scaled pattern,
+  // never pitch-shifted — drums have no pitch to shift), resamples to the
+  // song's rate, then tiles sample-exact across the song length. W1's
+  // render is loop-perfect (integral bars), so every tile boundary is a
+  // downbeat and the join is seamless — no WSOLA needed for the beat.
+  function renderBeatTiledAuto(beats, entry, bpm, songLen, sr) {
+    return Promise.resolve()
+      .then(function () {
+        return Promise.resolve(beats.renderBeat(entry.id, bpm, AUTO_LOOP_BARS));
+      })
+      .then(function (buf) {
+        if (!isAudioBuffer(buf))
+          throw new Error('Beat render returned no audio.');
+        if (buf.sampleRate === sr) return buf;
+        return RM.audio.resampleBuffer(buf, sr);
+      })
+      .then(function (loopBuf) {
+        if (!isAudioBuffer(loopBuf) || !loopBuf.length)
+          throw new Error('Beat render returned no audio.');
+        var period = loopBuf.length; // one loop-perfect period
+        var ctx = RM.audio.ensureCtx();
+        var out = ctx.createBuffer(2, songLen, sr);
+        var nCh = loopBuf.numberOfChannels;
+        for (var c = 0; c < 2; c++) {
+          var src = loopBuf.getChannelData(Math.min(c, nCh - 1));
+          var dst = out.getChannelData(c);
+          for (var i = 0; i < songLen; i++) dst[i] = src[i % period];
+        }
+        return out;
+      });
+  }
+
+  // Strict auto-mix:
+  //   1. vocals -> -18 dBFS RMS (normalizeToRms, peak-limited 0.98)
+  //   2. beat    -> -18 dBFS RMS (normalizeToRms, peak-limited 0.98)
+  //   3. vocals x 1.4125 (+3 dB over the beat bed)
+  //   4. sum, equal-power fade in/out (click-free ends),
+  //      hardPeakLimit (the EXISTING limiter) — never clips.
+  function autoMixBuffers(dsp, vocalBuf, beatBuf) {
+    var sr = vocalBuf.sampleRate;
+    var len = Math.min(vocalBuf.length, beatBuf.length);
+    if (!len || len < 8)
+      throw new Error('Auto-mix is too short — one of the tracks has no audio.');
+    var v = dsp.normalizeToRms(vocalBuf, AUTO_VOCAL_RMS);
+    var b = dsp.normalizeToRms(beatBuf, AUTO_BEAT_RMS);
+    if (!isAudioBuffer(v)) v = vocalBuf; // tolerant: allow in-place
+    if (!isAudioBuffer(b)) b = beatBuf;
+    var ctx = RM.audio.ensureCtx();
+    var mix = ctx.createBuffer(2, len, sr);
+    var vc = v.numberOfChannels, bc = b.numberOfChannels;
+    for (var c = 0; c < 2; c++) {
+      var vd = v.getChannelData(Math.min(c, vc - 1));
+      var bd = b.getChannelData(Math.min(c, bc - 1));
+      var md = mix.getChannelData(c);
+      for (var i = 0; i < len; i++)
+        md[i] = bd[i] + vd[i] * AUTO_VOCAL_BOOST;
+    }
+    dsp.fadeInOut(mix, FADE_SEC);
+    hardPeakLimit(mix); // existing limiter: hard ceiling 0.98
+    return mix;
+  }
+
+  function buildAuto(song1Buffer, styleId, onProgress, onStepCb) {
+    var dsp;
+    var beats;
+    try {
+      dsp = checkDeps();      // audio-engine + mashup-dsp + RM.stems (reused)
+      beats = checkBeatDeps(); // W1's RM.Beats — buildAuto-only requirement
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    if (!isAudioBuffer(song1Buffer))
+      return Promise.reject(new Error(
+        'Auto Mashup needs a song — the track is missing or invalid. Pick a song first.'));
+
+    var song1 = song1Buffer;
+    var songLen = song1.length, sr = song1.sampleRate;
+
+    var lastFrac = -1;
+    var prog = function (label, frac) {
+      try {
+        if (onProgress) {
+          var f = Math.max(0, Math.min(1, frac));
+          if (f < lastFrac) f = lastFrac; // never move the bar backwards
+          lastFrac = f;
+          onProgress(label, f);
+        }
+      } catch (e) { /* never break the pipeline */ }
+    };
+
+    var vocalBuf = null, tagV = 'smart DSP';
+    var songBpm = AUTO_BPM_FALLBACK, bpmFallback = false, bpmNote = '';
+    var picked = null, beatBuf = null, outBuf = null;
+
+    var chain = Promise.resolve();
+
+    /* ---- Step 1: Extracting vocals… (automatic isolation) ---- */
+    chain = chain
+      .then(function () {
+        return autoStep(onStepCb, 'vocals', { label: 'Extracting vocals…' });
+      })
+      .then(function () {
+        prog('Extracting vocals…', 0.01);
+        return stemsProvider(song1, 'vocal', function (q) {
+          prog('Extracting vocals…', 0.01 + q * 0.33);
+        });
+      })
+      .then(function (res) {
+        if (!res || !isAudioBuffer(res.buffer))
+          throw new Error('Vocal isolation returned no audio.');
+        vocalBuf = res.buffer;
+        tagV = res.tag || tagV;
+        prog('Extracting vocals…', 0.35);
+      })
+      .catch(function (e) {
+        if (/^Vocal isolation returned no audio\./.test(e.message)) throw e;
+        throw new Error('Vocal isolation failed: ' + (e && e.message ? e.message : e));
+      });
+
+    /* ---- Step 2: Creating beat… (BPM detect + style + render) ---- */
+    chain = chain
+      .then(function () {
+        return autoStep(onStepCb, 'beat', { label: 'Creating beat…' });
+      })
+      .then(function () {
+        prog('Creating beat…', 0.36);
+        return Promise.resolve().then(function () {
+          return RM.audio.detectBPM(song1, function (q) {
+            prog('Creating beat…', 0.36 + q * 0.12);
+          });
+        });
+      })
+      .then(function (detected) {
+        var b = Number(detected);
+        if (!isFinite(b) || b < 50 || b > 220) {
+          // BPM detect failed -> honest fallback, never sold as detected.
+          bpmFallback = true;
+          songBpm = AUTO_BPM_FALLBACK;
+          bpmNote = 'Tempo detection failed — using 100 BPM fallback.';
+        } else {
+          songBpm = b;
+        }
+        prog('Creating beat…', 0.50);
+      })
+      .catch(function () {
+        bpmFallback = true;
+        songBpm = AUTO_BPM_FALLBACK;
+        bpmNote = 'Tempo detection failed — using 100 BPM fallback.';
+        prog('Creating beat…', 0.50);
+      })
+      .then(function () {
+        // Nearest-style selection; the beat is ALWAYS rendered at the
+        // exact song BPM — no ±3 mismatch possible (see header note).
+        picked = pickAutoStyle(beats, songBpm, styleId);
+        if (bpmNote && picked.note) bpmNote += ' ' + picked.note;
+        else if (picked.note) bpmNote = picked.note;
+        return renderBeatTiledAuto(beats, picked.entry, songBpm, songLen, sr);
+      })
+      .then(function (bb) {
+        beatBuf = bb;
+        prog('Creating beat…', 0.70);
+      });
+
+    /* ---- Step 3: Mixing… (strict auto-mix) ---- */
+    chain = chain
+      .then(function () {
+        return autoStep(onStepCb, 'mix', { label: 'Mixing…' });
+      })
+      .then(function () {
+        prog('Mixing…', 0.72);
+        outBuf = autoMixBuffers(dsp, vocalBuf, beatBuf);
+        prog('Mixing…', 0.98);
+      });
+
+    /* ---- done: return the buffer, NEVER autoplay ---- */
+    return chain
+      .then(function () {
+        return autoStep(onStepCb, 'done', { label: 'Done' });
+      })
+      .then(function () {
+        prog('Done', 1);
+        return {
+          buffer: outBuf,
+          meta: {
+            bpm: Math.round(songBpm * 10) / 10,
+            bpmFallback: bpmFallback,
+            bpmNote: bpmNote,
+            styleId: picked.entry.id,
+            styleName: autoStyleName(picked.entry),
+            styleAuto: picked.auto,
+            engineTagVocal: tagV,
+            durationSec: Math.round(outBuf.duration * 10) / 10,
+          },
+        };
+      });
+  }
+
   return {
     build: build,
+    buildAuto: buildAuto,
     setStemsProvider: setStemsProvider,
     resetStemsProvider: resetStemsProvider,
     getStemsProvider: getStemsProvider,

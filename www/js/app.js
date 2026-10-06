@@ -8,7 +8,7 @@ window.RM = window.RM || {};
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 19 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 20 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -2241,7 +2241,12 @@ Object.assign(RM.app, (function () {
     const es = A.state.exportSource;
     let checkedIdx = 0;
     if (es && es.kind === 'buffer' && es.buffer) {
-      opts.unshift({ kind: 'explicit', label: ('🎯 Selected: ') + es.name, get: () => ({ buffer: es.buffer, rate: 1, fx: A.defaultFx(), name: es.name }) });
+      // W5 (mashup-export.js): the mashup hands a finished mix and passes
+      // its own fx (flatFx — compressor OFF, so the W3 loudness-matched
+      // vocals+beat render exactly as previewed) and tail (0 — no dead-air
+      // tail on a finished mix). Callers that don't pass them (stem-deck
+      // "Export" buttons) keep the old defaults: defaultFx + 2.5 s tail.
+      opts.unshift({ kind: 'explicit', label: ('🎯 Selected: ') + es.name, get: () => ({ buffer: es.buffer, rate: 1, fx: (es.fx || A.defaultFx()), name: es.name, tail: (es.tail !== undefined ? es.tail : undefined) }) });
       checkedIdx = 0;
     } else if (es && typeof es.idx === 'number' && es.idx >= 0 && es.idx < opts.length) {
       checkedIdx = es.idx;
