@@ -57,6 +57,8 @@ RM.mashup = (function () {
 
   var DSP_FNS = ['detectKey', 'timeStretch', 'pitchShift',
                  'normalizeToRms', 'semitonesBetween', 'fadeInOut'];
+  // NOTE: dsp.rms is used opportunistically (typeof-guarded) for the v21
+  // +3 dB balance fix — not in DSP_FNS so older stubs keep working.
 
   /* ---------------- dependency guard ---------------- */
   function checkDeps() {
@@ -337,8 +339,13 @@ RM.mashup = (function () {
       prog('Balancing loudness…', 0.72);
       var q1, q2;
       try {
-        q1 = dsp.normalizeToRms(vocalBuf, TARGET_RMS);
+        // v21 ROOT FIX (same root cause as autoMixBuffers): the bed often
+        // can't reach TARGET_RMS (peak cap on high-crest audio), which left
+        // vocals hotter than the intended +3 dB. Normalize the vocal to the
+        // bed's ACHIEVED rms — mixBuffers() adds the +3 dB vocal lift.
         q2 = dsp.normalizeToRms(instrBuf, TARGET_RMS);
+        var bedRms = (typeof dsp.rms === 'function') ? dsp.rms(q2) : 0;
+        q1 = dsp.normalizeToRms(vocalBuf, bedRms > 1e-9 ? bedRms : TARGET_RMS);
       } catch (e) { throw new Error('Loudness balancing failed: ' + (e && e.message ? e.message : e)); }
       return Promise.all([Promise.resolve(q1), Promise.resolve(q2)]).then(function (n) {
         if (isAudioBuffer(n[0])) vocalBuf = n[0]; // tolerant: allow in-place
@@ -440,6 +447,35 @@ RM.mashup = (function () {
   var AUTO_BEAT_RMS = 0.126;    // -18 dBFS — beat reference level
   var AUTO_VOCAL_BOOST_DB = 3;  // +3 dB: vocals sit above the beat bed
   var AUTO_VOCAL_BOOST = Math.pow(10, AUTO_VOCAL_BOOST_DB / 20); // 1.4125
+
+  // v21: user-friendly text for provider {kind} rejections (hf-stems throws
+  // plain {kind} objects, not Errors — stringifying them gave users
+  // "Vocal isolation failed: [object Object]").
+  function mashupErrText(e) {
+    var k = e && e.kind;
+    if (k === 'cancelled') return 'Cancelled.';
+    if (k === 'timeout') return 'The AI server took too long (timeout). Try a shorter song or try again.';
+    if (k === 'connect') return 'Cannot reach the AI server. Check your internet connection.';
+    if (k === 'quota') return 'The free AI daily limit seems over (~6-10 songs/day). Try again tomorrow.';
+    if (k === 'asleep') return 'The AI server is waking up. Wait a minute and try again.';
+    if (k === 'server') return 'The AI server returned an error. Please try again in a bit.';
+    if (k === 'empty' || k === 'decode' || k === 'process') return 'AI vocal isolation failed on this song. Try another song.';
+    if (k === 'nocfg' || k === 'nopath') return 'AI server not configured.';
+    if (e instanceof Error) return e.message || 'Something went wrong.';
+    var s = String((e && e.message) || e || 'Something went wrong.');
+    return s === '[object Object]' ? 'Something went wrong.' : s;
+  }
+
+  // v21: cooperative cancel — throws {kind:'cancelled'} if the user tapped
+  // the mashup Cancel button. Called at every pipeline stage boundary.
+  function throwIfCancelled() {
+    try {
+      if (RM.mashupStems && typeof RM.mashupStems.isCancelRequested === 'function' &&
+          RM.mashupStems.isCancelRequested()) throw { kind: 'cancelled' };
+    } catch (e) {
+      if (e && e.kind === 'cancelled') throw e;
+    }
+  }
   var AUTO_LOOP_BARS = 4;       // short loop-perfect render, tiled across
                                 // the song — memory sane even for a 10-min
                                 // song (a few MB, not 200+)
@@ -557,33 +593,60 @@ RM.mashup = (function () {
   }
 
   // Strict auto-mix:
-  //   1. vocals -> -18 dBFS RMS (normalizeToRms, peak-limited 0.98)
-  //   2. beat    -> -18 dBFS RMS (normalizeToRms, peak-limited 0.98)
-  //   3. vocals x 1.4125 (+3 dB over the beat bed)
-  //   4. sum, equal-power fade in/out (click-free ends),
+  //   1. beat    -> -18 dBFS RMS (normalizeToRms, peak-limited 0.98)
+  //   2. vocals -> beat_achieved_RMS x 1.4125 (exactly +3 dB over the bed)
+  //   3. sum, equal-power fade in/out (click-free ends),
   //      hardPeakLimit (the EXISTING limiter) — never clips.
-  function autoMixBuffers(dsp, vocalBuf, beatBuf) {
+  //
+  //   v21 ROOT FIX: high-crest beats can never reach -18 dBFS — the peak cap
+  //   in normalizeToRms pins them at -18.6…-24.9 dBFS, which used to leave
+  //   vocals up to +10 dB too hot. The vocal now tracks the beat's ACHIEVED
+  //   rms, so the +3 dB balance holds for every style, always.
+  //   v21 (W4 MINOR): yields to the browser between phases — the old fully-
+  //   sync version froze the progress UI ~1-2 s on phone. Math is identical,
+  //   only macrotask yields are interleaved. Returns Promise<AudioBuffer>.
+  function autoMixBuffers(dsp, vocalBuf, beatBuf, onTick) {
     var sr = vocalBuf.sampleRate;
     var len = Math.min(vocalBuf.length, beatBuf.length);
     if (!len || len < 8)
-      throw new Error('Auto-mix is too short — one of the tracks has no audio.');
-    var v = dsp.normalizeToRms(vocalBuf, AUTO_VOCAL_RMS);
-    var b = dsp.normalizeToRms(beatBuf, AUTO_BEAT_RMS);
-    if (!isAudioBuffer(v)) v = vocalBuf; // tolerant: allow in-place
-    if (!isAudioBuffer(b)) b = beatBuf;
-    var ctx = RM.audio.ensureCtx();
-    var mix = ctx.createBuffer(2, len, sr);
-    var vc = v.numberOfChannels, bc = b.numberOfChannels;
-    for (var c = 0; c < 2; c++) {
-      var vd = v.getChannelData(Math.min(c, vc - 1));
-      var bd = b.getChannelData(Math.min(c, bc - 1));
-      var md = mix.getChannelData(c);
-      for (var i = 0; i < len; i++)
-        md[i] = bd[i] + vd[i] * AUTO_VOCAL_BOOST;
-    }
-    dsp.fadeInOut(mix, FADE_SEC);
-    hardPeakLimit(mix); // existing limiter: hard ceiling 0.98
-    return mix;
+      return Promise.reject(new Error('Auto-mix is too short — one of the tracks has no audio.'));
+    function tick() { return new Promise(function (res) { setTimeout(res, 0); }); }
+    var v, b, mix;
+    return Promise.resolve()
+      .then(function () {
+        throwIfCancelled();
+        b = dsp.normalizeToRms(beatBuf, AUTO_BEAT_RMS);
+        var bRms = (typeof dsp.rms === 'function') ? dsp.rms(b) : 0;
+        var vTarget = bRms > 1e-9 ? bRms * AUTO_VOCAL_BOOST : AUTO_VOCAL_RMS;
+        v = dsp.normalizeToRms(vocalBuf, vTarget);
+        if (!isAudioBuffer(v)) v = vocalBuf; // tolerant: allow in-place
+        if (!isAudioBuffer(b)) b = beatBuf;
+        if (typeof onTick === 'function') { try { onTick(0.80); } catch (e) {} }
+        return tick();
+      })
+      .then(function () {
+        throwIfCancelled();
+        var ctx = RM.audio.ensureCtx();
+        mix = ctx.createBuffer(2, len, sr);
+        var vc = v.numberOfChannels, bc = b.numberOfChannels;
+        for (var c = 0; c < 2; c++) {
+          var vd = v.getChannelData(Math.min(c, vc - 1));
+          var bd = b.getChannelData(Math.min(c, bc - 1));
+          var md = mix.getChannelData(c);
+          // v21: the +3 dB vocal lift is already baked into vTarget above —
+          // do NOT multiply again here (that was +6 dB).
+          for (var i = 0; i < len; i++)
+            md[i] = bd[i] + vd[i];
+        }
+        if (typeof onTick === 'function') { try { onTick(0.90); } catch (e) {} }
+        return tick();
+      })
+      .then(function () {
+        throwIfCancelled();
+        dsp.fadeInOut(mix, FADE_SEC);
+        hardPeakLimit(mix); // existing limiter: hard ceiling 0.98
+        return mix;
+      });
   }
 
   function buildAuto(song1Buffer, styleId, onProgress, onStepCb) {
@@ -623,6 +686,7 @@ RM.mashup = (function () {
     /* ---- Step 1: Extracting vocals… (automatic isolation) ---- */
     chain = chain
       .then(function () {
+        throwIfCancelled();
         return autoStep(onStepCb, 'vocals', { label: 'Extracting vocals…' });
       })
       .then(function () {
@@ -639,13 +703,21 @@ RM.mashup = (function () {
         prog('Extracting vocals…', 0.35);
       })
       .catch(function (e) {
-        if (/^Vocal isolation returned no audio\./.test(e.message)) throw e;
-        throw new Error('Vocal isolation failed: ' + (e && e.message ? e.message : e));
+        // v21: user Cancel must propagate as-is (not wrapped as a failure).
+        if (e && e.kind === 'cancelled') throw e;
+        if (e && e.message && /^Vocal isolation returned no audio\./.test(e.message)) throw e;
+        // v21: {kind} rejections are mapped to friendly text — never
+        // "[object Object]" to the user.
+        throw new Error('Vocal isolation failed: ' + mashupErrText(e));
       });
 
     /* ---- Step 2: Creating beat… (BPM detect + style + render) ---- */
     chain = chain
       .then(function () {
+        // v21: belt & suspenders — a null vocal must never reach the mixer.
+        throwIfCancelled();
+        if (!vocalBuf || !isAudioBuffer(vocalBuf))
+          throw new Error('Vocal isolation failed: no vocal audio to mix.');
         return autoStep(onStepCb, 'beat', { label: 'Creating beat…' });
       })
       .then(function () {
@@ -654,6 +726,16 @@ RM.mashup = (function () {
           return RM.audio.detectBPM(song1, function (q) {
             prog('Creating beat…', 0.36 + q * 0.12);
           });
+        }).catch(function () {
+          // v21 ROOT FIX: this catch used to sit on the WHOLE chain, so it
+          // swallowed step-1 vocal failures and continued with vocalBuf=null
+          // (→ cryptic TypeError + lying step indicator). It is now scoped
+          // to the detectBPM promise ONLY — tempo-detection failure is the
+          // only thing that gets the 100 BPM fallback.
+          bpmFallback = true;
+          songBpm = AUTO_BPM_FALLBACK;
+          bpmNote = 'Tempo detection failed — using 100 BPM fallback.';
+          prog('Creating beat…', 0.50);
         });
       })
       .then(function (detected) {
@@ -668,15 +750,10 @@ RM.mashup = (function () {
         }
         prog('Creating beat…', 0.50);
       })
-      .catch(function () {
-        bpmFallback = true;
-        songBpm = AUTO_BPM_FALLBACK;
-        bpmNote = 'Tempo detection failed — using 100 BPM fallback.';
-        prog('Creating beat…', 0.50);
-      })
       .then(function () {
         // Nearest-style selection; the beat is ALWAYS rendered at the
         // exact song BPM — no ±3 mismatch possible (see header note).
+        throwIfCancelled();
         picked = pickAutoStyle(beats, songBpm, styleId);
         if (bpmNote && picked.note) bpmNote += ' ' + picked.note;
         else if (picked.note) bpmNote = picked.note;
@@ -690,11 +767,18 @@ RM.mashup = (function () {
     /* ---- Step 3: Mixing… (strict auto-mix) ---- */
     chain = chain
       .then(function () {
+        throwIfCancelled();
         return autoStep(onStepCb, 'mix', { label: 'Mixing…' });
       })
       .then(function () {
         prog('Mixing…', 0.72);
-        outBuf = autoMixBuffers(dsp, vocalBuf, beatBuf);
+        // v21: autoMixBuffers is async now (yields between phases) — same math.
+        return autoMixBuffers(dsp, vocalBuf, beatBuf, function (f) {
+          prog('Mixing…', 0.72 + f * 0.26);
+        });
+      })
+      .then(function (mixed) {
+        outBuf = mixed;
         prog('Mixing…', 0.98);
       });
 

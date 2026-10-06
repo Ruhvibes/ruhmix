@@ -10,9 +10,10 @@
  *  W4. Rotation proxy: landscape viewport, no pageerrors, no h-overflow
  *  W5. Background/foreground: visibilitychange/pagehide -> no pageerrors,
  *      audio keeps playing (WebView default; no onPause/onResume in Java)
- *  W6. Update check: mocked version.json v18 (equal) -> up-to-date;
- *      v19 (greater) -> "Update available" dialog with Download/Later;
- *      versionCode sync app.js/build.gradle/version.json = 18
+ *  W6. Update check (v21: version-agnostic — local code se padha jata hai):
+ *      mocked version.json == local -> up-to-date;
+ *      local+1 (greater) -> "Update available" dialog with Download/Later;
+ *      versionCode sync app.js/build.gradle/version.json (all equal)
  *  W7. Projects: corrupt localStorage (projects + autosave) -> graceful,
  *      no crash, recovery banner logic safe
  *
@@ -259,8 +260,11 @@ async function main() {
 
   /* ---------- W6: update check ---------- */
   {
-    // 6a: remote == local (18) -> up to date
-    const p1 = await newPage(browser, { fetchStub: { versionCode: 18, versionName: '1.0', apkUrl: 'x', notes: '' } });
+    // v21: version-agnostic — local code www/js/app.js se padho taaki har
+    // round me hardcoded expectations stale na hon.
+    const LOCAL_CODE = +((fs.readFileSync(ROOT + '/www/js/app.js', 'utf8').match(/versionCode:\s*(\d+)/) || [])[1] || 0);
+    // 6a: remote == local -> up to date
+    const p1 = await newPage(browser, { fetchStub: { versionCode: LOCAL_CODE, versionName: '1.0', apkUrl: 'x', notes: '' } });
     const r1 = await p1.evaluate(() => {
       const A = RM.app;
       A.show('settings');
@@ -271,12 +275,12 @@ async function main() {
         appCode: RM.app.APP.versionCode,
       }), 600));
     });
-    add('W6a. remote v18 == local v18: "up to date", no dialog',
-      /up to date|latest/i.test(r1.status) && r1.appCode === 18,
+    add('W6a. remote == local: "up to date", no dialog',
+      /up to date|latest/i.test(r1.status) && r1.appCode === LOCAL_CODE,
       `status="${r1.status}" toast="${r1.toast}" APP.versionCode=${r1.appCode}`);
     await p1.close();
-    // 6b: remote 19 > local -> Update available dialog, Download/Later labels
-    const p2 = await newPage(browser, { fetchStub: { versionCode: 19, versionName: '1.0', apkUrl: 'https://example.com/x.apk', notes: 'n' } });
+    // 6b: remote = local+1 -> Update available dialog, Download/Later labels
+    const p2 = await newPage(browser, { fetchStub: { versionCode: LOCAL_CODE + 1, versionName: '1.0', apkUrl: 'https://example.com/x.apk', notes: 'n' } });
     const r2 = await p2.evaluate(() => {
       const A = RM.app;
       A.show('more');
@@ -297,7 +301,7 @@ async function main() {
         screen: RM.app.state.screen,
       }), 200));
     });
-    add('W6b. remote v19: "Update available" + Download/Later; Later -> dialog closes, app stays',
+    add('W6b. remote local+1: "Update available" + Download/Later; Later -> dialog closes, app stays',
       labelsOk && !r2b.dlgOpen && r2b.screen === 'more',
       `title="${r2.title}" ok="${r2.ok}" cancel="${r2.cancel}" afterLater=${JSON.stringify(r2b)}`);
     await p2.close();
@@ -305,8 +309,8 @@ async function main() {
     const appCode = +((fs.readFileSync(ROOT + '/www/js/app.js', 'utf8').match(/versionCode:\s*(\d+)/) || [])[1] || 0);
     const gradleCode = +((fs.readFileSync(ROOT + '/android/app/build.gradle', 'utf8').match(/versionCode\s+(\d+)/) || [])[1] || 0);
     const jsonCode = +(JSON.parse(fs.readFileSync(ROOT + '/version.json', 'utf8')).versionCode || 0);
-    add('W6c. versionCode sync: app.js/build.gradle/version.json = 18/18/18 (no infinite prompt)',
-      appCode === 18 && gradleCode === 18 && jsonCode === 18,
+    add('W6c. versionCode sync: app.js/build.gradle/version.json all equal (no infinite prompt)',
+      appCode > 0 && appCode === gradleCode && gradleCode === jsonCode,
       `app.js=${appCode} build.gradle=${gradleCode} version.json=${jsonCode}`);
   }
 

@@ -47,6 +47,13 @@ RM.mashupStems = (function () {
   let engineReason = '';        // why this engine was chosen (debug/honesty)
   let registered = false;       // true once RM.mashup.setStemsProvider landed
 
+  // v21 cooperative cancel: the mashup UI's Cancel button sets this flag;
+  // the in-flight neural /call is aborted and the provider rethrows
+  // {kind:'cancelled'} instead of silently falling back to DSP.
+  let userCancelFlag = false;
+  let activeCallCtrl = null;    // AbortController of the in-flight /call POST
+  const NEURAL_CALL_TIMEOUT = 60 * 1000; // matches hf-stems CALL_TIMEOUT
+
   // Per-song neural cache — keyed on the AudioBuffer object identity, so
   // the mashup's Song1-vocal and Song2-instrumental each separate once.
   // WeakMap: buffers are released when the song is unloaded.
@@ -223,7 +230,22 @@ RM.mashupStems = (function () {
     // 2. call -> event_id (uses the PUBLIC internals entry — no ad gate,
     //    no consent dialog; HF is free per hf-stems.js header)
     report(0.22, onProgress, T('', '🧠 AI request sent…'));
-    const eventId = await I.startCall(spaceUrl, api, srvPath);
+    // v21: this POST had NO timeout — a hung server froze the whole mashup
+    // with no escape. Bound it exactly like hf-stems' own runHf (60 s).
+    const callCtrl = new AbortController();
+    activeCallCtrl = callCtrl;
+    const callTo = setTimeout(function () { try { callCtrl.abort(); } catch (e) {} }, NEURAL_CALL_TIMEOUT);
+    let eventId;
+    try {
+      eventId = await I.startCall(spaceUrl, api, srvPath, callCtrl.signal);
+    } catch (e) {
+      if (userCancelFlag) throw { kind: 'cancelled' };
+      if (e && e.kind === 'cancel') throw { kind: 'timeout' }; // our 60 s timer fired
+      throw e;
+    } finally {
+      try { clearTimeout(callTo); } catch (e) {}
+      if (activeCallCtrl === callCtrl) activeCallCtrl = null;
+    }
 
     // 3. SSE wait (0.25 → 0.45)
     report(0.25, onProgress, T('', '🧠 AI is separating the stems… (~30-60 s)'));
@@ -262,6 +284,8 @@ RM.mashupStems = (function () {
         const pair = await separateNeural(audioBuffer, onProgress);
         return { buffer: pair[w], tag: ENGINE_NEURAL };
       } catch (e) {
+        // v21: user pressed Cancel — stop the build, don't silently DSP-fallback.
+        if (userCancelFlag || (e && e.kind === 'cancelled')) throw { kind: 'cancelled' };
         // Runtime fallback — honest tag: DSP is never sold as neural.
         try {
           const dsp = await dspSeparate(audioBuffer, w, onProgress);
@@ -320,7 +344,10 @@ RM.mashupStems = (function () {
   try {
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
-        api: { engineTag, describe, refresh, provider },
+        api: { engineTag, describe, refresh, provider,
+               requestCancel: () => { userCancelFlag = true; },
+               clearCancel: () => { userCancelFlag = false; },
+               isCancelRequested: () => userCancelFlag === true },
         internals: { bufferToWavBlob, decideEngine: () => engine, hfCfg, hfCleanCall },
       };
     }
@@ -332,5 +359,12 @@ RM.mashupStems = (function () {
     describe: describe,   // one-line honest description for the UI
     refresh: refresh,     // re-decide engine + re-register
     isRegistered: function () { return registered; },
+    // v21 cooperative cancel (mashup UI Cancel button):
+    requestCancel: function () {
+      userCancelFlag = true;
+      try { if (activeCallCtrl) activeCallCtrl.abort(); } catch (e) {}
+    },
+    clearCancel: function () { userCancelFlag = false; },
+    isCancelRequested: function () { return userCancelFlag === true; },
   };
 })();

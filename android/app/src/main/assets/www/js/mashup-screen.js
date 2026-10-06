@@ -88,6 +88,9 @@ window.RM = window.RM || {};
     ms.building = running;
     var b = $('mashup-make');
     if (b) b.disabled = running;
+    // v21: Cancel button — the only escape if the neural call stalls.
+    var c = $('mashup-cancel');
+    if (c) c.hidden = !running;
     if (running) { var r = $('mashup-result'); if (r) r.hidden = true; }
     else hideProgress();
   }
@@ -95,7 +98,9 @@ window.RM = window.RM || {};
   function fail(msg) {
     var a = A();
     setBuildUI(false);
-    if (a) a.toast(a.cleanErrMsg(msg) || 'Something went wrong. Please try again.');
+    // v21: user Cancel shows a clean "Cancelled." (never an error stack).
+    var txt = (msg && msg.kind === 'cancelled') ? 'Cancelled.' : (a.cleanErrMsg(msg) || 'Something went wrong. Please try again.');
+    if (a) a.toast(txt);
   }
 
   // Professional one-line summary of what the auto pipeline did.
@@ -133,6 +138,8 @@ window.RM = window.RM || {};
     }
     stopPreview();
     setBuildUI(true);
+    // v21: fresh build — clear any stale cancel flag from a previous run.
+    try { if (RM.mashupStems && typeof RM.mashupStems.clearCancel === 'function') RM.mashupStems.clearCancel(); } catch (e) {}
     BU.resetSteps();
     setProgress('Analyzing…', 0);
     var done = false;
@@ -155,6 +162,7 @@ window.RM = window.RM || {};
       })
       .then(function (res) {
         done = true;
+        try { if (RM.mashupStems && typeof RM.mashupStems.clearCancel === 'function') RM.mashupStems.clearCancel(); } catch (e) {}
         var buf = res && res.buffer ? res.buffer : (res instanceof AudioBuffer ? res : null);
         if (!buf) throw new Error('Mashup build produced no audio.');
         var m = (res && res.meta) || {};
@@ -199,7 +207,11 @@ window.RM = window.RM || {};
         if (play) play.textContent = '▶ Preview';
         a.toast('Mashup ready ✨');
       })
-      .catch(function (e) { done = true; fail(e); });
+      .catch(function (e) {
+        done = true;
+        try { if (RM.mashupStems && typeof RM.mashupStems.clearCancel === 'function') RM.mashupStems.clearCancel(); } catch (err) {}
+        fail(e);
+      });
   }
 
   /* ================= preview (user tap only — NEVER autoplay) ================= */
@@ -390,6 +402,12 @@ window.RM = window.RM || {};
     if (h) h.textContent = src === 'builtin' ? CONSENT_BUILTIN : CONSENT_SONG2;
     var s2li = $('mstep-beat'), s2lb = s2li ? s2li.querySelector('.mstep-label') : null;
     if (s2lb) s2lb.textContent = src === 'builtin' ? STEP2_BUILTIN : STEP2_SONG2;
+    // v21: source switch pe purana result card clear — warna Preview/Export
+    // purane (doosre flow ke) mashup pe chalta rehta. Sirf UI staleness thi.
+    try { stopPreview(); } catch (e) {}
+    ms.result = null;
+    var r = $('mashup-result');
+    if (r) r.hidden = true;
     BU.resetSteps();
   };
 
@@ -425,6 +443,16 @@ window.RM = window.RM || {};
     if (p2) p2.addEventListener('click', function () { requestPick(2); });
     var makeB = $('mashup-make');
     if (makeB) makeB.addEventListener('click', make);
+    // v21: Cancel — cooperative: aborts the in-flight neural call and lets
+    // the pipeline stages throw {kind:'cancelled'} at the next boundary.
+    var cancelB = $('mashup-cancel');
+    if (cancelB) cancelB.addEventListener('click', function () {
+      try {
+        if (RM.mashupStems && typeof RM.mashupStems.requestCancel === 'function')
+          RM.mashupStems.requestCancel();
+      } catch (e) {}
+      setProgress('Cancelling…', 0);
+    });
     var playB = $('mashup-play');
     if (playB) playB.addEventListener('click', togglePreview);
     var expB = $('mashup-export');

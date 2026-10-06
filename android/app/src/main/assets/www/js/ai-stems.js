@@ -769,6 +769,10 @@ RM.aiStems = (function () {
     setAiStatus('', T('', 'Checking… (a sleeping Space can take 1-2 min to wake)'));
     RM.hfStems.testSpace(url, api).then((r) => {
       RM.hfStems.setCfg(url, api); // safal test par hi save
+      // v21: mashup ka neural engine load-time pe decide hua tha — abhi
+      // refresh karo taaki isi session me neural path trigger ho (restart ka
+      // wait nahi).
+      try { if (RM.mashupStems && typeof RM.mashupStems.refresh === 'function') RM.mashupStems.refresh(); } catch (e) {}
       setAiStatus('ok', T('', 'Space reachable ✓ (API: /' + r.api + ')'));
       if (res) res.innerHTML = `<div class="ok">${T('', 'Connection successful — Hugging Face AI is ready. Outputs: ' + r.outputs + ' (Vocal + Instrumental).')}</div>`;
     }).catch((e) => {
@@ -913,6 +917,8 @@ RM.aiStems = (function () {
         return;
       }
       RM.hfStems.setCfg(url, api);
+      // v21: in-session save — mashup neural engine turant refresh (dekho test flow).
+      try { if (RM.mashupStems && typeof RM.mashupStems.refresh === 'function') RM.mashupStems.refresh(); } catch (e) {}
       setAiStatus('', T('', 'Saved ✓'));
       A.toast(T('', 'Hugging Face settings saved'));
       return;
