@@ -12,12 +12,12 @@ RuhMix is a professional music & remix studio for Android — 100% free, fully o
 - **Auto Remix** — 11 style presets (Commercial, Lofi, Slowed+Reverb, Emotional, EDM, Trap, Synthwave, Acoustic, Sufi, Vocal Focus, Custom) with BPM detection
 - **Slowed+Reverb Studio** — dedicated slowed presets (note: slowing also lowers pitch — tempo & pitch are linked in v1)
 - **Stem Separator (Beta)** — honest DSP-based separation: Vocal Cut (center cancellation), Drum Extract (real HPSS), Bass Focus, 4-band Spectral Split. Experimental — bleed expected, no neural-network claims
-- **Multitrack Mixer** — 5 tracks with volume / pan / mute / solo
+- **Multitrack Mixer** — 6 tracks (Vocal / Drums / Bass / Other / Beat / FX) with volume / pan / mute / solo, mixdown export
 - **FX Rack** — 3-band EQ + 10-band EQ, lowpass filter, soft drive, chorus, echo, convolution reverb, compressor, limiter — all click-free
 - **Mastering** — 5 mastering presets + peak normalization
 - **Voice Recorder** — mic recording via native bridge (device format, e.g. 3GP — decoded honestly)
 - **Beat Tools** — tap tempo, metronome
-- **Export** — MP3 (lamejs, 128–320 kbps, fully offline) or 16-bit WAV, cancel between stages, share via system sheet
+- **Export** — MP3 (lamejs, 128–320 kbps, fully offline), 16-bit WAV, or FLAC (pure-JS encoder), cancel between stages, share via system sheet
 - **Projects** — non-destructive op-list editing, autosave, crash recovery
 - **Settings** — in-app update check (never removed), cache clear, Hindi/English, dark theme
 
@@ -43,7 +43,7 @@ The app checks `version.json` for new releases (Settings → Check for update).
 - Stem separation is **Beta DSP** — frequency/center-channel methods, not neural AI; bleed/crosstalk expected
 - Slowed playback lowers **pitch together with tempo** (no independent pitch-shift in v1)
 - Recording uses the device's native format (3GP on most phones)
-- Export is **MP3 + WAV only** — no M4A/FLAC export in v1
+- Export is **MP3 + WAV + FLAC** — no M4A export in v1 (browsers cannot AAC-encode offline without native code)
 
 ---
 © Hasnain Khan — RuhMix 1.0

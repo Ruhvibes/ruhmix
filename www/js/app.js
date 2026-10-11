@@ -4,11 +4,15 @@
    Screens/navigation, studio audio path, import, native bridge callbacks.
    ===================================================================== */
 window.RM = window.RM || {};
+// v43 FINAL: Single source of truth for pick routing. {type:'create',id} |
+// {type:'mixer',track} | null. Flag-based routing (mashupPick/directLoad) ko
+// replace karta hai — ek hi object, koi khoya hua flag nahi.
+RM._pendingPick = null;
 
 RM.app = (function () {
   const $ = (id) => document.getElementById(id);
   const clamp = RM.audio.clamp;
-  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 29 };
+  const APP = { name: 'RuhMix', versionName: '1.0', versionCode: 52 };
   const VERSION_URL = 'https://raw.githubusercontent.com/Ruhvibes/ruhmix/main/version.json';
 
   /* ================= i18n ================= */
@@ -656,9 +660,26 @@ RM.app = (function () {
         music.mashupPick = false; music.directLoad = false; music.directBuf = null;
         notifyPickCancelled();
       }
+      // v38: mixer pick cancel — target + directLoad clear karo
+      // v43: _pendingPick bhi clear (single source of truth)
+      if (mixer.pickTrack) { mixer.pickTrack = null; music.directLoad = false; music.directBuf = null; }
+      if (window.RM) RM._pendingPick = null;
+      // v25create ka pending pick bhi clear karo
+      try {
+        if (window.RM && RM.v25create && typeof RM.v25create._cancelPendingPick === 'function') {
+          RM.v25create._cancelPendingPick();
+        }
+      } catch (e) {}
       return;
     }
     toast(('Loading… (') + okList.length + ')');
+    // v39: file SELECT ho gayi hai — ab Create screen pe loading dikhao
+    // (picker browse karte waqt nahi, taaki user confuse na ho).
+    try {
+      if (window.RM && RM.v25create && typeof RM.v25create._pickStarted === 'function') {
+        RM.v25create._pickStarted();
+      }
+    } catch (e) {}
     let chain = Promise.resolve();
     okList.forEach((p) => {
       const url = String(p);
@@ -695,6 +716,44 @@ RM.app = (function () {
       const wasMashup = music.mashupPick;
       music.directLoad = false; music.directBuf = null; music.mashupPick = false;
       if (d && d.buffer) {
+        // v43 FINAL: _pendingPick SABSE PEHLE — single source of truth.
+        // Flag kho jaye ya na ho, ye object batayega gaana kahan jayega.
+        const pp = (window.RM && RM._pendingPick) || null;
+        if (pp) {
+          RM._pendingPick = null; // consume
+          if (pp.type === 'mixer' && pp.track) {
+            const tr = pp.track;
+            mixer.pickTrack = null;
+            tr.buffer = d.buffer;
+            tr.name = String(d.name || 'audio').slice(0, 28);
+            if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
+            try { refreshTrackUI(); } catch (e) {}
+            toast('Loaded into ' + tr.name + ' ✓');
+            return;
+          }
+          if (pp.type === 'create' && window.RM && RM.v25create && typeof RM.v25create._directPick === 'function') {
+            try { RM.v25create._directPick(d.buffer, d.name); } catch (e) { console.log('[pick] direct failed', e); }
+            return;
+          }
+          // Unknown type — fall through to legacy paths
+        }
+        // v38 MIXER (legacy): agar mixer track ke liye pick tha, to buffer seedha us track me.
+        if (mixer.pickTrack) {
+          const tr = mixer.pickTrack;
+          mixer.pickTrack = null;
+          tr.buffer = d.buffer;
+          tr.name = String(d.name || 'audio').slice(0, 28);
+          if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
+          try { refreshTrackUI(); } catch (e) {}
+          toast('Loaded into ' + tr.name + ' ✓');
+          return;
+        }
+        // v35 DIRECT: v25 Create screen ka pick hook — mashupIntercept/bridge se
+        // pehle. Sirf st.pickId chahiye; song seedha sahi slot me, kahin aur nahi.
+        if (wasMashup && window.RM && RM.v25create && typeof RM.v25create._directPick === 'function') {
+          try { RM.v25create._directPick(d.buffer, d.name); } catch (e) { console.log('[pick] direct failed', e); }
+          return;
+        }
         // Mashup picker: pending pick -> buffer lands in the mashup slot.
         if (mashupIntercept(d.buffer, d.name)) return;
         if (wasMashup) {
@@ -703,6 +762,17 @@ RM.app = (function () {
           notifyPickCancelled();
           toast('Pick failed — try again');
           return;
+        }
+        // v39 BULLETPROOF: agar Create screen kisi slot ke liye wait kar raha hai
+        // (st.pickId set), to gaana WAHIN jayega — Editor me nahi! Flag kho jaye
+        // tab bhi ye pakdega. ("yaha bhej deta hai" bug ka root fix)
+        if (window.RM && RM.v25create && typeof RM.v25create._hasPendingPick === 'function') {
+          try {
+            if (RM.v25create._hasPendingPick() && typeof RM.v25create._directPick === 'function') {
+              RM.v25create._directPick(d.buffer, d.name);
+              return;
+            }
+          } catch (e) { console.log('[pick] bulletproof failed', e); }
         }
         // Ultra-simple: song tap -> seedha editor (koi "Use" button nahi)
         loadAudioBuffer(d.buffer, d.name, { name: d.name, size: 0, type: '', lastModified: Date.now() });
@@ -1887,7 +1957,7 @@ Object.assign(RM.app, (function () {
   const HI = () => false; // English-only build: language locked to English
 
   /* ================= multitrack mixer (6 tracks) ================= */
-  const mixer = { tracks: [] };
+  const mixer = { tracks: [], pickTrack: null }; // v38: pickTrack = kaunsa track file-picker ka wait kar rha hai
   const MIXER_TRACK_NAMES = ['VOCAL', 'DRUMS', 'BASS', 'OTHER', 'BEAT', 'FX'];
   function initMixer() {
     const box = $('mixer-tracks');
@@ -1976,18 +2046,32 @@ Object.assign(RM.app, (function () {
   }
   function showTrackLoadMenu(tr) {
     const opts = [];
+    // v38: "Pick audio file" option — user seedha file picker se gaana la sake.
+    // Pehle sirf loaded audio dikhta tha, "Nothing to load" pe atak jata tha.
+    opts.push({ label: '📁 Pick audio file…', pick: true });
     if (A.state.viewBuffer) opts.push({ label: ('Current project'), buf: A.state.viewBuffer });
     RM.stems.results.forEach((s) => opts.push({ label: 'Stem: ' + s.name, buf: s.buffer }));
     A.state.imports.forEach((it) => opts.push({ label: it.name, buf: it.buffer }));
-    if (!opts.length) { A.toast('Nothing to load'); return; }
     const body = opts.map((o, i) => `<button class="btn block listbtn" data-i="${i}">${A.escapeHtml(o.label)}</button>`).join('');
     A.dialog('Load into track', body, null, 'Cancel').then(() => {});
     document.querySelectorAll('#dlg-body .listbtn').forEach((b) => {
       b.addEventListener('click', () => {
         const o = opts[+b.dataset.i];
+        $('dlg').classList.remove('show');
+        if (o.pick) {
+          // Mixer track ke liye native picker — result mixerPickTarget me jayega
+          // v39 FIX: music.directLoad=true LAZMI — warna handleAudioPicked me
+          // decoded buffer capture hi nahi hota (directBuf null rehta hai)!
+          // v43 FINAL: _pendingPick primary routing — ek hi source of truth.
+          mixer.pickTrack = tr;
+          if (window.RM) RM._pendingPick = { type: 'mixer', track: tr };
+          music.directLoad = true; music.directBuf = null;
+          if (typeof pickAudio === 'function') pickAudio();
+          else A.toast('File picking is unavailable');
+          return;
+        }
         tr.buffer = o.buf; tr.name = Array.from(o.label).slice(0, 28).join('');
         if (tr.player) { try { tr.player.dispose(); } catch (e) {} tr.player = null; }
-        $('dlg').classList.remove('show');
         refreshTrackUI();
       });
     });
@@ -3226,7 +3310,13 @@ Object.assign(RM.app, (function () {
     A.updateRecUI = A.updateRecUI || function () {};
     // crash recovery (v27 W3: extracted — see checkCrashRecovery below)
     checkCrashRecovery();
-    window.addEventListener('pagehide', () => RM.proj.markCleanExit());
+    // v52 FIX (recovery nag): yahan pehle `pagehide -> markCleanExit()` tha —
+    // wo HAR unload pe clean mark kar deta tha (reload, app swipe-away,
+    // system kill), jisse crash-recovery banner kabhi nahi aata tha bawajood
+    // dirty autosave ke. Ab clean-exit SIRF explicit "Exit RuhMix?" confirm
+    // pe mark hota hai (MainActivity exit dialog -> evaluateJavascript
+    // RM.proj.markCleanExit()). Safe default: dirty autosave = recovery offer.
+    // (pagehide pe kuch nahi karna — crash me pagehide fire hi nahi hota.)
     // ensure audio on first touch (mobile autoplay policy)
     document.addEventListener('pointerdown', () => { try { RM.audio.ensureCtx(); } catch (e) {} }, { once: true });
     // nav back-stack: root entry Home ho taaki back Home pe aakar ruke

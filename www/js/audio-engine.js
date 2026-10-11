@@ -21,18 +21,29 @@ RM.audio = (function () {
     if (!ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) throw new Error('Web Audio API not supported on this device.');
-      ctx = new AC();
+      // v34 ANTI-GLITCH: 'playback' latencyHint = bada audio buffer = phone pe
+      // kam underrun = no stutter. 'interactive' (default) low-latency hai jo
+      // loaded phone pe atakta hai. Music app ke liye playback sahi tradeoff.
+      try { ctx = new AC({ latencyHint: 'playback' }); }
+      catch (e) { ctx = new AC(); } // purane WebView fallback
       buildMaster();
+      // v35: background se wapas aane par context suspended ho sakta hai —
+      // resume na ho to audio atakta hai ya bilkul nahi bajta.
+      try {
+        document.addEventListener('visibilitychange', function () {
+          if (!document.hidden && ctx && ctx.state === 'suspended') {
+            try { ctx.resume(); } catch (e) {}
+          }
+        });
+      } catch (e) {}
     }
     if (ctx.state === 'suspended') ctx.resume();
     return ctx;
   }
 
-  // Master chain: everything flows master -> analyser -> limiter -> clipper
-  // -> destination. The limiter is a hard-knee brickwall-style compressor
-  // (20:1, zero knee): with stacked EQ boosts (+15dB/band), wet FX sends and
-  // multi-track mixer sums, a soft limiter can still let peaks past 0dBFS
-  // (digital clipping at the DAC).
+  // Master chain: everything flows master -> analyser -> clipper -> destination.
+  // The clipper is the TRUE ceiling (v50: redundant limiter removed — FX chain
+  // already has comp + limiter).
   // The clipper is the TRUE ceiling and is load-bearing, not decoration.
   // MEASURED (Chrome 154, OfflineAudioContext, 2026-10): a
   // DynamicsCompressor alone is NOT a true brickwall, even at 20:1/zero
@@ -50,16 +61,12 @@ RM.audio = (function () {
     analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.8;
-    limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = -1.5;
-    limiter.knee.value = 0;
-    limiter.ratio.value = 20;
-    limiter.attack.value = 0.002;
-    limiter.release.value = 0.15;
+    // v50 FIX (Audio#3): Master limiter HATAYA — chain me pehle hi 2 compressors
+    // (comp + limiter) hain, teesra redundant tha. Clipper hi true ceiling hai.
+    // limiter = ctx.createDynamicsCompressor(); — REMOVED
     const clipper = createSafetyClipper(ctx);
     master.connect(analyser);
-    analyser.connect(limiter);
-    limiter.connect(clipper);
+    analyser.connect(clipper);
     clipper.connect(ctx.destination);
   }
 
@@ -222,7 +229,20 @@ RM.audio = (function () {
   /* ---------- decode / encode ---------- */
   function decodeArrayBuffer(ab) {
     ensureCtx();
-    return ctx.decodeAudioData(ab.slice(0));
+    // v45: decode timeout — badi file (28MB+) pe decodeAudioData hang ho sakta hai.
+    // 60s me na ho to clear error, silent hang nahi.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('decode timeout (file bahut badi ya corrupt)'));
+      }, 60000);
+      ctx.decodeAudioData(ab.slice(0)).then((buf) => {
+        clearTimeout(timer);
+        resolve(buf);
+      }).catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
   }
 
   // 16-bit PCM stereo WAV. Chunked to avoid blocking on long mixes.

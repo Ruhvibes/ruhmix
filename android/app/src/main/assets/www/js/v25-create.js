@@ -562,22 +562,39 @@ window.RM = window.RM || {};
 
   /* ================= song cards ================= */
 
-  function drawWaveform(canvas, buffer) {
-    if (!canvas || !isAudioBuffer(buffer)) return;
+  // v36 ANTI-STUTTER: peaks ko song object pe cache karo. Pehle har renderSongs()
+  // pe 2M-iteration PCM walk hota tha (3-min song) — main-thread freeze =
+  // playback me glitch. Ab ek baar compute, phir reuse.
+  function getCachedPeaks(song, buffer, count) {
+    if (song._peaks && song._peaksBuf === buffer && song._peaks.length === count) return song._peaks;
+    var peaks = new Float32Array(count);
     try {
-      var ctx = canvas.getContext('2d');
-      var W = canvas.width = 120, H = canvas.height = 36;
-      ctx.clearRect(0, 0, W, H);
       var ch = buffer.getChannelData(0);
-      var step = Math.max(1, Math.floor(ch.length / W));
-      ctx.fillStyle = '#7CFC98';
-      for (var x = 0; x < W; x++) {
+      var step = Math.max(1, Math.floor(ch.length / count));
+      for (var x = 0; x < count; x++) {
         var peak = 0, off = x * step, end = Math.min(ch.length, off + step);
         for (var i = off; i < end; i += 4) {
           var v = Math.abs(ch[i]);
           if (v > peak) peak = v;
         }
-        var h = Math.max(1, Math.round(peak * H));
+        peaks[x] = peak;
+      }
+    } catch (e) {}
+    song._peaks = peaks;
+    song._peaksBuf = buffer;
+    return peaks;
+  }
+
+  function drawWaveform(canvas, song, buffer) {
+    if (!canvas || !isAudioBuffer(buffer)) return;
+    try {
+      var ctx = canvas.getContext('2d');
+      var W = canvas.width = 120, H = canvas.height = 36;
+      ctx.clearRect(0, 0, W, H);
+      var peaks = getCachedPeaks(song, buffer, W);
+      ctx.fillStyle = '#7CFC98';
+      for (var x = 0; x < W; x++) {
+        var h = Math.max(1, Math.round(peaks[x] * H));
         ctx.fillRect(x, (H - h) / 2, 1, h);
       }
     } catch (e) {}
@@ -592,10 +609,11 @@ window.RM = window.RM || {};
     top.className = 'v25-card-top';
     var nm = document.createElement('div');
     nm.className = 'v25-name';
-    nm.textContent = song.buffer ? displayName(song.name) : 'Song ' + (idx + 1) + ' — not picked';
+    // v38: loading state — badi file ka copy+decode time leta hai, user ko dikhe
+    nm.textContent = song.loading ? '⏳ Loading song…' : (song.buffer ? displayName(song.name) : 'Song ' + (idx + 1) + ' — not picked');
     var fn = document.createElement('div');
     fn.className = 'muted small';
-    fn.textContent = song.buffer ? (song.fileName || song.name) : 'Tap "Pick audio" to add';
+    fn.textContent = song.loading ? 'Please wait — copying & decoding…' : (song.buffer ? (song.fileName || song.name) : 'Tap "Pick audio" to add');
     top.appendChild(nm);
     top.appendChild(fn);
 
@@ -638,6 +656,9 @@ window.RM = window.RM || {};
       b.setAttribute('data-id', String(song.id));
       b.title = title || txt;
       if (disabled) b.disabled = true;
+      // v47 FIX: DIRECT onclick HATAYA! wireGlobalTaps (document delegation)
+      // akela kaafi hai. Dono hone se ek tap pe 2-3 baar cardAction fire hota
+      // tha — "teen teen baar option aa rha hai" bug ka root cause.
       return b;
     }
     bar.appendChild(mkBtn(song.buffer ? '↻ Re-pick' : '🎵 Pick audio', 'pick', 'Pick audio file'));
@@ -652,7 +673,7 @@ window.RM = window.RM || {};
     card.appendChild(top);
     card.appendChild(meta);
     card.appendChild(bar);
-    drawWaveform(cv, song.buffer);
+    drawWaveform(cv, song, song.buffer);
     return card;
   }
 
@@ -1042,10 +1063,15 @@ window.RM = window.RM || {};
 
   // v29 F1: pick abandon ke saare exit path — bridge + app-side flag dono disarm.
   function cancelPick() {
+    var song = (st.pickId != null) ? getSong(st.pickId) : null;
+    if (song) song.loading = false;
     st.pickId = null;
     st._viaNative = false;
+    // v43: _pendingPick clear (single source of truth)
+    if (window.RM) RM._pendingPick = null;
     disarmPickBridge();
     try { if (RM.app && typeof RM.app.disarmMashupPick === 'function') RM.app.disarmMashupPick(); } catch (e) {}
+    renderSongs();
   }
 
   /* ================= pick flow (exact #cdx-pick path) ================= */
@@ -1056,8 +1082,17 @@ window.RM = window.RM || {};
     stopPreview();
     stopAudition();
     st.pickId = id;
+    // v39 FIX: loading picker khulne pe NAHI dikhao — user confuse hota hai
+    // ("maine select hi nahi kiya, loading kyun?"). Loading tab dikhega jab
+    // file select ho jaye (app.js handleAudioPicked -> _pickStarted call karega).
+    var song = getSong(id);
+    if (song) { song.loading = false; song.err = null; }
     armPickBridge(id); // w26: route app.js's mashupIntercept to our onPicked
     st._viaNative = false;
+    // v43 FINAL: Single source of truth — yehi batayega gaana kahan jayega.
+    // Flag (mashupPick/directLoad) ab backup hain, primary ye object hai.
+    if (window.RM) RM._pendingPick = { type: 'create', id: id };
+    renderSongs();
     try {
       if (RM.app && typeof RM.app.pickAudio === 'function') {
         // v29 F1: direct routing arm karo — decode hote hi buffer mashupIntercept
@@ -1081,9 +1116,11 @@ window.RM = window.RM || {};
     disarmPickBridge(); // w26: pick resolved — restore the old screen's handler
     st._viaNative = false;
     var song = (id != null) ? getSong(id) : null;
+    if (song) song.loading = false;
     if (!song || !isAudioBuffer(buffer)) {
       if (a) a.toast('Pick failed — try again');
       st.pickId = null;
+      renderSongs();
       return;
     }
     song.buffer = buffer;
@@ -1092,7 +1129,9 @@ window.RM = window.RM || {};
     song.enabled = true;
     song.bpm = null;
     song.key = null;
+    song.analyzing = false; // v50 BUG4: purani analysis ka stale BPM/key nayi file pe na likhe
     st.pickId = null;
+    clearStaleResult(); // v50 BUG1: nayi file = purana mashup invalid
     renderSongs();
     analyzeSong(song); // real BPM + key analysis, results land on the card
     if (a) {
@@ -1103,6 +1142,8 @@ window.RM = window.RM || {};
 
   function addSong() {
     var a = A();
+    // v50 BUG2: build ke dauran song add mat karo — buffer mutate hoga
+    if (st.creating) { if (a) a.toast('Still building — wait for the mashup to finish.'); return; }
     if (st.songs.length >= MAX_SONGS) {
       if (a) a.toast('Maximum ' + MAX_SONGS + ' songs');
       return;
@@ -1119,6 +1160,13 @@ window.RM = window.RM || {};
     for (var i = 0; i < st.songs.length; i++) if (st.songs[i].id === id) { idx = i; break; }
     if (idx < 0) return;
     var song = st.songs[idx];
+    // v50 BUG2: build ke dauran card mutate mat karo (pick/remove/toggle/up/down)
+    // — engine purane buffer pe kaam kar raha hai, corrupt output hoga.
+    // 'aud' (preview) allowed hai — wo sirf sunta hai, mutate nahi karta.
+    if (st.creating && act !== 'aud') {
+      if (a) a.toast('Still building — wait for the mashup to finish.');
+      return;
+    }
     if (act === 'pick') { requestPick(id); }
     else if (act === 'aud') { auditionSong(id); }
     else if (act === 'remove') {
@@ -1127,19 +1175,23 @@ window.RM = window.RM || {};
       stopAudition();
       if (st.pickId === id) { cancelPick(); } // v29 F1: pending pick bhi disarm
       st.songs.splice(idx, 1);
+      clearStaleResult(); // v50 BUG1: song hata = purana mashup invalid
       renderSongs();
       if (a) a.toast('Song removed');
     }
     else if (act === 'up' && idx > 0) {
       st.songs.splice(idx - 1, 0, st.songs.splice(idx, 1)[0]);
+      clearStaleResult(); // v50 BUG1: order badla = purana mashup invalid
       renderSongs();
     }
     else if (act === 'down' && idx < st.songs.length - 1) {
       st.songs.splice(idx + 1, 0, st.songs.splice(idx, 1)[0]);
+      clearStaleResult(); // v50 BUG1: order badla = purana mashup invalid
       renderSongs();
     }
     else if (act === 'toggle' && song.buffer) {
       song.enabled = !song.enabled;
+      clearStaleResult(); // v50 BUG1: enable/disable = purana mashup invalid
       renderSongs();
     }
   }
@@ -1200,6 +1252,10 @@ window.RM = window.RM || {};
     st.creating = false;
     var c = $('v25-cancel');
     if (c) c.hidden = true;
+    // v50 BUG3: fail pe progress panel bhi hide karo (success path me tha, fail me nahi)
+    var pw = $('v25-progress');
+    if (pw) pw.hidden = true;
+    setProgress('', 0);
     // w29 P2-7: unlock the mode/preset chips + settings on failure too.
     renderModeChips();
     renderPresetChips();
@@ -1597,8 +1653,13 @@ window.RM = window.RM || {};
       var finalize = function (fbuf) {
         // w29 P2-5: §14 length cap — only when the user explicitly set a
         // length. Trims an over-budget mix from the tail (outro first).
+        // v50 BUG5 FIX: gridBpm yahan scope me nahi tha (ReferenceError, silently
+        // swallowed) — meta.bpm1 se lo.
         if (st.lengthTouched && po && po.spec) {
-          try { fbuf = trimToLength(fbuf, gridBpm, po.spec.lengthMin); } catch (e) {}
+          try {
+            var _gbpm = Number(meta.bpm1) || 100;
+            fbuf = trimToLength(fbuf, _gbpm, po.spec.lengthMin);
+          } catch (e) {}
         }
         var tags = (res && res.engineTags) || songs.map(function (s) { return s.tag || 'smart DSP'; });
         st.result = { buffer: fbuf, meta: meta, engine: honestEngineLabel(tags) };
@@ -1627,10 +1688,19 @@ window.RM = window.RM || {};
         var me = $('v25-meta');
         if (me) me.textContent = meta.durationSec ? (meta.durationSec + 's') : '';
         var rr = $('v25-result');
-        if (rr) rr.hidden = false;
+        if (rr) {
+          rr.hidden = false;
+          // v49 FIX: mashup complete hone pe result tak AUTO-SCROLL karo —
+          // user ko pata chale "kaha gaya"! Sticky button ke upar dikhega.
+          try {
+            setTimeout(function() {
+              rr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 300);
+          } catch (e) {}
+        }
         var play = $('v25-play');
         if (play) play.textContent = '▶ Preview';
-        a.toast('Mashup ready ✨');
+        a.toast('Mashup ready ✨ — Preview dabao!');
       };
       if (!spec) {
         finalize(buf);
@@ -1746,19 +1816,36 @@ window.RM = window.RM || {};
 
   /* ================= wiring ================= */
 
+  // v30: bulletproof tap handling. The old wrap-level delegation died when
+  // wire() ran before the songs element existed (or after DOM rebuilds) —
+  // taps never reached cardAction, so "Pick audio" did literally nothing.
+  // Document-level capture survives re-renders, DOM moves and wire timing.
+  function wireGlobalTaps() {
+    if (st._globalWired || typeof document === 'undefined') return;
+    st._globalWired = true;
+    document.addEventListener('click', function (e) {
+      var el = e.target;
+      var t = (el && el.closest) ? el.closest('[data-act]') : null;
+      if (!t) return;
+      var screen = $(SCREEN_ID);
+      if (!screen || !screen.contains(t)) return; // not our screen — ignore
+      var act = t.getAttribute('data-act');
+      var id = parseInt(t.getAttribute('data-id'), 10);
+      if (act && !isNaN(id)) {
+        try { cardAction(act, id); }
+        catch (err) {
+          try { var a = A(); if (a) a.toast('Tap failed — try again'); } catch (e2) {}
+        }
+        try { if (e.cancelable) e.preventDefault(); } catch (e3) {}
+      }
+    }, true);
+  }
+
   function wire() {
     if (st._wired) return;
     st._wired = true;
     screenEl();
-    var wrap = $('v25-songs');
-    if (wrap) wrap.addEventListener('click', function (e) {
-      var t = e.target;
-      while (t && t !== wrap && !t.getAttribute) t = t.parentNode;
-      if (!t || t === wrap) return;
-      var act = t.getAttribute('data-act');
-      var id = parseInt(t.getAttribute('data-id'), 10);
-      if (act && !isNaN(id)) cardAction(act, id);
-    });
+    wireGlobalTaps(); // v30: document-level delegation — survives re-renders/DOM moves
     var add = $('v25-add');
     if (add) add.addEventListener('click', addSong);
     var makeB = $('v25-create');
@@ -1829,6 +1916,32 @@ window.RM = window.RM || {};
 
   RM.v25create = {
     onPicked: onPicked,
+    // v35 DIRECT pick hook: app.js handleAudioPicked isko sabse pehle call karta
+    // hai jab music.mashupPick armed tha. RM.mashupScreen/pickTarget/bridge-wrap
+    // ke 5 fail-points bypass — seedha st.pickId wale slot me buffer land karta hai.
+    _directPick: function (buffer, name) {
+      var id = st.pickId;
+      disarmPickBridge();
+      try { if (RM.app && typeof RM.app.disarmMashupPick === 'function') RM.app.disarmMashupPick(); } catch (e) {}
+      onPicked(id, buffer, name);
+    },
+    // v39: kya Create screen kisi slot ke liye file ka wait kar raha hai?
+    // handleAudioPicked me bulletproof fallback ke liye — agar music.mashupPick
+    // flag kho gaya ho to bhi gaana sahi jagah jayega, Editor me nahi.
+    _hasPendingPick: function () { return st.pickId != null; },
+    // v39: file select ho gayi hai, ab decode shuru — loading dikhao.
+    // (requestPick me nahi, taaki picker browse karte waqt "Loading" na dikhe)
+    _pickStarted: function () {
+      var song = st.pickId != null ? getSong(st.pickId) : null;
+      if (song) { song.loading = true; song.err = null; renderSongs(); }
+    },
+    // v43: pick cancel ho gaya — pending state clear karo.
+    _cancelPendingPick: function () {
+      var song = st.pickId != null ? getSong(st.pickId) : null;
+      st.pickId = null;
+      disarmPickBridge();
+      if (song) { song.loading = false; renderSongs(); }
+    },
     show: function () { var a = A(); screenEl(); if (a) a.show('v25create'); },
     getSongs: function () {
       return st.songs.map(function (s) {

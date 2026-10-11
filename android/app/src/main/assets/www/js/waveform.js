@@ -34,7 +34,8 @@ RM.wave = (function () {
       trim: null,         // {a, b} seconds — shaded region
       markers: [],        // [{t, label, color}]
       onSeek: null,       // fn(seconds)
-      _raf: 0, _dirty: true,
+      _raf: 0, _dirty: true, _staticDirty: true,
+      _staticCanvas: null, // v36: offscreen cache for static waveform layer
     };
 
     function resize() {
@@ -50,7 +51,7 @@ RM.wave = (function () {
       view.peaks = peaks || new Float32Array(0);
       view.zoom = 1; view.scroll = 0; view.playheadSec = -1;
       view.trim = null; view.markers = [];
-      view._dirty = true;
+      view._dirty = true; view._staticDirty = true;
     };
 
     // Visible window in seconds
@@ -63,15 +64,22 @@ RM.wave = (function () {
       return { a, b: a + winLen };
     };
 
-    view.setZoom = (z) => { view.zoom = clamp(z, 1, 64); view._dirty = true; };
-    view.setScroll = (s) => { view.scroll = clamp(s, 0, 1); view._dirty = true; };
-    view.setPlayhead = (sec) => { view.playheadSec = sec; view._dirty = true; };
-    view.setTrim = (a, b) => { view.trim = (a != null && b != null) ? { a, b } : null; view._dirty = true; };
-    view.setMarkers = (m) => { view.markers = m || []; view._dirty = true; };
+    view.setZoom = (z) => { view.zoom = clamp(z, 1, 64); view._dirty = true; view._staticDirty = true; };
+    view.setScroll = (s) => { view.scroll = clamp(s, 0, 1); view._dirty = true; view._staticDirty = true; };
+    view.setPlayhead = (sec) => { view.playheadSec = sec; view._dirty = true; }; // v36: playhead does NOT dirty static layer
+    view.setTrim = (a, b) => { view.trim = (a != null && b != null) ? { a, b } : null; view._dirty = true; view._staticDirty = true; };
+    view.setMarkers = (m) => { view.markers = m || []; view._dirty = true; view._staticDirty = true; };
 
-    view.draw = () => {
+    // v36 DEEP: static layer ko offscreen canvas pe cache karo. Pehle har draw()
+    // me background + 800 peaks + markers redraw hote the (30k ops). Ab sirf
+    // tab jab buffer/zoom/scroll/trim/markers badle. Playhead alag layer pe.
+    view.drawStatic = () => {
       resize();
-      const g = view.ctx2d, W = canvas.width, H = canvas.height;
+      const W = canvas.width, H = canvas.height;
+      if (!view._staticCanvas) view._staticCanvas = document.createElement('canvas');
+      const sc = view._staticCanvas;
+      if (sc.width !== W || sc.height !== H) { sc.width = W; sc.height = H; }
+      const g = sc.getContext('2d');
       g.clearRect(0, 0, W, H);
       // background
       const bg = g.createLinearGradient(0, 0, 0, H);
@@ -81,12 +89,12 @@ RM.wave = (function () {
         g.fillStyle = '#5b6b8c'; g.font = `${Math.max(11, H * 0.16)}px sans-serif`;
         g.textAlign = 'center'; g.textBaseline = 'middle';
         g.fillText('Load audio', W / 2, H / 2);
+        view._staticDirty = false;
         return;
       }
       const { a: wA, b: wB } = view.window();
       const dur = view.buffer.duration;
       const n = view.peaks.length;
-      const colW = W / n;
       // trim shade
       if (view.trim) {
         const x1 = ((view.trim.a - wA) / (wB - wA)) * W;
@@ -125,16 +133,29 @@ RM.wave = (function () {
           g.fillRect(x - 1, 0, 2, H * 0.28);
         }
       });
-      // playhead
-      if (view.playheadSec >= 0 && view.playheadSec >= wA && view.playheadSec <= wB) {
-        const x = ((view.playheadSec - wA) / (wB - wA)) * W;
-        g.fillStyle = '#ff4d6d';
-        g.fillRect(x - 1, 0, 2.5, H);
+      view._staticDirty = false;
+    };
+
+    view.draw = () => {
+      resize();
+      const g = view.ctx2d, W = canvas.width, H = canvas.height;
+      // Static layer: sirf jab zaroori ho redraw karo, warna blit
+      if (view._staticDirty || !view._staticCanvas) view.drawStatic();
+      g.clearRect(0, 0, W, H);
+      if (view._staticCanvas) g.drawImage(view._staticCanvas, 0, 0);
+      // Dynamic layer: sirf playhead (2 ops, pehle 30k the!)
+      if (view.buffer && view.peaks.length) {
+        const { a: wA, b: wB } = view.window();
+        if (view.playheadSec >= 0 && view.playheadSec >= wA && view.playheadSec <= wB) {
+          const x = ((view.playheadSec - wA) / (wB - wA)) * W;
+          g.fillStyle = '#ff4d6d';
+          g.fillRect(x - 1, 0, 2.5, H);
+        }
       }
       view._dirty = false;
     };
 
-    view.invalidate = () => { view._dirty = true; };
+    view.invalidate = () => { view._dirty = true; view._staticDirty = true; };
 
     // click / tap -> seek
     canvas.addEventListener('pointerdown', (e) => {

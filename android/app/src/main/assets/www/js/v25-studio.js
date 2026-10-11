@@ -657,7 +657,7 @@ __rmRoot.RM = __rmRoot.RM || {};
     stopSrc();
     tp.playing = false;
     if (reset) tp.offset = 0;
-    if (tp.raf) { cancelAnimationFrame(tp.raf); tp.raf = 0; }
+    if (tp.raf) { clearTimeout(tp.raf); tp.raf = 0; }
     var pb = $('stu-play'); if (pb) pb.textContent = '▶';
     drawPlayhead();
   }
@@ -675,7 +675,10 @@ __rmRoot.RM = __rmRoot.RM || {};
     if (!tp.playing) return;
     drawPlayhead();
     if (playheadNow() >= st.current.duration - 0.03) { stopPlayback(true); return; }
-    tp.raf = requestAnimationFrame(tick);
+    // v36 ANTI-STUTTER: 60fps full-waveform redraw = 30k-48k canvas ops/sec =
+    // main-thread saturation = audio underruns on phone. 10fps (100ms) is
+    // plenty for a playhead — matches app.js:1384 editor pattern.
+    tp.raf = setTimeout(tick, 100);
   }
 
   function startAt(buf, offset) {
@@ -689,8 +692,8 @@ __rmRoot.RM = __rmRoot.RM || {};
     tp.src = src; tp.offset = off; tp.startCtx = ctx.currentTime; tp.playing = true;
     src.start(0, off);
     var pb = $('stu-play'); if (pb) pb.textContent = '⏸';
-    if (tp.raf) cancelAnimationFrame(tp.raf);
-    tp.raf = requestAnimationFrame(tick);
+    if (tp.raf) clearTimeout(tp.raf);
+    tp.raf = setTimeout(tick, 100);
   }
 
   function togglePlay() {

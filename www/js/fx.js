@@ -185,9 +185,11 @@ RM.fx = (function () {
     N.depth = G(0);
     N.lfo.connect(N.depth); N.depth.connect(N.pan.pan);
     N.lfo.start();
-    // space: post-pan reverb send (halki, 1.0s mono IR)
+    // space: post-pan reverb send (halki, 0.6s mono IR — v39: 1.0s se ghataaya,
+    // phone pe 3D/8D/360 me "thoda thoda atakta hai" fix ke liye; 40% CPU bachat,
+    // awaaz me farak na ke barabar)
     N.rvSend = G(0);
-    N.rv = ctx.createConvolver(); N.rv.buffer = buildIR(ctx, 1.0);
+    N.rv = ctx.createConvolver(); N.rv.buffer = buildIR(ctx, 0.6);
     N.rvWet = G(0);
     N.pan.connect(N.rvSend); N.rvSend.connect(N.rv); N.rv.connect(N.rvWet);
     // 16D width: halka modulated delay — mono-compat ke liye bahut subtle
@@ -207,7 +209,9 @@ RM.fx = (function () {
 
     N.output = G(1);
     N.s360.output.connect(N.output);
-    N.input.connect(N.s360.input);
+    // v50 FIX (Audio#2): HRTF ko construction pe connect MAT karo — 1200ms tak
+    // bekaar me CPU khata hai. Sirf jab 360 mode on ho tab connect hoga.
+    // N.input.connect(N.s360.input); — REMOVED, setS360Starved(false) karega jab chahiye
     N.input.connect(N.dry); N.dry.connect(N.output);
     N.input.connect(N.split);
     N.split.connect(N.sumL, 0); N.split.connect(N.sumR, 1);
@@ -224,7 +228,7 @@ RM.fx = (function () {
     // SPATIAL_BYPASS_DELAY_MS delayed + gen-guarded hai taaki gate glide
     // (tc 0.3) pehle output ko ~0 pe la sake — jaldi disconnect wet/dry
     // rebalance ko beech-glide me kaat ke click dega.
-    let s360Starved = false, s360Gen = 0;
+    let s360Starved = true, s360Gen = 0; // v50: true se start — construction pe connect nahi hai
     function setS360Starved(starved) {
       starved = !!starved;
       if (starved === s360Starved) return;
@@ -411,6 +415,20 @@ RM.fx = (function () {
     // audio +0.85 dB in Chrome, so the safety clipper below is the TRUE
     // ceiling: chain.output can never exceed 0 dBFS, even with outGain at max.
     N.comp = ctx.createDynamicsCompressor();
+    N.compIn = ctx.createGain();     // v36: summing node before comp (bypass ke liye)
+    N.compBypass = ctx.createGain(); // v36: true-bypass path (comp OFF pe)
+    // v52 FIX (Audio#1 — comp toggle click): DynamicsCompressor ke andar
+    // Chrome me exactly 6.00ms pure latency hai (measured 264 spl @44.1k,
+    // 288 spl @48k — quantum nahi, TIME-based). Purana code compOn toggle pe
+    // compIn->comp / compIn->compBypass edge HARD splice karta tha: do path
+    // ki latency 6ms alag hone se splice point pe -13dBFS tak ka jump
+    // (measured maxJump 0.2173) — saaf sunai dene wala CLICK. Fix: dono path
+    // apne fade gain se hamesha limiter me judte hain (compFadeA/compFadeB);
+    // toggle sirf gains ko ~8ms me crossfade karta hai — koi hard splice
+    // nahi, koi click nahi. comp ke input edges ab bhi OFF pe physically
+    // disconnect hote hain (v36 CPU win barkarar), lekin fade ke baad lazy.
+    N.compFadeA = G(0); // comp path -> limiter (ON pe 1)
+    N.compFadeB = G(1); // bypass path -> limiter (OFF pe 1)
     N.limiter = ctx.createDynamicsCompressor();
     N.limiter.threshold.value = -1.5; N.limiter.knee.value = 0;
     N.limiter.ratio.value = 20; N.limiter.attack.value = 0.002; N.limiter.release.value = 0.15;
@@ -440,18 +458,30 @@ RM.fx = (function () {
     N.eq10.forEach(b => { head.connect(b); head = b; });
     head.connect(N.filter);
     N.filter.connect(N.drive);
-    N.drive.connect(N.chDry); N.chDry.connect(N.comp);          // chorus dry
-    N.drive.connect(N.chDelay); N.chDelay.connect(N.chWet); N.chWet.connect(N.comp); // chorus voice
-    N.drive.connect(N.echoDelay);                                // echo send
+    N.drive.connect(N.chDry); N.chDry.connect(N.compIn);          // chorus dry
+    N.drive.connect(N.chDelay); N.chDelay.connect(N.chWet); N.chWet.connect(N.compIn); // chorus voice
+    // v50: echo send NOT connected at construction — echoOn(true) will connect it.
+    // (true-bypass: off pe 2s delay buffer idle rehta hai)
+    // N.drive.connect(N.echoDelay); — REMOVED, connected on demand
     N.echoDelay.connect(N.echoFB); N.echoFB.connect(N.echoDelay);// feedback loop
-    N.echoDelay.connect(N.echoWet); N.echoWet.connect(N.comp);   // echo return
-    // reverb send chain: drive -> rvSend -> rvHP ->[GATE]-> convolver -> rvWet -> comp.
+    N.echoDelay.connect(N.echoWet); N.echoWet.connect(N.compIn);   // echo return
+    // reverb send chain: drive -> rvSend -> rvHP ->[GATE]-> convolver -> rvWet -> compIn.
     // GATE (rvHP -> convolver) is connected ON DEMAND by set('reverbOn') —
     // the convolver (~79k taps @44.1k) must not convolve every sample while
     // reverb is OFF (pehle sirf wet gain 0 hota tha, convolver chalta rehta tha).
     N.drive.connect(N.rvSend); N.rvSend.connect(N.rvHP);
-    N.convolver.connect(N.rvWet); N.rvWet.connect(N.comp);      // reverb return
-    N.comp.connect(N.limiter);
+    N.convolver.connect(N.rvWet); N.rvWet.connect(N.compIn);      // reverb return
+    // v36 ANTI-STUTTER: comp true-bypass. N.comp (DynamicsCompressor) CPU-heavy
+    // hai — sirf threshold/ratio change karne se node chalta rehta hai. OFF pe
+    // physically disconnect, signal compBypass se seedha limiter me.
+    // v52: dono path fade gains (compFadeA/compFadeB) se limiter me — toggle
+    // crossfade karta hai (neeche 'compOn'), hard splice nahi.
+    N.compIn.connect(N.compBypass); N.compBypass.connect(N.compFadeB); N.compFadeB.connect(N.limiter);
+    N.compFadeA.connect(N.limiter);
+    // v52: comp ke edges (compIn->comp, comp->compFadeA) OFF pe disconnect
+    // rehte hain (v36 CPU win) — 'compOn' me on-demand connect hote hain.
+    let compBypassed = true; // matches compOn=false initial
+    let compGen = 0;         // v52: lazy-disconnect timer ka guard
     // NOTE: limiter ka SINGLE outgoing edge hamesha exactly ek jagah jata hai —
     // spatial on  -> limiter -> spatial.input ... spatial.output -> output
     // spatial off -> limiter -> output (direct). Dono ek saath jude to
@@ -517,7 +547,16 @@ RM.fx = (function () {
           case 'chorusOn': t(N.chWet.gain, v ? 0.5 : 0); break;
           case 'chorusRate': t(N.chLFO.frequency, clamp(v, 0.1, 8), 0.05); break;
           case 'chorusDepth': t(N.chLFOGain.gain, clamp(v, 0, 0.012), 0.05); break;
-          case 'echoOn': t(N.echoWet.gain, v ? 0.35 : 0); break;
+          case 'echoOn': {
+            t(N.echoWet.gain, v ? 0.35 : 0);
+            // v50 FIX (Audio#4): echo true-bypass — off pe drive se disconnect,
+            // taaki 2s delay buffer bekaar me process na ho.
+            try {
+              if (v) { N.drive.connect(N.echoDelay); }
+              else { N.drive.disconnect(N.echoDelay); }
+            } catch (e) {}
+            break;
+          }
           case 'echoTime': t(N.echoDelay.delayTime, clamp(v, 0.02, 1.8), 0.03); break;
           case 'echoFeedback': t(N.echoFB.gain, clamp(v, 0, 0.85)); break;
           case 'echoWet': t(N.echoWet.gain, clamp(v, 0, 0.8)); break;
@@ -542,9 +581,74 @@ RM.fx = (function () {
           }
           case 'reverbDecay': // scales wet + rebuilds IR with new length
             break;
-          case 'compOn':
-            t(N.comp.threshold, v ? -18 : 0); t(N.comp.ratio, v ? 4 : 1);
+          case 'compOn': {
+            const on = !!v;
+            // v52 FIX (Audio#1): hard splice -> crossfade. Purana code yahan
+            // compIn->comp / compIn->compBypass edge seedha kaat-ta/jodta tha;
+            // comp path me 6ms zyada latency hai (Chrome DynamicsCompressor
+            // quirk, measured) to splice pe -13dBFS click aata tha.
+            // v52b: cold-start transient. Nayi connected comp ki delay line
+            // khali hoti hai + detector zero se adapt hota hai — turant
+            // crossfade karne pe ~12ms pe intermittent jump aata tha (S6b).
+            // Isliye live toggle pe pehle 15ms WARMUP (comp judta hai, fade
+            // abhi 0; delay line bharti hai, detector settle hota hai), PHIR
+            // crossfade + threshold glide. Fresh chain (pre-render) pe seedha
+            // assign — kuch baj nahi raha, koi transient nahi.
+            const gen = ++compGen;
+            // Live automation: pehle future events cancel (current value hold
+            // rehta hai), phir naya glide — tez ON/OFF/ON deterministic rehta
+            // hai, koi overlapping glide nahi.
+            const glide = (param, value, startAt, tc) => {
+              try { param.cancelScheduledValues(ctx.currentTime); } catch (e) {}
+              param.setTargetAtTime(value, startAt, tc);
+            };
+            if (on && compBypassed) {
+              try { N.compIn.connect(N.comp); } catch (e) {}
+              try { N.comp.connect(N.compFadeA); } catch (e) {}
+              compBypassed = false;
+              if (fresh) {
+                t(N.compFadeA.gain, 1); t(N.compFadeB.gain, 0);
+                t(N.comp.threshold, -18); t(N.comp.ratio, 4);
+              } else {
+                const w0 = ctx.currentTime + 0.015; // warmup
+                glide(N.compFadeA.gain, 1, w0, 0.008);
+                glide(N.compFadeB.gain, 0, w0, 0.008);
+                glide(N.comp.threshold, -18, w0, 0.015);
+                glide(N.comp.ratio, 4, w0, 0.015);
+              }
+            } else if (!on && !compBypassed) {
+              compBypassed = true;
+              if (fresh) {
+                t(N.compFadeB.gain, 1); t(N.compFadeA.gain, 0);
+                t(N.comp.threshold, 0); t(N.comp.ratio, 1);
+                try { N.compIn.disconnect(N.comp); } catch (e) {}
+                try { N.comp.disconnect(N.compFadeA); } catch (e) {}
+              } else {
+                glide(N.compFadeB.gain, 1, ctx.currentTime, 0.008);
+                glide(N.compFadeA.gain, 0, ctx.currentTime, 0.008);
+                glide(N.comp.threshold, 0, ctx.currentTime, 0.015);
+                glide(N.comp.ratio, 1, ctx.currentTime, 0.015);
+                // Lazy disconnect: fade (~40ms render-time) ke baad comp ke
+                // edges hatao taaki wo CPU na khaye (v36 win). Disconnect se
+                // pehle VERIFY: gen fresh ho, path silent ho (fadeA ~0) —
+                // galat time pe disconnect = click. Verify fail -> edges jude
+                // rehne do; dispose() safai kar dega. Thoda CPU, zero risk.
+                setTimeout(() => {
+                  if (gen !== compGen || compBypassed === false) return;
+                  try {
+                    if (N.compFadeA.gain.value < 1e-6) {
+                      try { N.compIn.disconnect(N.comp); } catch (e2) {}
+                      try { N.comp.disconnect(N.compFadeA); } catch (e2) {}
+                    }
+                  } catch (e2) {}
+                }, 1000);
+              }
+            } else {
+              // already in target state: sirf params glide karo
+              t(N.comp.threshold, on ? -18 : 0); t(N.comp.ratio, on ? 4 : 1);
+            }
             break;
+          }
           case 'compThreshold': t(N.comp.threshold, clamp(v, -40, 0)); break;
           case 'compRatio': t(N.comp.ratio, clamp(v, 1, 20)); break;
           case 'compAttack': t(N.comp.attack, clamp(v, 0.001, 0.5), 0.05); break;
@@ -614,6 +718,7 @@ RM.fx = (function () {
       getBypass() { return { reverb: reverbBypassed, spatial: spatialBypassed }; },
       dispose() {
         spatialGen++; // pending off->bypass timer dead chain ko dobara wire na kare
+        compGen++; // v52: pending comp lazy-disconnect timer bhi dead
         try { N.spatial.dispose(); } catch (e) {} // pehle: iske LFOs stop hon
         try { N.chLFO.stop(); } catch (e) {}
         Object.keys(N).forEach(k => {

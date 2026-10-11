@@ -84,7 +84,7 @@ body.v25 .v25-tab-hero .v25-tab-ic {
 }
 body.v25 .v25-tab-hero.active { color: #00e676; }
 /* keep screens clear of the nav */
-body.v25 #screens { padding-bottom: 78px; }
+body.v25 #screens { padding-bottom: 92px; } /* v50 UI#4: hero circle (-22px) ke liye 78→92 */
 body.v25 { padding-bottom: 0; }
 
 /* ======================= home dashboard ======================= */
@@ -215,4 +215,97 @@ body.v25:not(.light) .btn.primary {
 }
 body.v25:not(.light) h1, body.v25:not(.light) h2, body.v25:not(.light) h3 {
   letter-spacing: 0.2px;
+}
+
+/* v33: song cards (Create screen) — dedicated layout.
+   Root cause of "tap pe kuch nahi": .v25-card/.v25-name CSS was written for
+   menu-style cards (display:flex row, 34px hero text). Song cards need their
+   own block layout, otherwise the button bar gets squeezed invisible. */
+body.v25 #screen-v25create .v25-card {
+  display: block;
+  padding: 16px 14px;
+  cursor: default;
+  text-align: left;
+}
+body.v25 #screen-v25create .v25-card:active { transform: none; }
+body.v25 #screen-v25create .v25-card-top .v25-name {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  margin-top: 0;
+}
+body.v25 #screen-v25create .v25-meta-row {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 4px;
+  align-items: center;
+}
+body.v25 #screen-v25create canvas.v25-wave {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 52px;
+}
+body.v25 #screen-v25create .v25-info { flex: 0 0 auto; }
+body.v25 #screen-v25create .v25-card-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+body.v25 #screen-v25create .v25-card-bar .btn.tiny {
+  flex: 1 1 30%;
+  min-height: 46px;
+  font-size: 14px;
+  font-weight: 700;
+  border-radius: 12px;
+}
+
+/* v48 FIX: "Create Mashup" button niche nav ke peeche cut raha tha.
+   Ab ye sticky hai — scroll karne pe bhi hamesha dikhega aur tap hoga. */
+/* v50 UI#3 FIX: z-index 65 (sep-badge z-60 se upar) taaki badge button ko na dhake */
+body.v25 #v25-create {
+  position: sticky;
+  bottom: 84px;
+  z-index: 65;
+  margin-top: 12px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
+}
+body.v25 #v25-hint {
+  margin-bottom: 8px;
+}
+
+/* v49 FIX: Result div prominent banao — user ko dikhe "mashup kaha gaya" */
+body.v25 #v25-result {
+  margin-top: 16px;
+  margin-bottom: 100px; /* sticky button ke liye jagah */
+  padding: 16px;
+  border: 2px solid #00e676;
+  border-radius: 16px;
+  background: rgba(0, 230, 118, 0.08);
+}
+body.v25 #v25-result .v25-result-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+body.v25 #v25-result .v25-result-row .btn {
+  flex: 1;
+  min-height: 52px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* v50 UI FIXES (audit) */
+/* BUG1: Lambe filenames card se bahar overflow karte the */
+body.v25 #screen-v25create .v25-card-top .v25-name,
+body.v25 #screen-v25create .v25-card-top .muted.small {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* BUG2: Disabled songs ka visual farak */
+body.v25 #screen-v25create .v25-card.off {
+  opacity: 0.55;
+}
+body.v25 #screen-v25create .v25-card.off .v25-name {
+  text-decoration: line-through;
 }

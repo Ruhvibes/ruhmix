@@ -316,6 +316,10 @@ RM.v25exportui = (function () {
       '<div data-x="qc-skips" style="margin-top:2px;"></div>' +
       '<button data-x="qc-fix" style="display:none;margin-top:8px;width:100%;padding:10px;border-radius:10px;border:none;background:#f5a623;color:#1a1206;font-size:14px;font-weight:800;cursor:pointer;">🔧 Fix Issues</button>' +
       '<div data-x="qc-fixes" style="margin-top:6px;font-size:13px;color:#b8e6c3;"></div>' +
+      // v52 FIX: "Fix Issues" ke baad bhi warnings rahe to user atak jata hai!
+      // Manual warnings (key clash) kabhi auto-fix nahi honge. "Export Anyway"
+      // button do taaki user aage badh sake — warnings advisory hain, block nahi.
+      '<button data-x="qc-skip" style="display:none;margin-top:8px;width:100%;padding:10px;border-radius:10px;border:1px solid #4a5568;background:transparent;color:#a0aec0;font-size:14px;font-weight:700;cursor:pointer;">Continue Anyway →</button>' +
       '</div>';
   }
 
@@ -343,6 +347,14 @@ RM.v25exportui = (function () {
         '</div>';
     }).join('');
     fixBtn.style.display = issues.some(function (x) { return x.autoFixable; }) ? '' : 'none';
+    // v52: "Continue Anyway" button — manual warnings (key clash) kabhi fix nahi
+    // honge, user ko atakna nahi chahiye. Warnings advisory hain, block nahi.
+    var skipBtn = overlay.querySelector('[data-x="qc-skip"]');
+    if (skipBtn) {
+      // Show if there are any non-auto-fixable issues, or if fix was already tried
+      var hasManual = issues.some(function (x) { return !x.autoFixable; });
+      skipBtn.style.display = (hasManual || overlay._qcFixTried) ? '' : 'none';
+    }
   }
 
   // v26: skipped checks are shown honestly ("skipped: <reason>") — never
@@ -396,7 +408,13 @@ RM.v25exportui = (function () {
   }
 
   function fixQcIssues() {
-    if (!overlay || !current || !current.buffer || !current.qc) return;
+    // v52: mark fix tried — taaki "Continue Anyway" dikhe
+    try { if (overlay) overlay._qcFixTried = true; } catch (e) {}
+    try { toast('Fixing issues...'); } catch (e2) {}
+    if (!overlay || !current || !current.buffer || !current.qc) {
+      try { toast('Cannot fix: QC not ready'); } catch (e3) {}
+      return;
+    }
     var box = overlay.querySelector('[data-x="qc-status"]');
     var fixBtn = overlay.querySelector('[data-x="qc-fix"]');
     var fixesBox = overlay.querySelector('[data-x="qc-fixes"]');
@@ -643,6 +661,13 @@ RM.v25exportui = (function () {
     });
     card.querySelector('[data-x="qc-rerun"]').addEventListener('click', runQc);
     card.querySelector('[data-x="qc-fix"]').addEventListener('click', fixQcIssues);
+    // v52: "Continue Anyway" — QC overlay band karo, export buttons dikhao.
+    // Warnings advisory hain, block nahi karte.
+    card.querySelector('[data-x="qc-skip"]').addEventListener('click', function () {
+      var qcBox = card.querySelector('[data-x="qc-box"]');
+      if (qcBox) qcBox.style.display = 'none';
+      try { toast('Warnings noted — choose export format'); } catch (e) {}
+    });
 
     // v26 §25: mandatory per-session checkbox — export buttons stay
     // disabled until it is ticked.

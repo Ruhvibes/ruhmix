@@ -447,7 +447,16 @@ public class MainActivity extends ComponentActivity {
             AlertDialog exitDialog = new AlertDialog.Builder(this)
                     .setTitle("Exit RuhMix?")
                     .setMessage("Are you sure you want to exit the app?")
-                    .setPositiveButton("Exit", (d, w) -> MainActivity.super.onBackPressed())
+                    .setPositiveButton("Exit", (d, w) -> {
+                        // v52: explicit user-confirmed exit -> mark a clean exit in JS so
+                        // crash-recovery does NOT nag on next launch. (The old blanket
+                        // pagehide->markCleanExit was removed: it also fired on swipe-away
+                        // / reload, silently dropping the recovery offer for unsaved work.
+                        // Safe default now: dirty autosave => recovery IS offered.)
+                        // 200ms lets the evaluateJavascript land before the WebView dies.
+                        try { webView.evaluateJavascript("try{window.RM&&RM.proj&&RM.proj.markCleanExit()}catch(e){}", null); } catch (Exception ignored) {}
+                        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> MainActivity.super.onBackPressed(), 200);
+                    })
                     .setNegativeButton("Cancel", null)
                     .create();
             exitDialog.show();
@@ -642,8 +651,12 @@ public class MainActivity extends ComponentActivity {
         });
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        // v46 FIX: createChooser HATAO! Chooser me "Files" app dikhta hai — usme
+        // gaana tap karne pe EXTERNAL music player khul jata hai (ACTION_VIEW),
+        // RuhMix ko URI wapas nahi milta! Direct ACTION_OPEN_DOCUMENT se system
+        // document picker khulta hai jo sahi se URI return karta hai.
         try {
-            audioPickerLauncher.launch(Intent.createChooser(intent, "Audio chunein"));
+            audioPickerLauncher.launch(intent);
         } catch (Exception e) {
             callJs("if(window.onAudioPicked){window.onAudioPicked({ok:[],failed:[]})}");
         }
